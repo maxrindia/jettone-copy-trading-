@@ -1,0 +1,699 @@
+import uuid
+import logging
+from decimal import Decimal
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core.config import settings
+from app.core.crypto import decrypt_secret
+from app.core.database import get_db
+from app.core.redis import get_redis
+from app.models.strategies import STRATEGY_ROLE_CHILD, GroupStrategy, StrategyMember
+from app.models.accounts import Account
+from app.models.trades import CopyTrade, CopyTradeStatus, Order, OrderSide as DBOrderSide, OrderSource, OrderStatus
+from app.services import strategy_membership as membership
+from app.services import strategy_switch
+from app.services.runtime import hooks as runtime_hooks
+from app.services.alice_blue.client import AliceBlueClient
+from app.services.alice_blue.types import OrderResultCategory, OrderSide
+from app.schemas.strategies import (
+    MasterSwitchRequest,
+    MemberAdd,
+    MemberResponse,
+    MemberUpdate,
+    StrategyCreate,
+    StrategyResponse,
+    StrategyUpdate,
+)
+from app.services.copy_engine.pipeline import CopyEnginePipeline
+from app.services.copy_engine.validator import EventValidator
+from app.services.monitoring.notifier import emit_system_event
+from app.services.reliability.stop_provider import build_stop_provider
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/strategies", tags=["Group Strategies"])
+
+
+def _load_opts():
+    """Reusable selectinload options for strategies."""
+    return [
+        selectinload(GroupStrategy.members).selectinload(StrategyMember.account),
+        selectinload(GroupStrategy.master_account),
+    ]
+
+
+def _to_response(strategy: GroupStrategy) -> StrategyResponse:
+    """Build StrategyResponse including computed member_count."""
+    data = StrategyResponse.model_validate(strategy)
+    data.member_count = len(strategy.members)
+    return data
+
+
+def _conflict(exc: "membership.MembershipConflict") -> HTTPException:
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.message)
+
+
+def get_switch_client_provider():
+    """Broker clients for Master-switch verification: the engine's own
+    registered clients (same session and Static IP proxy the engine uses).
+    An account without one cannot be verified and blocks the switch."""
+    from app.services.alice_blue.manager import account_manager
+
+    return account_manager.get_client
+
+
+
+# ─── Strategy CRUD ────────────────────────────────────────────────────────────
+
+@router.get("", response_model=List[StrategyResponse])
+async def list_strategies(db: AsyncSession = Depends(get_db)):
+    """List all active group strategies."""
+    result = await db.execute(
+        select(GroupStrategy)
+        .where(GroupStrategy.deleted_at.is_(None))
+        .options(*_load_opts())
+        .order_by(GroupStrategy.created_at.desc())
+    )
+    strategies = result.scalars().all()
+    return [_to_response(s) for s in strategies]
+
+
+@router.post("", response_model=StrategyResponse, status_code=status.HTTP_201_CREATED)
+async def create_strategy(payload: StrategyCreate, db: AsyncSession = Depends(get_db)):
+    """Create a new group strategy (without a Master).
+
+    The Master is assigned afterwards with POST /strategies/{id}/switch-master,
+    so a first Master gets the same preflight (working orders, open
+    positions, broker verification) and the same activation snapshot as any
+    later change - never a plain field write."""
+    if payload.master_account_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Create the strategy first, then assign its Master with POST /strategies/{id}/switch-master.",
+        )
+
+    strategy = GroupStrategy(
+        name=payload.name,
+        description=payload.description,
+        visibility=payload.visibility,
+        allocated_amount=payload.allocated_amount,
+        max_subscribers=payload.max_subscribers,
+    )
+    db.add(strategy)
+    await db.commit()
+
+    result = await db.execute(
+        select(GroupStrategy)
+        .where(GroupStrategy.id == strategy.id)
+        .options(*_load_opts())
+    )
+    return _to_response(result.scalar_one())
+
+
+@router.get("/{strategy_id}", response_model=StrategyResponse)
+async def get_strategy(strategy_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Get a single strategy by ID."""
+    result = await db.execute(
+        select(GroupStrategy)
+        .where(GroupStrategy.id == strategy_id, GroupStrategy.deleted_at.is_(None))
+        .options(*_load_opts())
+    )
+    strategy = result.scalar_one_or_none()
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return _to_response(strategy)
+
+
+@router.put("/{strategy_id}", response_model=StrategyResponse)
+async def update_strategy(
+    strategy_id: uuid.UUID,
+    payload: StrategyUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update strategy fields (name, master account, toggles, etc.)."""
+    result = await db.execute(
+        select(GroupStrategy)
+        .where(GroupStrategy.id == strategy_id, GroupStrategy.deleted_at.is_(None))
+        .options(*_load_opts())
+    )
+    strategy = result.scalar_one_or_none()
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    changes = payload.model_dump(exclude_unset=True)
+    if "master_account_id" in changes:
+        if changes["master_account_id"] == strategy.master_account_id:
+            changes.pop("master_account_id")
+        else:
+            # A Master change must go through the verified switch flow
+            # (preflight blockers, switch locks, monitor sync) - never a
+            # plain field write.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Change a strategy's Master with POST /strategies/{id}/switch-master.",
+            )
+
+    for field, value in changes.items():
+        setattr(strategy, field, value)
+
+    await db.commit()
+
+    result = await db.execute(
+        select(GroupStrategy)
+        .where(GroupStrategy.id == strategy_id)
+        .options(*_load_opts())
+    )
+    return _to_response(result.scalar_one())
+
+
+# --- Master switch ------------------------------------------------------------
+
+@router.get("/{strategy_id}/switch-master/preflight")
+async def preflight_master_switch(
+    strategy_id: uuid.UUID,
+    new_master_account_id: uuid.UUID,
+    old_master_action: str = "REMOVE",
+    db: AsyncSession = Depends(get_db),
+    client_provider=Depends(get_switch_client_provider),
+):
+    """Read-only: whether the Master can be switched right now, and every
+    specific reason it cannot. Makes broker READ calls (order book,
+    positions) only; never places, modifies or cancels anything."""
+    try:
+        result = await strategy_switch.run_preflight(
+            db, strategy_id, new_master_account_id, old_master_action.upper(), client_provider
+        )
+    except strategy_switch.SwitchValidationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    return result.to_dict()
+
+
+@router.post("/{strategy_id}/switch-master")
+async def switch_master(
+    strategy_id: uuid.UUID,
+    payload: MasterSwitchRequest,
+    db: AsyncSession = Depends(get_db),
+    client_provider=Depends(get_switch_client_provider),
+):
+    """Switches the strategy's Master after re-running every preflight check
+    under the switch locks. Blocked switches return 409 and change nothing;
+    no order is ever cancelled and no position squared off."""
+    try:
+        result = await strategy_switch.execute_switch(
+            db,
+            strategy_id,
+            payload.new_master_account_id,
+            payload.old_master_action,
+            client_provider,
+            after_commit=lambda preflight: runtime_hooks.sync_master_monitors(
+                activations=preflight.activations()
+            ),
+        )
+    except strategy_switch.SwitchValidationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    except strategy_switch.SwitchBlocked as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+
+    refreshed = (
+        await db.execute(select(GroupStrategy).where(GroupStrategy.id == strategy_id).options(*_load_opts()))
+    ).scalar_one()
+    return {
+        "switched": True,
+        "strategy": _to_response(refreshed).model_dump(mode="json"),
+        "new_master_account_id": str(payload.new_master_account_id),
+        "old_master_action": payload.old_master_action,
+        # False until the new Master's first (baseline) order-book poll
+        # completes. Orders it places before then are recorded but never
+        # copied - that poll is the activation boundary.
+        "monitor_ready": runtime_hooks.is_master_monitor_ready(str(payload.new_master_account_id)),
+        "preflight": result.to_dict(),
+    }
+
+
+@router.delete("/{strategy_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_strategy(strategy_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Soft-delete a strategy."""
+    from datetime import datetime, timezone
+    result = await db.execute(
+        select(GroupStrategy)
+        .where(GroupStrategy.id == strategy_id, GroupStrategy.deleted_at.is_(None))
+    )
+    strategy = result.scalar_one_or_none()
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    strategy.deleted_at = datetime.now(timezone.utc)
+    # Releases every account of this strategy so it can join another one.
+    await membership.release_strategy(db, strategy.id)
+    await db.commit()
+    await runtime_hooks.sync_master_monitors()
+
+
+# ─── Strategy Members (Child Accounts) ───────────────────────────────────────
+
+@router.get("/{strategy_id}/members", response_model=List[MemberResponse])
+async def list_members(strategy_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """List all child accounts of a strategy."""
+    result = await db.execute(
+        select(StrategyMember)
+        .where(StrategyMember.strategy_id == strategy_id)
+        .options(selectinload(StrategyMember.account))
+        .order_by(StrategyMember.created_at.asc())
+    )
+    return result.scalars().all()
+
+
+@router.post("/{strategy_id}/members", response_model=MemberResponse, status_code=status.HTTP_201_CREATED)
+async def add_member(
+    strategy_id: uuid.UUID,
+    payload: MemberAdd,
+    db: AsyncSession = Depends(get_db),
+):
+    """Add a child account to a strategy."""
+    # Verify strategy exists
+    strat_result = await db.execute(
+        select(GroupStrategy).where(GroupStrategy.id == strategy_id, GroupStrategy.deleted_at.is_(None))
+    )
+    if not strat_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    # Verify account exists
+    acc_result = await db.execute(
+        select(Account).where(Account.id == payload.account_id, Account.deleted_at.is_(None))
+    )
+    if not acc_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    # One strategy per account, in either role (also covers adding the
+    # strategy's own Master as its Child).
+    try:
+        await membership.assert_account_available(db, payload.account_id)
+    except membership.MembershipConflict as exc:
+        raise _conflict(exc)
+
+    member = StrategyMember(
+        strategy_id=strategy_id,
+        account_id=payload.account_id,
+        multiplier=payload.multiplier,
+        trading_enabled=payload.trading_enabled,
+    )
+    db.add(member)
+    await membership.assign(db, strategy_id, payload.account_id, STRATEGY_ROLE_CHILD)
+    # Every Child gets a CopySetting so the RiskEngine gate runs for it, and
+    # its copy_enabled follows the Trading toggle chosen here (one switch).
+    await membership.sync_copy_enabled(db, payload.account_id, payload.trading_enabled)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="This account is already assigned to a strategy.")
+
+    result = await db.execute(
+        select(StrategyMember)
+        .where(StrategyMember.id == member.id)
+        .options(selectinload(StrategyMember.account))
+    )
+    return result.scalar_one()
+
+
+@router.put("/{strategy_id}/members/{account_id}", response_model=MemberResponse)
+async def update_member(
+    strategy_id: uuid.UUID,
+    account_id: uuid.UUID,
+    payload: MemberUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a child account's multiplier or trading_enabled flag."""
+    result = await db.execute(
+        select(StrategyMember)
+        .where(
+            StrategyMember.strategy_id == strategy_id,
+            StrategyMember.account_id == account_id,
+        )
+        .options(selectinload(StrategyMember.account))
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found in this strategy")
+
+    changes = payload.model_dump(exclude_unset=True)
+    for field, value in changes.items():
+        setattr(member, field, value)
+    if "trading_enabled" in changes and changes["trading_enabled"] is not None:
+        # The Trading toggle is the single on/off for copying to this Child.
+        await membership.sync_copy_enabled(db, account_id, changes["trading_enabled"])
+
+    await db.commit()
+    await db.refresh(member)
+    return member
+
+
+@router.delete("/{strategy_id}/members/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_member(
+    strategy_id: uuid.UUID,
+    account_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove a child account from a strategy."""
+    result = await db.execute(
+        select(StrategyMember).where(
+            StrategyMember.strategy_id == strategy_id,
+            StrategyMember.account_id == account_id,
+        )
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found in this strategy")
+
+    # Removing a Child with a copied order still working would leave that
+    # order's later modifications resolved without this Child's strategy
+    # settings. Block until it finishes; never cancel anything.
+    open_children = (
+        await db.execute(
+            select(Order.id).where(
+                Order.account_id == account_id,
+                Order.source == OrderSource.SYSTEM,
+                Order.status.in_([OrderStatus.OPEN, OrderStatus.PARTIAL, OrderStatus.PENDING]),
+            )
+        )
+    ).all()
+    in_flight = (
+        await db.execute(
+            select(CopyTrade.id).where(
+                CopyTrade.follower_account_id == account_id,
+                CopyTrade.status.in_([CopyTradeStatus.PENDING, CopyTradeStatus.SUBMITTED]),
+            )
+        )
+    ).all()
+    if open_children or in_flight:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"This Child still has {len(open_children)} copied order(s) working and "
+                f"{len(in_flight)} copy placement(s) in progress. Wait for them to finish "
+                "before removing it."
+            ),
+        )
+
+    await db.delete(member)
+    await membership.release(db, account_id)
+    await db.commit()
+
+
+# ─── Member Positions & Square-Off ──────────────────────────────────────────
+
+class SquareOffRequest(BaseModel):
+    symbol: str = Field(min_length=1)
+    exchange: str = "NSE"
+    quantity: int = Field(gt=0)
+    side: str = Field(default="BUY", description="Current position side ('BUY' or 'SELL')")
+    product_type: str = "INTRADAY"
+
+
+async def _load_member_client(
+    strategy_id: uuid.UUID,
+    account_id: uuid.UUID,
+    db: AsyncSession,
+    redis,
+) -> tuple[GroupStrategy, StrategyMember, Account, AliceBlueClient]:
+    # 1. Verify strategy exists
+    strat_res = await db.execute(
+        select(GroupStrategy).where(GroupStrategy.id == strategy_id, GroupStrategy.deleted_at.is_(None))
+    )
+    strategy = strat_res.scalar_one_or_none()
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    # 2. Verify account is a valid member of this strategy
+    mem_res = await db.execute(
+        select(StrategyMember)
+        .where(
+            StrategyMember.strategy_id == strategy_id,
+            StrategyMember.account_id == account_id,
+        )
+        .options(selectinload(StrategyMember.account).selectinload(Account.api_credential))
+    )
+    member = mem_res.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail="Child account is not a member of this strategy")
+
+    account = member.account
+    if not account or account.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="Child account not found")
+
+    if not account.api_credential:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Account '{account.display_name}' ({account.alice_user_id}) has no API credentials.",
+        )
+
+    client = AliceBlueClient(
+        account_id=str(account.id),
+        user_id=account.alice_user_id,
+        api_secret=decrypt_secret(account.api_credential.encrypted_api_secret),
+        redis=redis,
+    )
+    return strategy, member, account, client
+
+
+@router.get("/{strategy_id}/members/{account_id}/positions")
+async def get_child_member_positions(
+    strategy_id: uuid.UUID,
+    account_id: uuid.UUID,
+    include_closed: bool = False,
+    db: AsyncSession = Depends(get_db),
+    redis = Depends(get_redis),
+):
+    """
+    Fetches live position book for a specific child account in a group strategy.
+    """
+    strategy, member, account, client = await _load_member_client(strategy_id, account_id, db, redis)
+
+    positions = await client.get_positions_detail(include_closed=include_closed)
+    
+    # Fetch real-time orders book from broker
+    orders = await client.get_order_book()
+    orders_list = [
+        {
+            "order_id": o.broker_order_id,
+            "symbol": o.symbol,
+            "exchange": o.exchange,
+            "side": o.side.value if hasattr(o.side, "value") else str(o.side),
+            "quantity": o.quantity,
+            "price": float(o.price) if o.price else 0.0,
+            "average_price": float(o.average_price) if o.average_price else 0.0,
+            "status": o.status,
+            "product_type": o.product_type.value if hasattr(o.product_type, "value") else str(o.product_type),
+            "order_type": o.order_type.value if hasattr(o.order_type, "value") else str(o.order_type),
+            "timestamp": o.timestamp.isoformat() if o.timestamp else None,
+            "rejection_reason": o.rejection_reason,
+        }
+        for o in orders
+    ]
+
+    return {
+        "strategy_id": str(strategy.id),
+        "strategy_name": strategy.name,
+        "account": {
+            "id": str(account.id),
+            "display_name": account.display_name,
+            "alice_user_id": account.alice_user_id,
+            "account_type": account.account_type.value if hasattr(account.account_type, "value") else str(account.account_type),
+            "is_active": account.is_active,
+            "session_valid": account.session_valid,
+            "is_emergency_stopped": account.is_emergency_stopped,
+            "multiplier": float(member.multiplier),
+            "trading_enabled": member.trading_enabled,
+        },
+        "positions": positions,
+        "positions_count": len(positions),
+        "orders": orders_list,
+        "orders_count": len(orders_list),
+    }
+
+
+@router.post("/{strategy_id}/members/{account_id}/square-off")
+async def square_off_child_position(
+    strategy_id: uuid.UUID,
+    account_id: uuid.UUID,
+    payload: SquareOffRequest,
+    db: AsyncSession = Depends(get_db),
+    redis = Depends(get_redis),
+):
+    """
+    Squares off an open position for a specific child account.
+    """
+    strategy, member, account, client = await _load_member_client(strategy_id, account_id, db, redis)
+
+    # Trading Safety Gates
+    if not account.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Account '{account.display_name}' is disabled for trading.",
+        )
+    if account.is_emergency_stopped:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Account '{account.display_name}' is currently in Emergency Stop mode.",
+        )
+    if not member.trading_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Trading is disabled for this child account in strategy '{strategy.name}'.",
+        )
+
+    pipeline = CopyEnginePipeline(
+        validator=EventValidator(redis=redis),
+        stop_provider=build_stop_provider(redis, account_ids=None),
+    )
+
+    # Resolve the actual broker-facing side/quantity/client_order_id up
+    # front (pure computation, no network call) so the pre-write below and
+    # the actual broker submission share the exact same identity, and so
+    # this endpoint never re-derives the BUY/SELL flip independently of
+    # AliceBlueClient's own logic.
+    _req, target_side, target_qty = client._resolve_square_off_order(
+        symbol=payload.symbol,
+        exchange=payload.exchange,
+        quantity=payload.quantity,
+        side=payload.side,
+        product=payload.product_type,
+    )
+    client_order_id = _req.client_order_id
+    db_side = DBOrderSide.BUY if target_side == OrderSide.BUY else DBOrderSide.SELL
+
+    # Pre-write PENDING before contacting the broker (mirrors broker.py's
+    # manual master-order pattern) - source=SYSTEM so ReconciliationEngine.
+    # compute_expected_positions (which only reads SYSTEM-sourced Order rows
+    # for a follower) picks this up; master_broker_order_id stays NULL,
+    # there is no master order behind a manual square-off. No CopyTrade
+    # write - this isn't a copy-replication event.
+    if target_qty > 0:
+        await pipeline.save_or_update_order(
+            internal_order_id=client_order_id,
+            broker_order_id=None,
+            account_id=account.id,
+            source=OrderSource.SYSTEM,
+            exchange=payload.exchange.upper(),
+            symbol=payload.symbol.upper(),
+            side=db_side,
+            order_type="MARKET",
+            product_type=payload.product_type,
+            quantity=target_qty,
+            filled_quantity=0,
+            pending_quantity=target_qty,
+            price=Decimal("0"),
+            status=OrderStatus.PENDING,
+            master_broker_order_id=None,
+        )
+
+    result, target_side, target_qty = await client.square_off_position(
+        symbol=payload.symbol,
+        exchange=payload.exchange,
+        quantity=payload.quantity,
+        side=payload.side,
+        product=payload.product_type,
+        client_order_id=client_order_id,
+    )
+
+    if result.category != OrderResultCategory.SUCCESS:
+        if target_qty > 0:
+            try:
+                await pipeline.save_or_update_order(
+                    internal_order_id=client_order_id,
+                    broker_order_id=result.broker_order_id,
+                    account_id=account.id,
+                    source=OrderSource.SYSTEM,
+                    exchange=payload.exchange.upper(),
+                    symbol=payload.symbol.upper(),
+                    side=db_side,
+                    order_type="MARKET",
+                    product_type=payload.product_type,
+                    quantity=target_qty,
+                    filled_quantity=0,
+                    pending_quantity=0,
+                    price=Decimal("0"),
+                    status=OrderStatus.REJECTED,
+                    broker_status="REJECTED",
+                    rejection_reason=result.message,
+                    master_broker_order_id=None,
+                )
+            except Exception as exc:
+                logger.error(
+                    f"[SquareOff] Failed to persist REJECTED square-off order {client_order_id} "
+                    f"for account {account.id}: {exc}",
+                    exc_info=True,
+                )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Square off rejected: {result.message}",
+        )
+
+    # Broker SUCCESS from here on - a real order has been placed. Any
+    # failure below must never be reported back to the caller as a failed
+    # square-off; the broker action already happened.
+    try:
+        await pipeline.save_or_update_order(
+            internal_order_id=client_order_id,
+            broker_order_id=result.broker_order_id,
+            account_id=account.id,
+            source=OrderSource.SYSTEM,
+            exchange=payload.exchange.upper(),
+            symbol=payload.symbol.upper(),
+            side=db_side,
+            order_type="MARKET",
+            product_type=payload.product_type,
+            quantity=target_qty,
+            filled_quantity=target_qty,
+            pending_quantity=0,
+            price=Decimal("0"),
+            average_price=Decimal("0"),
+            status=OrderStatus.COMPLETE,
+            broker_status="COMPLETE",
+            master_broker_order_id=None,
+        )
+    except Exception as exc:
+        logger.critical(
+            f"[SquareOff] Broker square-off SUCCEEDED (broker_order_id={result.broker_order_id}, "
+            f"client_order_id={client_order_id}) but DB persistence failed for account {account.id}: {exc}",
+            exc_info=True,
+        )
+        try:
+            await emit_system_event(
+                db,
+                event_type="SQUARE_OFF_PERSISTENCE_FAILED",
+                severity="CRITICAL",
+                message=(
+                    f"Square-off broker order {result.broker_order_id} for account {account.id} "
+                    "succeeded but could not be persisted to the Order table. Manual verification required."
+                ),
+                account_id=account.id,
+                metadata_payload={
+                    "account_id": str(account.id),
+                    "broker_order_id": result.broker_order_id,
+                    "client_order_id": client_order_id,
+                    "symbol": payload.symbol.upper(),
+                    "quantity": target_qty,
+                    "side": db_side.value,
+                },
+            )
+        except Exception as event_exc:
+            logger.critical(
+                f"[SquareOff] Failed to emit SQUARE_OFF_PERSISTENCE_FAILED SystemEvent: {event_exc}",
+                exc_info=True,
+            )
+
+    return {
+        "status": "success",
+        "message": f"Square off order submitted for {payload.symbol}",
+        "broker_order_id": result.broker_order_id,
+        "client_order_id": result.client_order_id,
+    }
+

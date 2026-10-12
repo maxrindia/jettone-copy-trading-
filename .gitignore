@@ -1,0 +1,56 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Testing
+coverage/
+.nyc_output/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Next.js
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/dist/
+
+# Python virtual environment
+.venv/
+env/
+venv/
+ENV/
+
+# Environment files & Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+nginx/certs/*.pem
+nginx/certs/*.key
+nginx/certs/*.crt
+
+# Docker
+postgres_data/
+redis_data/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+
+# Local-only tooling and artifacts (never committed)
+.agents/
+opencode.json
+skills-lock.json
+*.tsbuildinfo
+cookies.txt
+.env.bak*
+*.bak
+!.env.example
+frontend/public/design-reference/

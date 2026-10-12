@@ -1,0 +1,145 @@
+import os
+
+from cryptography.fernet import Fernet as TestFernet
+
+os.environ.setdefault("MASTER_CAPITAL", "500000")
+os.environ.setdefault("ALICE_BLUE_ENCRYPTION_KEY", TestFernet.generate_key().decode())
+os.environ.setdefault("INTERNAL_API_TOKEN", "test-internal-token")
+
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+
+import pytest
+import pytest_asyncio
+import uuid
+from unittest.mock import AsyncMock
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+
+from app.models.base import Base
+from app.models.accounts import Account, AccountType, CopySetting, QuantityMode
+
+test_engine = create_async_engine(
+    TEST_DATABASE_URL,
+    echo=False,
+    pool_pre_ping=True,
+)
+
+TestingSessionLocal = async_sessionmaker(
+    bind=test_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False,
+)
+
+
+@pytest_asyncio.fixture(scope="session", autouse=True)
+async def _dispose_test_engine():
+    """
+    Without this, leftover pooled aiosqlite/asyncpg connection worker threads
+    keep the interpreter alive after the session ends and pytest hangs in
+    threading._shutdown.
+    """
+    yield
+    await test_engine.dispose()
+
+
+@pytest.fixture
+def mock_redis():
+    """Mock Redis client with in-memory storage."""
+    storage = {}
+    mock = AsyncMock()
+
+    async def _get(key):
+        return storage.get(key)
+
+    async def _set(key, val, ex=None, nx=False):
+        if nx and key in storage:
+            return False
+        storage[key] = str(val)
+        return True
+
+    async def _delete(key):
+        storage.pop(key, None)
+        return 1
+
+    mock.get = AsyncMock(side_effect=_get)
+    mock.set = AsyncMock(side_effect=_set)
+    mock.delete = AsyncMock(side_effect=_delete)
+    mock.ping = AsyncMock(return_value=True)
+    mock._storage = storage
+    return mock
+
+
+@pytest_asyncio.fixture
+async def db_session(monkeypatch):
+    """Creates fresh in-memory database tables and patches AsyncSessionLocal for tests."""
+    async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # Patch AsyncSessionLocal in engine components
+    monkeypatch.setattr("app.core.database.AsyncSessionLocal", TestingSessionLocal)
+    monkeypatch.setattr("app.services.copy_engine.pipeline.AsyncSessionLocal", TestingSessionLocal)
+    monkeypatch.setattr("app.services.reliability.stale_order_sweeper.AsyncSessionLocal", TestingSessionLocal)
+    monkeypatch.setattr("app.services.reliability.follower_fill_syncer.AsyncSessionLocal", TestingSessionLocal)
+    monkeypatch.setattr("app.services.reliability.master_order_poller.AsyncSessionLocal", TestingSessionLocal)
+    monkeypatch.setattr("app.services.runtime.engine_loop.AsyncSessionLocal", TestingSessionLocal)
+
+    async with TestingSessionLocal() as session:
+        yield session
+
+    async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+
+@pytest_asyncio.fixture
+async def sample_accounts(db_session):
+    from strategy_helpers import SAMPLE_MASTER_ID
+
+    master = Account(
+        id=SAMPLE_MASTER_ID,
+        account_type=AccountType.MASTER,
+        display_name="Master Account",
+        alice_user_id="AB00100",
+        is_active=True,
+    )
+    follower1 = Account(
+        id=uuid.uuid4(),
+        account_type=AccountType.FOLLOWER,
+        display_name="Follower 1",
+        alice_user_id="AB00201",
+        is_active=True,
+    )
+    db_session.add(master)
+    db_session.add(follower1)
+    await db_session.commit()
+    await db_session.refresh(master)
+    await db_session.refresh(follower1)
+    return {"master": master, "follower1": follower1}
+
+
+@pytest_asyncio.fixture
+async def sample_strategy(db_session, sample_accounts):
+    """Explicit strategy linking sample_accounts' master -> follower1 at 1.0x.
+
+    Replaces the removed engine fallback (copy to every active FOLLOWER at
+    1.0x when no strategy matches) for tests that relied on it - same
+    accounts, same 1.0x multiplier, so their assertions are unchanged."""
+    from strategy_helpers import link_sample_accounts
+
+    return await link_sample_accounts(db_session, sample_accounts)
+
+
+@pytest_asyncio.fixture
+async def sample_copy_settings(db_session, sample_accounts):
+    follower = sample_accounts["follower1"]
+    setting = CopySetting(
+        follower_account_id=follower.id,
+        copy_enabled=True,
+        quantity_mode=QuantityMode.FIXED,
+        fixed_qty=25,
+        allowed_symbols=["NIFTY24AUG23500CE"],
+    )
+    db_session.add(setting)
+    await db_session.commit()
+    await db_session.refresh(setting)
+    return setting
