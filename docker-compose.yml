@@ -2,6 +2,13 @@ services:
   nginx:
     image: nginx:alpine
     container_name: copytrade_nginx
+    # OPT-IN TLS: nginx and certbot belong to the "tls" profile, so a plain
+    # `docker compose up -d` (HTTP-only on :8080, no certificate) never starts
+    # them - nginx cannot start without a certificate. Enable them with
+    # COMPOSE_PROFILES=tls in .env after nginx/init-letsencrypt.sh has issued
+    # one (the script targets these services explicitly, which also activates
+    # the profile for that run).
+    profiles: ["tls"]
     # Host ports 80/443 are intentionally NOT bound here: this VPS already
     # runs a host-level Nginx on 80/443 serving other production domains
     # (api.maxr.io, flow.maxr.in, automation.maxr.in) - binding here would
@@ -36,6 +43,7 @@ services:
   certbot:
     image: certbot/certbot:latest
     container_name: copytrade_certbot
+    profiles: ["tls"]
     volumes:
       - certbot_etc:/etc/letsencrypt
       - certbot_var:/var/lib/letsencrypt
@@ -140,10 +148,12 @@ services:
       - backend_net
 
 volumes:
+  # v1 uses its own database/Redis volumes so a fresh install can never
+  # attach to (or be mistaken for) the data of an older "copytrade_*" stack.
   postgres_data:
-    name: copytrade_postgres_data
+    name: jettone_postgres_data
   redis_data:
-    name: copytrade_redis_data
+    name: jettone_redis_data
   certbot_etc:
     name: copytrade_certbot_etc
   certbot_var:
@@ -153,6 +163,6 @@ volumes:
 
 networks:
   frontend_net:
-    name: copytrade_frontend_net
+    name: jettone_frontend_net
   backend_net:
-    name: copytrade_backend_net
+    name: jettone_backend_net

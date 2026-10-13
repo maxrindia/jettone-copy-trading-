@@ -50,7 +50,16 @@ opencode.json
 skills-lock.json
 *.tsbuildinfo
 cookies.txt
+CLAUDE.md
 .env.bak*
 *.bak
+# Database dumps, Redis snapshots and key material (backups are taken on the server, never committed)
+*.dump
+*.rdb
+*.pem
+*.key
+*.p12
+env.old
+env.backup
 !.env.example
 frontend/public/design-reference/

@@ -12,6 +12,11 @@ import { LoadingPanel } from "@/components/ui/DataStates";
 import Button from "@/components/ui/Button";
 import AccountCard from "@/components/accounts/AccountCard";
 import MasterSwitchDialog from "@/components/strategy/MasterSwitchDialog";
+import QuantityPolicyDialog, {
+  quantityPolicyLabel,
+  type QuantityMode,
+  type QuantityPolicy,
+} from "@/components/strategy/QuantityPolicyDialog";
 
 interface DematCardItem {
   id: string;
@@ -27,6 +32,7 @@ interface DematCardItem {
   notes: string | null;
   created_at: string;
   updated_at: string;
+  copy_settings?: { quantity_mode: QuantityMode; fixed_qty: number | null } | null;
 }
 
 interface MemberAccountInfo {
@@ -216,6 +222,9 @@ export default function GroupStrategyDetailPage() {
   const [pendingMasterId, setPendingMasterId] = useState<string | null>(null);
   const [masterNotice, setMasterNotice] = useState<string | null>(null);
   const [memberError, setMemberError] = useState<string | null>(null);
+  const [quantityTarget, setQuantityTarget] = useState<
+    { accountId: string; accountName: string; policy: QuantityPolicy } | null
+  >(null);
 
   // Place Order State
   const [orderScriptType, setOrderScriptType] = useState<"Equity" | "CE" | "PE" | "Future">("Equity");
@@ -788,6 +797,15 @@ export default function GroupStrategyDetailPage() {
             const isSessionValid = acc?.session_valid ?? member.account?.session_valid ?? false;
             const pingMs = acc?.ping_ms ?? 40;
             const lastAuth = acc?.last_authenticated_at;
+            // How this Child's copy quantity is derived. Unknown until the
+            // accounts list has loaded - never guessed.
+            const policy: QuantityPolicy | null = acc
+              ? {
+                  quantity_mode: acc.copy_settings?.quantity_mode ?? null,
+                  fixed_qty: acc.copy_settings?.fixed_qty ?? null,
+                  multiplier: member.multiplier,
+                }
+              : null;
 
             return (
               <AccountCard
@@ -813,9 +831,18 @@ export default function GroupStrategyDetailPage() {
                     <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-[#F7F7F7] text-[#374151] border border-[#E5E7EB]">
                       Child
                     </span>
-                    <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-[#F7F7F7] text-[#374151] border border-[#E5E7EB]">
-                      {member.multiplier}x
-                    </span>
+                    {policy && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setQuantityTarget({ accountId: member.account_id, accountName: displayName, policy })
+                        }
+                        title="Change how this Child's copy quantity is calculated"
+                        className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-[#F7F7F7] text-[#374151] border border-[#E5E7EB] hover:border-[#111111] underline decoration-dotted underline-offset-2"
+                      >
+                        {quantityPolicyLabel(policy)}
+                      </button>
+                    )}
                     <span className="font-mono text-[10px] bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded border border-[#E5E7EB]">
                       {aliceUserId}
                     </span>
@@ -1189,6 +1216,21 @@ export default function GroupStrategyDetailPage() {
           </div>
         </div>,
         document.body
+      )}
+
+      {mounted && quantityTarget && strategy && (
+        <QuantityPolicyDialog
+          strategyId={strategy.id}
+          accountId={quantityTarget.accountId}
+          accountName={quantityTarget.accountName}
+          current={quantityTarget.policy}
+          onClose={() => setQuantityTarget(null)}
+          onSaved={() => {
+            setQuantityTarget(null);
+            refreshStrategy();
+            refreshAccounts();
+          }}
+        />
       )}
 
       {mounted && pendingMaster && (

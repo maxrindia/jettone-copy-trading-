@@ -77,7 +77,7 @@ class StaleOrderSweeper:
         normalized internal enum: it is set correctly to OrderStatus.PENDING
         at placement and - per this codebase's existing, already-
         established convention (see master_order_poller.py's BROKER_STATUS_
-        MAP and CLAUDE.md) - PENDING is reserved exclusively for "native
+        MAP) - PENDING is reserved exclusively for "native
         SL/SL-M awaiting trigger" and is moved off PENDING the moment the
         order genuinely completes, is cancelled, or is rejected. It is
         therefore the authoritative, reliable signal for this check."""

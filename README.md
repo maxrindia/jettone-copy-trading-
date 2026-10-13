@@ -17,13 +17,13 @@ scripts/    bootstrap-env.sh (create .env), deploy.sh (update a server)
 
 ## 🏗️ System Architecture & Stack
 
-The platform runs as a **5-service containerized stack** powered by Docker Compose:
+The platform runs as a **4-service containerized stack** powered by Docker Compose (plus an optional, opt-in TLS proxy):
 
 1. **`copytrade_nextjs`** (Port `3000`): Next.js 14 App Router Frontend with clean visual styling, live API hooks, dynamic drawers, and responsive trading dashboards.
 2. **`copytrade_fastapi`** (Port `8000`, internal only): Python FastAPI trading backend (`backend/`) with async order dispatching, multiplier calculators, risk validation, and Alice Blue ANT API integration.
 3. **`copytrade_postgres`** (Port `5432`): PostgreSQL database storing Demat accounts, group strategies, child member links, order execution logs, and audit trails.
 4. **`copytrade_redis`** (Port `6379`): In-memory cache & pub/sub messaging queue for low-latency signal distribution.
-5. **`copytrade_nginx`** (Port `80`): Reverse proxy routing frontend and backend services.
+5. *(optional, `tls` profile)* **`copytrade_nginx`** + **`copytrade_certbot`**: TLS reverse proxy for a server with its own domain. Not started by default; see [TLS](#tls-optional).
 
 ---
 
@@ -107,9 +107,9 @@ docker compose up -d
 ```
 
 #### Access Points:
-- **Web App**: [http://localhost:3000](http://localhost:3000) or [http://localhost](http://localhost)
-- **Group Strategy**: [http://localhost:3000/group-strategy](http://localhost:3000/group-strategy)
-- **FastAPI API Docs (Swagger UI)**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Web App**: `http://<server-ip>:8080` (or `http://localhost:8080` locally; `:3005` is a second mapping of the same app)
+- **Group Strategy**: `http://<server-ip>:8080/group-strategy`
+- **FastAPI**: internal only (Docker network); it is never published on a host port.
 
 ### Updating a running server
 ```bash
@@ -117,11 +117,20 @@ scripts/deploy.sh      # git fast-forward, rebuild, restart, health check (migra
 ```
 It keeps `.env` and the data volumes. It restarts the trading backend: **orders open at restart are not copied and their later changes are not propagated**, so deploy when no order is open.
 
+### TLS (optional)
+A default install is plain HTTP on `:8080` and does **not** start nginx/certbot (nginx cannot start without a
+certificate). To use TLS on a server that has its own domain and free ports 80/443:
+
+1. In `.env` set a real `DOMAIN_NAME` and `LETSENCRYPT_EMAIL`; in `docker-compose.yml` publish ports `80:80`/`443:443` on `nginx`.
+2. Run `nginx/init-letsencrypt.sh` once (it starts/uses nginx and certbot explicitly, which activates the `tls` profile for that run).
+3. Add `COMPOSE_PROFILES=tls` to `.env` so `docker compose up -d` and `scripts/deploy.sh` keep nginx/certbot running.
+   `scripts/deploy.sh` refuses to run with `tls` enabled while `DOMAIN_NAME` is still a placeholder.
+
 ### Operations notes
 - **Live trading is off by default** (`ENGINE_LIVE_TRADING_ENABLED=false`, observe-only). Turn it on in `.env` only when ready.
 - The backend **refuses to start** if `.env` still holds `CHANGE_ME` placeholders; generate real secrets with `scripts/bootstrap-env.sh`.
 - Alice Blue whitelists calls by IP: register the server's static IP (or each account's Static IP proxy) in the Alice Blue developer portal.
-- Back up `.env` (losing `ALICE_BLUE_ENCRYPTION_KEY` makes stored broker credentials undecryptable) and the `postgres_data` volume.
+- Back up `.env` (losing `ALICE_BLUE_ENCRYPTION_KEY` makes stored broker credentials undecryptable) and the `jettone_postgres_data` volume.
 - Only the frontend is exposed; the backend, Postgres and Redis stay on internal Docker networks.
 
 ### Development & tests

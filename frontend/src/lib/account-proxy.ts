@@ -10,8 +10,8 @@
  * `safe_proxy` before ever logging it. This does the same redaction for the
  * UI: an account's ProxyURL commonly embeds basic-auth credentials
  * (`https://user:pass@host`), which must never be rendered as visible text
- * (see CLAUDE.md: "No plaintext secrets ... never log tokens, secrets, or
- * passwords") - only the host is shown.
+ * (project rule: no plaintext secrets - never log tokens, secrets, or
+ * passwords) - only the host is shown.
  */
 export function accountProxyHost(notes: string | null | undefined): string | null {
   if (!notes) return null;

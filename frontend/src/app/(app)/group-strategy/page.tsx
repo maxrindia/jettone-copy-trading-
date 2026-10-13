@@ -109,7 +109,7 @@ interface ChartPoint {
  * only reachable on the developer's own machine (docker-compose.yml /
  * frontend/Dockerfile) - an env-var check alone can't tell "my own laptop"
  * apart from "the real VPS". A real deployment is reached by its domain or
- * the VPS's IP (see CLAUDE.md's STATIC_VPS_IP), never by the literal
+ * the VPS's IP (the STATIC_VPS_IP setting, see .env.example), never by the literal
  * hostname "localhost", so this can never render for a real user.
  */
 const DEV_DEMO_WAVE_FRACTIONS = [

@@ -28,6 +28,9 @@ class AccountType(str, enum.Enum):
 
 class QuantityMode(str, enum.Enum):
     FIXED = "FIXED"
+    # Child quantity = Master quantity x the Child's strategy multiplier
+    # (StrategyMember.multiplier). Added by migration 0009.
+    MULTIPLIER = "MULTIPLIER"
     RATIO = "RATIO"
     CAPITAL_PROPORTIONAL = "CAPITAL_PROPORTIONAL"
     RISK_BASED = "RISK_BASED"

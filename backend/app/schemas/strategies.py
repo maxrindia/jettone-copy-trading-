@@ -31,6 +31,23 @@ class MemberUpdate(BaseModel):
     trading_enabled: Optional[bool] = None
 
 
+class QuantityPolicyUpdate(BaseModel):
+    """How a Child's copy quantity is derived. Only the two policies the
+    strategy page offers are accepted here."""
+    quantity_mode: str = Field(pattern="^(MULTIPLIER|FIXED)$")
+    # MULTIPLIER: Child qty = Master qty x multiplier (omit to keep the current one).
+    multiplier: Optional[Decimal] = Field(default=None, ge=Decimal("0.01"), le=Decimal("100.00"))
+    # FIXED: the same quantity for every copied order (omit to keep the current one).
+    fixed_qty: Optional[int] = Field(default=None, ge=1, le=1_000_000)
+
+
+class QuantityPolicyResponse(BaseModel):
+    account_id: uuid.UUID
+    quantity_mode: str
+    multiplier: Decimal
+    fixed_qty: Optional[int] = None
+
+
 class MemberResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID

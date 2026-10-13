@@ -84,7 +84,8 @@ cat <<EOF
 
 .env created (permissions 600). Next:
   1. Review .env: DOMAIN_NAME / STATIC_VPS_IP, MASTER_CAPITAL, TELEGRAM_*.
-  2. docker compose up -d --build      (schema migrations run automatically)
+  2. docker compose up -d --build      (postgres, redis, fastapi, nextjs; schema
+     migrations run automatically. nginx/certbot are the opt-in "tls" profile.)
   3. Open ${URL}, log in as "admin" with the password you chose, then add your
      demat accounts. ENGINE_LIVE_TRADING_ENABLED stays false until you set it.
   4. Back up .env somewhere safe. Losing ALICE_BLUE_ENCRYPTION_KEY makes stored

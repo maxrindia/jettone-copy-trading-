@@ -726,6 +726,7 @@ class CopyEnginePipeline:
                 lot_size=lot_size,
                 settings=settings_obj,
                 reference_price=limit_price,
+                multiplier=multiplier,
             )
             target_qty = base_qty
         else:
@@ -1138,6 +1139,7 @@ class CopyEnginePipeline:
                 lot_size=lot_size,
                 settings=settings_obj,
                 reference_price=trigger_price if trigger_price > 0 else sl_price,
+                multiplier=multiplier,
             )
             target_qty = base_qty
         else:
@@ -2351,6 +2353,7 @@ class CopyEnginePipeline:
                     lot_size=lot_size,
                     settings=settings_obj,
                     reference_price=new_price,
+                    multiplier=multiplier,
                 )
             else:
                 base_qty = int(new_quantity * float(multiplier))
@@ -3135,6 +3138,7 @@ class CopyEnginePipeline:
                 lot_size=lot_size,
                 settings=settings_obj,
                 reference_price=event.price,
+                multiplier=multiplier,
             )
         else:
             base_qty = int(event.quantity * float(multiplier))

@@ -15,7 +15,7 @@ from app.core.crypto import decrypt_secret
 from app.core.database import get_db
 from app.core.redis import get_redis
 from app.models.strategies import STRATEGY_ROLE_CHILD, GroupStrategy, StrategyMember
-from app.models.accounts import Account
+from app.models.accounts import Account, CopySetting, QuantityMode
 from app.models.trades import CopyTrade, CopyTradeStatus, Order, OrderSide as DBOrderSide, OrderSource, OrderStatus
 from app.services import strategy_membership as membership
 from app.services import strategy_switch
@@ -27,6 +27,8 @@ from app.schemas.strategies import (
     MemberAdd,
     MemberResponse,
     MemberUpdate,
+    QuantityPolicyResponse,
+    QuantityPolicyUpdate,
     StrategyCreate,
     StrategyResponse,
     StrategyUpdate,
@@ -354,6 +356,89 @@ async def update_member(
     await db.commit()
     await db.refresh(member)
     return member
+
+
+_WORKING_ORDER_STATUSES = (OrderStatus.PENDING, OrderStatus.OPEN, OrderStatus.PARTIAL)
+
+
+@router.put("/{strategy_id}/members/{account_id}/quantity-policy", response_model=QuantityPolicyResponse)
+async def update_member_quantity_policy(
+    strategy_id: uuid.UUID,
+    account_id: uuid.UUID,
+    payload: QuantityPolicyUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Explicitly choose how this Child's copy quantity is derived:
+    MULTIPLIER (Master qty x multiplier) or FIXED (same qty every order).
+
+    Changes ONLY the quantity policy. It never enables or disables copying
+    (copy_enabled / the Trading toggle are untouched), never creates a
+    CopySetting, and affects only orders copied after the change. Refused
+    while the Child has a working copied order, because a later Master
+    modification would re-size that order under the new policy."""
+    member = (
+        await db.execute(
+            select(StrategyMember).where(
+                StrategyMember.strategy_id == strategy_id,
+                StrategyMember.account_id == account_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found in this strategy")
+
+    setting = (
+        await db.execute(select(CopySetting).where(CopySetting.follower_account_id == account_id))
+    ).scalar_one_or_none()
+    if setting is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This Child has no copy settings yet. Turn its Trading toggle on or off once, then retry.",
+        )
+
+    working = (
+        await db.execute(
+            select(Order.id).where(
+                Order.account_id == account_id,
+                Order.source == OrderSource.SYSTEM,
+                Order.status.in_(_WORKING_ORDER_STATUSES),
+            ).limit(1)
+        )
+    ).first()
+    if working is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This Child has a working copied order. Change the quantity policy after it completes or is cancelled.",
+        )
+
+    new_mode = QuantityMode(payload.quantity_mode)
+    new_fixed = payload.fixed_qty if payload.fixed_qty is not None else setting.fixed_qty
+    if new_mode == QuantityMode.FIXED and (new_fixed is None or new_fixed < 1):
+        raise HTTPException(status_code=422, detail="fixed_qty (1 or more) is required for the FIXED policy")
+
+    before = f"{getattr(setting.quantity_mode, 'value', setting.quantity_mode)} (fixed_qty={setting.fixed_qty}, multiplier={member.multiplier})"
+    setting.quantity_mode = new_mode
+    if payload.fixed_qty is not None:
+        setting.fixed_qty = payload.fixed_qty
+    if payload.multiplier is not None:
+        member.multiplier = payload.multiplier
+    after = f"{new_mode.value} (fixed_qty={setting.fixed_qty}, multiplier={member.multiplier})"
+
+    await emit_system_event(
+        db,
+        event_type="CHILD_QUANTITY_POLICY_CHANGED",
+        severity="INFO",
+        message=f"Quantity policy changed: {before} -> {after}.",
+        account_id=account_id,
+        commit=False,
+    )
+    await db.commit()
+    return QuantityPolicyResponse(
+        account_id=account_id,
+        quantity_mode=new_mode.value,
+        multiplier=member.multiplier,
+        fixed_qty=setting.fixed_qty,
+    )
 
 
 @router.delete("/{strategy_id}/members/{account_id}", status_code=status.HTTP_204_NO_CONTENT)

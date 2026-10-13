@@ -4,6 +4,11 @@
 #   scripts/deploy.sh          # fetch, fast-forward, rebuild, restart, health-check
 #
 # What it does NOT touch: .env, the Postgres/Redis volumes, TLS certificates.
+#
+# TLS: nginx and certbot are the opt-in "tls" Compose profile. They are only
+# built/started when COMPOSE_PROFILES contains "tls" (set in .env after
+# nginx/init-letsencrypt.sh has issued a certificate). A default HTTP-only
+# server (reached on :8080) never starts them.
 # Database migrations run automatically when the backend container starts.
 #
 # NOTE: this restarts the trading backend. Orders that exist at restart are
@@ -18,6 +23,22 @@ if grep -qi "CHANGE_ME" .env; then
   echo ".env still contains CHANGE_ME placeholders - refusing to deploy." >&2
   exit 1
 fi
+
+# Report the TLS mode; refuse an unfinished TLS setup (placeholder domain).
+profiles="${COMPOSE_PROFILES:-$(grep -E '^COMPOSE_PROFILES=' .env | tail -1 | cut -d= -f2- | tr -d "\"'\r" || true)}"
+domain="$(grep -E '^DOMAIN_NAME=' .env | tail -1 | cut -d= -f2- | tr -d "\"'\r" || true)"
+case ",${profiles}," in
+  *,tls,*)
+    case "$domain" in
+      ""|*example.com|*example.org)
+        echo "COMPOSE_PROFILES enables TLS but DOMAIN_NAME is still a placeholder ('${domain}')." >&2
+        echo "Set a real domain and run nginx/init-letsencrypt.sh first, or remove tls from COMPOSE_PROFILES." >&2
+        exit 1 ;;
+    esac
+    echo "tls profile: ENABLED (nginx + certbot, domain ${domain})" ;;
+  *)
+    echo "tls profile: disabled (HTTP only; nginx/certbot are not started)" ;;
+esac
 
 before="$(git rev-parse --short HEAD)"
 git fetch -q origin

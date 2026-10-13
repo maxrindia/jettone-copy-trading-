@@ -43,7 +43,7 @@ The entire system is orchestrated via **Docker Compose** across 5 isolated, high
 
 | Service Name | Technology | Internal Port | Description |
 | :--- | :--- | :--- | :--- |
-| **`copytrade_nginx`** | Nginx Alpine | `80` (Host: `8080`) | Reverse proxy routing web traffic to Next.js and `/api/v1` traffic to FastAPI. |
+| *(optional)* **`copytrade_nginx`** | Nginx Alpine, `tls` Compose profile | `80`/`443` (not published by default) | TLS reverse proxy for a server with its own domain. Not started by default; the app is reached directly on host port `8080`. |
 | **`copytrade_nextjs`** | Next.js 14 (React 18 / TypeScript) | `3000` | User interface for Account Management, Strategy Builder, Order Manager, and Metrics. |
 | **`copytrade_fastapi`** | Python 3.12 + FastAPI + AsyncIO | `8000` | Asynchronous trading engine, WebSocket listeners, order replication, and risk checks. |
 | **`copytrade_postgres`**| PostgreSQL 16 Alpine | `5432` | Relational storage for accounts, encrypted API secrets, group strategies, copy trades, and audit logs. |
