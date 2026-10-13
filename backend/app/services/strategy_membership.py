@@ -20,7 +20,7 @@ from typing import AsyncIterator, Dict, Iterable, Optional
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.accounts import CopySetting
+from app.models.accounts import CopySetting, QuantityMode
 from app.models.strategies import (
     STRATEGY_ROLE_CHILD,
     STRATEGY_ROLE_MASTER,
@@ -94,17 +94,29 @@ async def sync_copy_enabled(db: AsyncSession, account_id: uuid.UUID, enabled: bo
     every copy with FOLLOWER_PAUSED.)
 
     Every Child needs a CopySetting because the pipeline's RiskEngine gate
-    only runs when one exists, so one is created when absent (FIXED qty 1,
-    the defaults account creation uses). Quantity mode, limits and every
-    other field of an existing CopySetting are never touched. Returns True
-    if a CopySetting was created."""
+    only runs when one exists, so one is created when absent. It is created
+    in MULTIPLIER mode (Master qty x the Child's strategy multiplier): that is
+    exactly the quantity a Child WITHOUT a CopySetting was already getting, so
+    creating the row never changes what is copied. (It used to be created as
+    FIXED qty 1, which turned a Master NIFTY order of 65 into a Child order of
+    1 and made Alice Blue reject it with EC954 "multiple of the lot size".)
+    fixed_qty stays 1 so the user can still switch the policy to FIXED.
+    Quantity mode, limits and every other field of an existing CopySetting are
+    never touched. Returns True if a CopySetting was created."""
     existing = (
         await db.execute(select(CopySetting).where(CopySetting.follower_account_id == account_id))
     ).scalar_one_or_none()
     if existing is not None:
         existing.copy_enabled = enabled
         return False
-    db.add(CopySetting(follower_account_id=account_id, copy_enabled=enabled, fixed_qty=1))
+    db.add(
+        CopySetting(
+            follower_account_id=account_id,
+            copy_enabled=enabled,
+            quantity_mode=QuantityMode.MULTIPLIER,
+            fixed_qty=1,
+        )
+    )
     return True
 
 
