@@ -69,6 +69,8 @@ class MasterSwitchRequest(BaseModel):
     # What happens to the current Master: stays in the strategy as a Child
     # (copying off until enabled) or leaves the strategy entirely.
     old_master_action: str = Field(default="REMOVE", pattern="^(CHILD|REMOVE)$")
+    # Only honored when the sole blockers are "broker verification unavailable".
+    acknowledge_unverified: bool = False
 
 
 class StrategyResponse(BaseModel):

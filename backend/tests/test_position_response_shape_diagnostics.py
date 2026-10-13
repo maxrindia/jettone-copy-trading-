@@ -191,3 +191,54 @@ async def test_diagnostic_log_line_does_not_fire_for_a_real_list(mock_redis, cap
     await _positions_with_body(mock_redis, {"stat": "Ok", "result": []})
     diag_lines = [r.message for r in caplog.records if "[DIAG]" in r.message]
     assert len(diag_lines) == 0
+
+
+# ---------------------------------------------------------------------------
+# 5. Alice Blue's "nothing to show" answers are an EMPTY book, not a failure
+# ---------------------------------------------------------------------------
+# Confirmed live (2026-10-13, start of a trading day): HTTP 200 with
+# status EC916 "No orders found for this user." / EC920 "No positions found
+# for this user." and result=null. Matched per endpoint by exact code AND
+# message; every other non-list body above still returns None (fail closed).
+
+async def _raw_with_body(mock_redis, body, method):
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    await mock_redis.set("alice:session:acc-test", "A3_SESSION_JWT_TOKEN")
+    resp = AsyncMock()
+    resp.status_code = 200
+    resp.json = lambda: body
+    mock_http.request = AsyncMock(return_value=resp)
+    client = _client(mock_redis, mock_http)
+    return await getattr(client, method)()
+
+
+@pytest.mark.asyncio
+async def test_empty_order_book_ec916_is_an_empty_list(mock_redis):
+    body = {"status": "EC916", "message": "Error: No orders found for this user.", "result": None}
+    assert await _raw_with_body(mock_redis, body, "get_order_book_raw") == []
+
+
+@pytest.mark.asyncio
+async def test_empty_positions_ec920_is_an_empty_list(mock_redis):
+    body = {"status": "EC920", "message": "Error: No positions found for this user.", "result": None}
+    assert await _raw_with_body(mock_redis, body, "get_positions_raw") == []
+    assert await _raw_with_body(mock_redis, body, "get_positions_or_none") == []
+
+
+@pytest.mark.asyncio
+async def test_empty_codes_are_endpoint_specific(mock_redis):
+    """EC916 on the positions endpoint (or EC920 on orders) is not 'empty'."""
+    wrong_for_positions = {"status": "EC916", "message": "Error: No orders found for this user.", "result": None}
+    wrong_for_orders = {"status": "EC920", "message": "Error: No positions found for this user.", "result": None}
+    assert await _raw_with_body(mock_redis, wrong_for_positions, "get_positions_raw") is None
+    assert await _raw_with_body(mock_redis, wrong_for_orders, "get_order_book_raw") is None
+
+
+@pytest.mark.asyncio
+async def test_real_errors_with_null_result_still_fail_closed(mock_redis):
+    for body in (
+        {"status": "EC916", "message": "Error: Session expired", "result": None},   # right code, wrong message
+        {"status": "EC401", "message": "Error: No orders found for this user.", "result": None},  # wrong code
+        {"status": "Not_Ok", "message": "Server error", "result": None},
+    ):
+        assert await _raw_with_body(mock_redis, body, "get_order_book_raw") is None

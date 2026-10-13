@@ -942,6 +942,14 @@ class AliceBlueClient:
             return None
 
         rows = data.get("result") if isinstance(data, dict) else data
+        if rows is None and self._is_empty_book_response(path, data):
+            # Alice Blue answers an EMPTY book with HTTP 200 + a status code
+            # and result=null (confirmed live 2026-10-13: orders/book ->
+            # EC916 "No orders found for this user.", positions -> EC920 "No
+            # positions found for this user."). That is a successful read of
+            # an empty book, not a failed fetch. Matched by exact code AND
+            # message per endpoint - any other non-list body still fails closed.
+            return []
         if not isinstance(rows, list):
             # TEMPORARY DIAGNOSTIC (2026-09-24 investigation into "returned no
             # result list" causing POSITION_FETCH_FAILED SELL blocks) - logs
@@ -955,6 +963,24 @@ class AliceBlueClient:
             logger.warning(f"[{self.account_id}] {path} returned no result list")
             return None
         return [row for row in rows if isinstance(row, dict)]
+
+    # endpoint path -> (status code, message fragment) of Alice Blue's
+    # "nothing to show" answer. Verified against the live A3 API.
+    _EMPTY_BOOK_RESPONSES = {
+        "/open-api/od/v1/orders/book": ("EC916", "no orders found"),
+        "/open-api/od/v1/positions": ("EC920", "no positions found"),
+    }
+
+    @classmethod
+    def _is_empty_book_response(cls, path: str, data: Any) -> bool:
+        expected = cls._EMPTY_BOOK_RESPONSES.get(path)
+        if expected is None or not isinstance(data, dict):
+            return False
+        code, fragment = expected
+        return (
+            str(data.get("status", "")).strip().upper() == code
+            and fragment in str(data.get("message", "")).lower()
+        )
 
     _SENSITIVE_KEY_MARKERS = (
         "token", "auth", "password", "secret", "cookie", "session",

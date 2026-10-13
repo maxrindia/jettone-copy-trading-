@@ -24,6 +24,7 @@ interface SwitchBlocker {
 
 interface SwitchPreflight {
   allowed: boolean;
+  can_override?: boolean;
   blockers: SwitchBlocker[];
   warnings: SwitchBlocker[];
   limitations: string[];
@@ -133,6 +134,9 @@ export default function MasterSwitchDialog({
   const [checking, setChecking] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Only offered when Alice Blue could not be read (never for real findings):
+  // the user confirms they checked the accounts themselves.
+  const [acknowledged, setAcknowledged] = useState(false);
 
   // keepError: re-check after a refused switch without wiping the reason
   // the switch was refused - the user must see both.
@@ -150,6 +154,7 @@ export default function MasterSwitchDialog({
         return;
       }
       setPreflight(body as SwitchPreflight);
+      setAcknowledged(false);
     } catch {
       setPreflight(null);
       if (!keepError) setError("Could not reach the trading engine to check the switch.");
@@ -177,7 +182,11 @@ export default function MasterSwitchDialog({
       const resp = await fetch(`/api/v1/strategies/${strategyId}/switch-master`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ new_master_account_id: newMaster.id, old_master_action: action }),
+        body: JSON.stringify({
+          new_master_account_id: newMaster.id,
+          old_master_action: action,
+          acknowledge_unverified: acknowledged,
+        }),
       });
       const body = await resp.json().catch(() => null);
       if (!resp.ok) {
@@ -196,6 +205,8 @@ export default function MasterSwitchDialog({
   };
 
   const blocked = preflight !== null && !preflight.allowed;
+  const overridable = blocked && preflight?.can_override === true;
+  const canSwitch = Boolean(preflight?.allowed) || (overridable && acknowledged);
   const visibleWarnings = (preflight?.warnings ?? []).filter((w) => !ADVISORY_CODES.has(w.code));
 
   return createPortal(
@@ -320,6 +331,28 @@ export default function MasterSwitchDialog({
             </div>
           )}
 
+          {overridable && (
+            <div className="rounded-[10px] border border-amber-300 bg-amber-50 p-3">
+              <p className="text-xs font-semibold text-amber-900">Alice Blue could not be read right now</p>
+              <p className="mt-1 text-[11px] leading-relaxed text-amber-800">
+                Orders and positions could not be verified automatically. Try Check again first. If you have
+                already checked in Alice Blue, you can continue.
+              </p>
+              <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-amber-900">
+                <input
+                  type="checkbox"
+                  checked={acknowledged}
+                  onChange={(e) => setAcknowledged(e.target.checked)}
+                  disabled={switching}
+                  className="mt-0.5 accent-[#111111]"
+                />
+                <span>
+                  I checked in Alice Blue: no open orders and no open positions on these accounts.
+                </span>
+              </label>
+            </div>
+          )}
+
           {visibleWarnings.length > 0 && (
             <ul className="space-y-2">
               {visibleWarnings.map((w, i) => (
@@ -341,9 +374,9 @@ export default function MasterSwitchDialog({
             size="sm"
             onClick={() => void handleSwitch()}
             loading={switching}
-            disabled={!preflight?.allowed || checking}
+            disabled={!canSwitch || checking}
           >
-            Change Master
+            {overridable ? "Change Master anyway" : "Change Master"}
           </Button>
         </div>
       </div>

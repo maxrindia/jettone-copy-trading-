@@ -109,6 +109,11 @@ class SwitchPreflight:
     new_master_id: str
     old_master_action: str
     allowed: bool
+    # True only when EVERY blocker is "broker verification unavailable": the
+    # user may acknowledge that they verified the accounts themselves and
+    # switch anyway. Real findings (working orders, open positions, copies in
+    # flight) are never overridable.
+    can_override: bool
     blockers: List[SwitchBlocker]
     warnings: List[SwitchBlocker]
     limitations: List[str]
@@ -463,6 +468,7 @@ async def run_preflight(
         new_master_id=str(new_master.id),
         old_master_action=old_master_action,
         allowed=not blockers,
+        can_override=bool(blockers) and all(b.code == "BROKER_VERIFICATION_UNAVAILABLE" for b in blockers),
         blockers=blockers,
         warnings=warnings,
         limitations=list(LIMITATIONS),
@@ -484,6 +490,7 @@ async def execute_switch(
     client_provider: ClientProvider,
     *,
     after_commit: Optional[Callable[["SwitchPreflight"], Any]] = None,
+    acknowledge_unverified: bool = False,
 ) -> SwitchPreflight:
     """Re-verifies and commits a Master switch under the switch locks.
 
@@ -498,8 +505,17 @@ async def execute_switch(
     async with membership.accounts_switch_lock([str(current) if current else None, str(new_master_id)]):
         db.expire_all()
         preflight = await run_preflight(db, strategy_id, new_master_id, old_master_action, client_provider)
+        override_used = False
         if not preflight.allowed:
-            raise SwitchBlocked(preflight)
+            # The only bypass: the broker could not be read AND the user
+            # explicitly acknowledged verifying the accounts themselves.
+            if not (acknowledge_unverified and preflight.can_override):
+                raise SwitchBlocked(preflight)
+            override_used = True
+            logger.warning(
+                f"[MasterSwitch] Switching strategy {strategy_id} with UNVERIFIED broker state "
+                f"(user acknowledged): {[(b.account_name, b.message) for b in preflight.blockers]}"
+            )
 
         strategy = await _load_strategy(db, strategy_id)
         old_master_id = strategy.master_account_id
@@ -536,8 +552,9 @@ async def execute_switch(
         await emit_system_event(
             db,
             event_type="STRATEGY_MASTER_SWITCHED",
-            severity="INFO",
+            severity="WARNING" if override_used else "INFO",
             message=(
+                f"{'[UNVERIFIED broker state acknowledged by user] ' if override_used else ''}"
                 f"Strategy '{strategy.name}' Master switched from {old_master_id or 'none'} to "
                 f"{new_master_id}; old Master {'kept as Child (copying on)' if old_master_action == 'CHILD' else 'removed'}."
             ),
@@ -548,6 +565,8 @@ async def execute_switch(
                 "new_master_account_id": str(new_master_id),
                 "old_master_action": old_master_action,
                 "old_master_copy_setting_created": created_copy_setting,
+                "unverified_override": override_used,
+                "unverified_accounts": [b.account_name for b in preflight.blockers] if override_used else [],
             },
         )  # commits
 

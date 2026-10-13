@@ -1099,3 +1099,84 @@ async def test_unresolved_reconciliation_does_not_hide_a_real_live_blocker(db_se
     pre = await _preflight(db_session, trio, trio.arun)
     assert not pre.allowed
     assert {b.code for b in pre.blockers} == {"OPEN_POSITIONS"}
+
+
+# ─── 8. broker state unreadable: acknowledged override ─────────────────────
+
+async def _unreadable(trio, *keys):
+    for key in keys:
+        trio.brokers[str(key)]._book_error = RuntimeError("Alice Blue unreachable")
+
+
+@pytest.mark.asyncio
+async def test_only_unverifiable_blockers_can_be_overridden(db_session, trio):
+    await _unreadable(trio, trio.dhinesh.id, trio.arun.id)
+    pre = await _preflight(db_session, trio, trio.arun)
+    assert not pre.allowed and pre.can_override
+    assert {b.code for b in pre.blockers} == {"BROKER_VERIFICATION_UNAVAILABLE"}
+    assert "can_override" in pre.to_dict()
+
+
+@pytest.mark.asyncio
+async def test_real_blockers_are_never_overridable(db_session, trio):
+    await _unreadable(trio, trio.arun.id)                      # unverifiable...
+    trio.brokers[str(trio.vikash.id)]._positions = [_pos(qty=3)]  # ...plus a REAL open position
+    pre = await _preflight(db_session, trio, trio.arun)
+    assert not pre.allowed and not pre.can_override
+    with pytest.raises(strategy_switch.SwitchBlocked):
+        await strategy_switch.execute_switch(db_session, trio.strategy.id, trio.arun.id, "CHILD",
+                                             _provider(trio.brokers), acknowledge_unverified=True)
+
+
+@pytest.mark.asyncio
+async def test_unverifiable_without_acknowledgement_still_blocks(db_session, trio):
+    await _unreadable(trio, trio.dhinesh.id, trio.arun.id)
+    with pytest.raises(strategy_switch.SwitchBlocked):
+        await strategy_switch.execute_switch(db_session, trio.strategy.id, trio.arun.id, "CHILD",
+                                             _provider(trio.brokers))
+    async with TestingSessionLocal() as s:
+        strat = (await s.execute(select(GroupStrategy).where(GroupStrategy.id == trio.strategy.id))).scalar_one()
+    assert strat.master_account_id == trio.dhinesh.id  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_acknowledged_override_switches_and_is_audited(db_session, trio):
+    await _unreadable(trio, trio.dhinesh.id, trio.arun.id)
+    pre = await strategy_switch.execute_switch(db_session, trio.strategy.id, trio.arun.id, "CHILD",
+                                               _provider(trio.brokers), acknowledge_unverified=True)
+    assert pre.can_override
+    async with TestingSessionLocal() as s:
+        strat = (await s.execute(select(GroupStrategy).where(GroupStrategy.id == trio.strategy.id))).scalar_one()
+        event = (await s.execute(select(SystemEvent).where(
+            SystemEvent.event_type == "STRATEGY_MASTER_SWITCHED"))).scalar_one()
+    assert strat.master_account_id == trio.arun.id
+    assert event.metadata_payload["unverified_override"] is True
+    assert "UNVERIFIED" in event.message
+    for broker in trio.brokers.values():  # still never cancels / places / modifies
+        broker.place_order.assert_not_called()
+        broker.cancel_order.assert_not_called()
+        broker.modify_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_normal_switch_is_not_marked_as_override(db_session, trio):
+    await strategy_switch.execute_switch(db_session, trio.strategy.id, trio.arun.id, "CHILD",
+                                         _provider(trio.brokers), acknowledge_unverified=True)
+    async with TestingSessionLocal() as s:
+        event = (await s.execute(select(SystemEvent).where(
+            SystemEvent.event_type == "STRATEGY_MASTER_SWITCHED"))).scalar_one()
+    assert event.metadata_payload["unverified_override"] is False
+
+
+@pytest.mark.asyncio
+async def test_switch_endpoint_accepts_the_acknowledgement(api_client, trio):
+    for acc in (trio.dhinesh, trio.vikash, trio.arun):
+        api_client.brokers[str(acc.id)] = _Broker()
+    api_client.brokers[str(trio.arun.id)]._book_error = RuntimeError("down")
+    body = {"new_master_account_id": str(trio.arun.id), "old_master_action": "CHILD"}
+    resp = await api_client.post(f"/api/v1/strategies/{trio.strategy.id}/switch-master", json=body, headers=AUTH)
+    assert resp.status_code == 409
+    resp = await api_client.post(f"/api/v1/strategies/{trio.strategy.id}/switch-master",
+                                 json={**body, "acknowledge_unverified": True}, headers=AUTH)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["strategy"]["master_account_id"] == str(trio.arun.id)

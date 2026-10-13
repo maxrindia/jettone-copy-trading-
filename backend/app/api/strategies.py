@@ -215,6 +215,7 @@ async def switch_master(
             after_commit=lambda preflight: runtime_hooks.sync_master_monitors(
                 activations=preflight.activations()
             ),
+            acknowledge_unverified=payload.acknowledge_unverified,
         )
     except strategy_switch.SwitchValidationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)
