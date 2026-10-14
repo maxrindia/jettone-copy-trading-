@@ -36,10 +36,10 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -333,6 +333,16 @@ def get_live_master_id() -> Optional[str]:
     return client.account_id if client else None
 
 
+def get_live_client_account_ids() -> Set[str]:
+    """Ids of every account the running engine holds a broker client for. A
+    dependency so tests can override it without a real engine. Used to decide
+    which STRATEGY masters are live - independent of the account_type label an
+    account was created with."""
+    from app.services.alice_blue.manager import account_manager
+
+    return {str(acc_id) for acc_id in account_manager._clients}
+
+
 def _audit_issue_message(row: AuditLog) -> str:
     parts = [row.event_type]
     if row.symbol:
@@ -509,10 +519,11 @@ async def _compute_copy_execution(db: AsyncSession, range_start: datetime, range
     # only unique per (broker, account_id) - see Order's own
     # uq_orders_broker_account_broker_order constraint - so a follower's own
     # order id could coincidentally collide with the master's. Scoping this
-    # lookup to MASTER-type accounts (the actual master identity, not merely
+    # lookup to master accounts (the actual master identity, not merely
     # "not a SYSTEM copy") rules that out: only a master account's order can
-    # ever be bound as "the master fill". This matches on account TYPE, not
-    # today's specific live master id, since a child copy's
+    # ever be bound as "the master fill". A master account is one created as
+    # account_type MASTER or one that is a strategy's Master. This does not
+    # match today's specific live master id, since a child copy's
     # master_broker_order_id may reference whichever master account was
     # live when that copy was made.
     master_broker_ids = {
@@ -522,11 +533,25 @@ async def _compute_copy_execution(db: AsyncSession, range_start: datetime, range
     }
     masters_by_broker_id: Dict[str, Order] = {}
     if master_broker_ids:
+        # A strategy's Master is whichever account the strategy points at, not
+        # necessarily one created as account_type MASTER; both identities
+        # count (including past strategy Masters - see the note above).
+        strategy_master_ids = [
+            row[0]
+            for row in (
+                await db.execute(
+                    select(GroupStrategy.master_account_id).where(GroupStrategy.master_account_id.isnot(None))
+                )
+            ).all()
+        ]
         master_rows = (
             await db.execute(
                 select(Order)
                 .join(Account, Account.id == Order.account_id)
-                .where(Order.broker_order_id.in_(master_broker_ids), Account.account_type == AccountType.MASTER)
+                .where(
+                    Order.broker_order_id.in_(master_broker_ids),
+                    or_(Account.account_type == AccountType.MASTER, Order.account_id.in_(strategy_master_ids)),
+                )
             )
         ).scalars().all()
         masters_by_broker_id = {m.broker_order_id: m for m in master_rows}
@@ -617,11 +642,16 @@ async def _load_strategies(db: AsyncSession) -> List[GroupStrategy]:
     ).scalars().all()
 
 
-def _running_candidates(strategies: Sequence[GroupStrategy], live_master_id: Optional[str]) -> List[GroupStrategy]:
+def _running_candidates(strategies: Sequence[GroupStrategy], live_master_ids: Set[str]) -> List[GroupStrategy]:
     # Mirrors CopyEnginePipeline._get_eligible_followers_for_master's actual
     # selection: the engine copies from at most one trading_enabled strategy
     # per master, with no defined tie-break when more than one qualifies.
-    return [s for s in strategies if s.trading_enabled and live_master_id and str(s.master_account_id) == live_master_id]
+    # `live_master_ids` = strategy masters with a live broker client (any
+    # account_type), plus the engine's legacy account_type MASTER account.
+    return [
+        s for s in strategies
+        if s.trading_enabled and s.master_account_id is not None and str(s.master_account_id) in live_master_ids
+    ]
 
 
 def _strategy_status(s: GroupStrategy, is_the_picked_running_one: bool) -> str:
@@ -632,16 +662,16 @@ def _strategy_status(s: GroupStrategy, is_the_picked_running_one: bool) -> str:
     return "NOT_RUNNING"
 
 
-def _not_running_reason(s: GroupStrategy, live_master_id: Optional[str], status: str) -> Optional[str]:
+def _not_running_reason(s: GroupStrategy, live_master_ids: Set[str], status: str) -> Optional[str]:
     if status == "RUNNING":
         return None
     if status == "DISABLED":
         return "Trading disabled for this strategy"
-    if not live_master_id:
-        return "No live master session"
     if s.master_account_id is None:
         return "No master account assigned to this strategy"
-    if str(s.master_account_id) != live_master_id:
+    if not live_master_ids:
+        return "No live master session"
+    if str(s.master_account_id) not in live_master_ids:
         return "Master account for this strategy is not the currently live master"
     return "Another strategy for this master is running instead (the engine runs one strategy per master)"
 
@@ -728,12 +758,13 @@ def _strategy_pnl(
 def _build_strategy_performance(
     strategies: Sequence[GroupStrategy],
     live_master_id: Optional[str],
+    live_master_ids: Set[str],
     pnl_summaries: Dict[str, AccountPnlSummary],
     per_account_realized: Dict[str, Optional[Decimal]],
     copy_execution: CopyExecution,
     is_today: bool,
 ) -> Dict[str, Any]:
-    running_candidates = _running_candidates(strategies, live_master_id)
+    running_candidates = _running_candidates(strategies, live_master_ids)
     running = running_candidates[0] if running_candidates else None
     ambiguous = len(running_candidates) > 1
 
@@ -747,7 +778,7 @@ def _build_strategy_performance(
                 "id": str(s.id),
                 "name": s.name,
                 "status": status,
-                "status_reason": _not_running_reason(s, live_master_id, status),
+                "status_reason": _not_running_reason(s, live_master_ids, status),
                 "master": {
                     "account_id": str(s.master_account_id) if s.master_account_id else None,
                     "display_name": s.master_account.display_name if s.master_account else None,
@@ -813,7 +844,7 @@ async def _orders_by_strategy(
 
 def _real_trading_impact(
     strategies: Sequence[GroupStrategy],
-    live_master_id: Optional[str],
+    live_master_ids: Set[str],
     pnl_summaries: Dict[str, AccountPnlSummary],
     per_account_realized: Dict[str, Optional[Decimal]],
     copy_execution: CopyExecution,
@@ -822,7 +853,7 @@ def _real_trading_impact(
     """Master performance -> copy execution -> follower result, for the
     strategy the engine is actually running right now. None when nothing is
     running (never a fabricated stand-in)."""
-    running_candidates = _running_candidates(strategies, live_master_id)
+    running_candidates = _running_candidates(strategies, live_master_ids)
     running = running_candidates[0] if running_candidates else None
     if running is None:
         return None
@@ -849,6 +880,7 @@ async def get_dashboard_summary(
     redis: Any = Depends(get_redis),
     client_provider: Callable[[str], Optional[AliceBlueClient]] = Depends(get_broker_client_provider),
     live_master_id: Optional[str] = Depends(get_live_master_id),
+    live_client_ids: Set[str] = Depends(get_live_client_account_ids),
     range: str = Query("today", pattern="^(today|yesterday|7d|30d|custom)$"),
     from_date: Optional[str] = Query(None, alias="from"),
     to_date: Optional[str] = Query(None, alias="to"),
@@ -931,12 +963,49 @@ async def get_dashboard_summary(
         for a in accounts
     ]
 
-    master_account = next((a for a in accounts if str(a.id) == live_master_id), None)
+    strategies = await _load_strategies(db)
+    # Live masters: the engine's legacy master plus every strategy Master that
+    # has a live broker client and a valid session - whatever account_type the
+    # account was created with (roles are per strategy, not per account_type).
+    session_ok = {str(a.id) for a in accounts if a.is_active and a.session_valid}
+    live_master_ids: Set[str] = {
+        str(s.master_account_id)
+        for s in strategies
+        if s.master_account_id is not None
+        and str(s.master_account_id) in live_client_ids
+        and str(s.master_account_id) in session_ok
+    }
+    if live_master_id:
+        live_master_ids.add(live_master_id)
+    running_candidates = _running_candidates(strategies, live_master_ids)
+
+    accounts_by_id = {str(a.id): a for a in accounts}
+    strategy_master_ids = {str(s.master_account_id) for s in strategies if s.master_account_id is not None}
+    # Master shown in the status strip: the running strategy's Master, else the
+    # engine's live master, else the first strategy Master, else (no strategy
+    # has one) whichever account was created as MASTER - never a guess.
+    master_account = None
+    if running_candidates:
+        master_account = accounts_by_id.get(str(running_candidates[0].master_account_id))
+    if master_account is None and live_master_id:
+        master_account = accounts_by_id.get(live_master_id)
     if master_account is None:
-        # No live session yet, but still show whichever MASTER account is
-        # configured so the status strip has something honest to display.
+        master_account = next(
+            (accounts_by_id[str(s.master_account_id)] for s in strategies
+             if s.master_account_id is not None and str(s.master_account_id) in accounts_by_id),
+            None,
+        )
+    if master_account is None:
         master_account = next((a for a in accounts if a.account_type == AccountType.MASTER), None)
-    followers = [a for a in accounts if a.account_type == AccountType.FOLLOWER]
+
+    # Children = unique accounts that are members of a strategy (a strategy
+    # Master is never counted, whatever its account_type). With no strategies
+    # at all there are no roles yet, so the legacy FOLLOWER-typed count stands.
+    if strategies:
+        child_ids = {str(m.account_id) for s in strategies for m in s.members} - strategy_master_ids
+        followers = [accounts_by_id[i] for i in child_ids if i in accounts_by_id]
+    else:
+        followers = [a for a in accounts if a.account_type == AccountType.FOLLOWER]
     connected_followers = sum(1 for a in followers if a.is_active and a.session_valid)
     connected_accounts_total = sum(1 for a in accounts if a.is_active and a.session_valid)
 
@@ -947,16 +1016,13 @@ async def get_dashboard_summary(
         else None
     )
 
-    strategies = await _load_strategies(db)
-    running_candidates = _running_candidates(strategies, live_master_id)
-
     issues = await _collect_issues(db, range_start, range_end)
     strategy_performance = _build_strategy_performance(
-        strategies, live_master_id, pnl_summaries, per_account_realized, copy_execution, rng.is_today
+        strategies, live_master_id, live_master_ids, pnl_summaries, per_account_realized, copy_execution, rng.is_today
     )
     orders_by_strategy = await _orders_by_strategy(db, range_start, range_end, strategies)
     real_trading_impact = _real_trading_impact(
-        strategies, live_master_id, pnl_summaries, per_account_realized, copy_execution, rng.is_today
+        strategies, live_master_ids, pnl_summaries, per_account_realized, copy_execution, rng.is_today
     )
 
     return {
@@ -981,7 +1047,7 @@ async def get_dashboard_summary(
                     "display_name": master_account.display_name,
                     "alice_user_id": master_account.alice_user_id,
                     "session_valid": master_account.session_valid,
-                    "is_live": str(master_account.id) == live_master_id,
+                    "is_live": str(master_account.id) in live_master_ids,
                 }
             ),
             "children": {"total": len(followers), "connected": connected_followers},

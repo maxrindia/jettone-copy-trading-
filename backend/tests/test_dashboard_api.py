@@ -14,7 +14,7 @@ import pytest_asyncio
 from unittest.mock import AsyncMock
 
 from app.api.accounts import get_broker_client_provider
-from app.api.dashboard import get_live_master_id
+from app.api.dashboard import get_live_client_account_ids, get_live_master_id
 from app.core.database import get_db
 from app.core.redis import get_redis
 from app.core.trading_day import trading_day, trading_day_start_utc
@@ -52,6 +52,7 @@ async def api_client(mock_redis, db_session):
     app.dependency_overrides[get_redis] = lambda: mock_redis
     app.dependency_overrides[get_broker_client_provider] = lambda: (lambda _account_id: None)
     app.dependency_overrides[get_live_master_id] = lambda: None
+    app.dependency_overrides[get_live_client_account_ids] = lambda: set()
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -83,9 +84,10 @@ async def _master_and_child(session, master_book=MASTER_ORDER_BOOK, child_book=C
     return master, child, clients
 
 
-def _install(clients, live_master_id=None):
+def _install(clients, live_master_id=None, live_client_ids=None):
     app.dependency_overrides[get_broker_client_provider] = lambda: clients.get
     app.dependency_overrides[get_live_master_id] = lambda: live_master_id
+    app.dependency_overrides[get_live_client_account_ids] = lambda: set(live_client_ids or ())
 
 
 async def _strategy(session, name, master, members):
@@ -613,7 +615,7 @@ async def test_strategy_performance_rounds_pnl_once_not_per_member(db_session):
     async with TestingSessionLocal() as session:
         strategies = await _load_strategies(session)
     payload = _build_strategy_performance(
-        strategies, str(master.id), pnl_summaries, {}, empty_execution, is_today=True
+        strategies, str(master.id), {str(master.id)}, pnl_summaries, {}, empty_execution, is_today=True
     )
 
     row = payload["list"][0]
@@ -1398,3 +1400,176 @@ async def test_realized_timeline_daily_does_not_double_count_master_listed_as_me
     resp = await api_client.get("/api/v1/dashboard/realized-timeline?range=yesterday", headers=AUTH_HEADER)
     strat = list(resp.json()["strategies"].values())[0]
     assert [(x["date"], x["daily_pnl"]) for x in strat["daily"]] == [(yesterday.isoformat(), "50.00")]
+
+
+# -- Active Strategies: a FOLLOWER-typed strategy Master is a live master ------
+
+async def _follower_typed_master(session, *, trading_enabled=True, session_valid=True):
+    """The real production shape: both accounts were created as FOLLOWER; the
+    strategy's Master is whichever account the strategy points at."""
+    master = await _account(session, AccountType.FOLLOWER, "Dhinesh", "AB_FT_MASTER", session_valid=session_valid)
+    child = await _account(session, AccountType.FOLLOWER, "Vikash", "AB_FT_CHILD")
+    strat = await _strategy(session, "Master", master, [(child, 1.0, True)])
+    strat.trading_enabled = trading_enabled
+    await session.commit()
+    clients = {str(master.id): FakeBrokerClient(None, None), str(child.id): FakeBrokerClient(None, None)}
+    return master, child, clients
+
+
+@pytest.mark.asyncio
+async def test_enabled_strategy_with_follower_typed_master_counts_as_active(api_client, db_session):
+    async with TestingSessionLocal() as session:
+        master, child, clients = await _follower_typed_master(session)
+    # no account_type MASTER account -> the engine's legacy master id is None
+    _install(clients, live_master_id=None, live_client_ids={str(master.id), str(child.id)})
+
+    body = (await api_client.get("/api/v1/dashboard/summary", headers=AUTH_HEADER)).json()
+    assert body["platform"]["strategies"] == {"total": 1, "active": 1}
+    row = body["strategies"]["list"][0]
+    assert row["status"] == "RUNNING" and row["status_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_strategy_master_without_a_live_client_is_not_active(api_client, db_session):
+    async with TestingSessionLocal() as session:
+        master, child, clients = await _follower_typed_master(session)
+    _install(clients, live_master_id=None, live_client_ids={str(child.id)})   # master has no broker client
+
+    body = (await api_client.get("/api/v1/dashboard/summary", headers=AUTH_HEADER)).json()
+    assert body["platform"]["strategies"]["active"] == 0
+    assert body["strategies"]["list"][0]["status"] == "NOT_RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_strategy_master_with_an_invalid_session_is_not_active(api_client, db_session):
+    async with TestingSessionLocal() as session:
+        master, child, clients = await _follower_typed_master(session, session_valid=False)
+    _install(clients, live_master_id=None, live_client_ids={str(master.id), str(child.id)})
+
+    body = (await api_client.get("/api/v1/dashboard/summary", headers=AUTH_HEADER)).json()
+    assert body["platform"]["strategies"]["active"] == 0
+
+
+@pytest.mark.asyncio
+async def test_disabled_strategy_is_not_active_even_with_a_live_master(api_client, db_session):
+    async with TestingSessionLocal() as session:
+        master, child, clients = await _follower_typed_master(session, trading_enabled=False)
+    _install(clients, live_master_id=None, live_client_ids={str(master.id), str(child.id)})
+
+    body = (await api_client.get("/api/v1/dashboard/summary", headers=AUTH_HEADER)).json()
+    assert body["platform"]["strategies"]["active"] == 0
+    assert body["strategies"]["list"][0]["status"] == "DISABLED"
+
+
+@pytest.mark.asyncio
+async def test_a_live_client_that_is_only_a_child_never_makes_a_strategy_active(api_client, db_session):
+    async with TestingSessionLocal() as session:
+        master, child, clients = await _follower_typed_master(session)
+    _install(clients, live_master_id=None, live_client_ids={str(child.id)})   # Vikash is live, but only a Child
+
+    body = (await api_client.get("/api/v1/dashboard/summary", headers=AUTH_HEADER)).json()
+    assert body["platform"]["strategies"]["active"] == 0
+
+
+# -- status.master / children / execution pairing follow STRATEGY roles -------
+
+async def _summary(api_client):
+    resp = await api_client.get("/api/v1/dashboard/summary", headers=AUTH_HEADER)
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+@pytest.mark.asyncio
+async def test_status_master_and_children_come_from_the_strategy_not_account_type(api_client, db_session):
+    async with TestingSessionLocal() as session:
+        master, child, clients = await _follower_typed_master(session)
+        await _account(session, AccountType.FOLLOWER, "Unassigned", "AB_LOOSE")
+        await session.commit()
+    _install(clients, live_master_id=None, live_client_ids={str(master.id), str(child.id)})
+
+    body = await _summary(api_client)
+    assert body["status"]["master"]["display_name"] == "Dhinesh"
+    assert body["status"]["master"]["is_live"] is True
+    # Only Vikash is a Child: the FOLLOWER-typed Master and the unassigned account are not.
+    assert body["status"]["children"] == {"total": 1, "connected": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_master_listed_as_its_own_member_is_never_counted_as_a_child(api_client, db_session):
+    async with TestingSessionLocal() as session:
+        master = await _account(session, AccountType.FOLLOWER, "Dhinesh", "AB_SELF_M")
+        child = await _account(session, AccountType.FOLLOWER, "Vikash", "AB_SELF_C")
+        await _strategy(session, "Master", master, [(child, 1.0, True), (master, 1.0, True)])
+        await session.commit()
+    _install({}, live_master_id=None, live_client_ids=set())
+
+    body = await _summary(api_client)
+    assert body["status"]["children"]["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_multiple_strategies_count_unique_children_and_show_the_running_master(api_client, db_session):
+    async with TestingSessionLocal() as session:
+        m1 = await _account(session, AccountType.FOLLOWER, "MasterOne", "AB_MS_M1")
+        m2 = await _account(session, AccountType.FOLLOWER, "MasterTwo", "AB_MS_M2")
+        c1 = await _account(session, AccountType.FOLLOWER, "ChildOne", "AB_MS_C1")
+        c2 = await _account(session, AccountType.FOLLOWER, "ChildTwo", "AB_MS_C2", session_valid=False)
+        c3 = await _account(session, AccountType.FOLLOWER, "ChildThree", "AB_MS_C3")
+        s1 = await _strategy(session, "One", m1, [(c1, 1.0, True)])
+        s2 = await _strategy(session, "Two", m2, [(c2, 1.0, True), (c3, 1.0, True)])
+        s1.trading_enabled = False            # only strategy Two can be running
+        await session.commit()
+    live = {str(m1.id), str(m2.id), str(c1.id), str(c2.id), str(c3.id)}
+    _install({}, live_master_id=None, live_client_ids=live)
+
+    body = await _summary(api_client)
+    assert body["platform"]["strategies"] == {"total": 2, "active": 1}
+    assert body["status"]["master"]["display_name"] == "MasterTwo"           # the running strategy's Master
+    assert body["status"]["children"] == {"total": 3, "connected": 2}      # ChildTwo has no valid session
+
+
+@pytest.mark.asyncio
+async def test_inactive_strategy_master_is_shown_honestly_and_not_live(api_client, db_session):
+    async with TestingSessionLocal() as session:
+        master = await _account(session, AccountType.FOLLOWER, "Dhinesh", "AB_IN_M", is_active=False, session_valid=False)
+        child = await _account(session, AccountType.FOLLOWER, "Vikash", "AB_IN_C")
+        await _strategy(session, "Master", master, [(child, 1.0, True)])
+        await session.commit()
+    _install({}, live_master_id=None, live_client_ids={str(master.id), str(child.id)})
+
+    body = await _summary(api_client)
+    assert body["platform"]["strategies"]["active"] == 0
+    master_card = body["status"]["master"]
+    assert master_card["display_name"] == "Dhinesh"
+    assert master_card["session_valid"] is False and master_card["is_live"] is False
+    assert body["status"]["children"] == {"total": 1, "connected": 1}
+
+
+@pytest.mark.asyncio
+async def test_execution_impact_pairs_with_a_follower_typed_strategy_master(api_client, db_session):
+    async with TestingSessionLocal() as session:
+        master, child, clients = await _follower_typed_master(session)
+        await _copy_pair(session, master, child, OrderSide.BUY, master_price="100.00", child_price="100.75", qty=1)
+        await session.commit()
+    _install(clients, live_master_id=None, live_client_ids={str(master.id), str(child.id)})
+
+    edge = (await _summary(api_client))["execution_edge"]
+    assert edge["total"] == "-0.75"
+    assert edge["total_quantity"] == 1
+    assert edge["direction"] == "children_worse"
+
+
+@pytest.mark.asyncio
+async def test_execution_impact_ignores_a_master_order_from_a_non_master_account(api_client, db_session):
+    """The pairing is still scoped to master accounts: an order with the same
+    broker id on a plain Child (not a strategy Master, not MASTER-typed) is
+    never bound as 'the master fill'."""
+    async with TestingSessionLocal() as session:
+        master, child, clients = await _follower_typed_master(session)
+        other = await _account(session, AccountType.FOLLOWER, "Other", "AB_NOT_MASTER")
+        await _copy_pair(session, other, child, OrderSide.BUY, master_price="100.00", child_price="100.75", qty=1)
+        await session.commit()
+    _install(clients, live_master_id=None, live_client_ids={str(master.id), str(child.id)})
+
+    edge = (await _summary(api_client))["execution_edge"]
+    assert edge["total_quantity"] == 0
