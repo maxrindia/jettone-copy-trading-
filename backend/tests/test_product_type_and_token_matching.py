@@ -183,14 +183,19 @@ async def test_same_token_different_product_does_not_match(mock_redis):
 
 
 @pytest.mark.asyncio
-async def test_same_token_different_product_cnc_also_does_not_match(mock_redis):
+async def test_nfo_carry_order_product_matches_the_nrml_position(mock_redis):
+    """Changed 2026-10-14 (was: ..._cnc_also_does_not_match). On NFO there is no
+    delivery: a LONGTERM/CNC order IS the NRML position Alice Blue reports
+    (confirmed live: order `product: LONGTERM`, position `product: NRML`, same
+    instrumentId). Treating them as different made a covered SELL look naked."""
     client = _client_with_positions(mock_redis, [_nifty_position(product_type="NRML")])
 
-    available = await get_available_long(
-        client=client, exchange="NFO", symbol="NIFTY",
-        product_type="CNC", provided_token="74056",
-    )
-    assert available == 0
+    for requested in ("CNC", "LONGTERM"):
+        available = await get_available_long(
+            client=client, exchange="NFO", symbol="NIFTY",
+            product_type=requested, provided_token="74056",
+        )
+        assert available == 65, requested
 
 
 @pytest.mark.asyncio

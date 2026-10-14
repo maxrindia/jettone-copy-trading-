@@ -169,6 +169,25 @@ def normalize_product_type(raw: Any) -> str:
     return normalized
 
 
+# Derivative-only exchanges. A carry-forward (non-intraday) derivative order is
+# placed with product LONGTERM (Jettone's CNC bucket) but Alice Blue reports the
+# resulting position as NRML - confirmed live 2026-10-14 for one NFO NIFTY option:
+# order book `product: LONGTERM`, position book `product: NRML`, same instrumentId.
+# There is no delivery on these exchanges, so CNC and NRML are the same holding
+# there. Intraday (MIS) stays separate everywhere, and equity exchanges keep the
+# strict CNC/NRML/MIS separation.
+DERIVATIVE_EXCHANGES = frozenset({"NFO", "BFO", "MCX", "CDS"})
+
+
+def normalize_product_for_exchange(raw: Any, exchange: Any) -> str:
+    """normalize_product_type(), with CNC folded into NRML on derivative
+    exchanges only. Unknown products still raise (fail closed)."""
+    bucket = normalize_product_type(raw)
+    if bucket == "CNC" and str(exchange or "").upper().strip() in DERIVATIVE_EXCHANGES:
+        return "NRML"
+    return bucket
+
+
 async def get_available_long(
     client: Optional[AliceBlueClient],
     exchange: str,
@@ -244,8 +263,8 @@ async def get_available_long(
         client.redis, exchange, symbol, provided_token=provided_token,
     )
 
-    target_product = normalize_product_type(product_type)
     clean_exchange = str(exchange or "NSE").upper().strip()
+    target_product = normalize_product_for_exchange(product_type, clean_exchange)
     accepted_symbols = {
         str(canonical_symbol or "").upper().strip(),
         str(symbol or "").upper().strip(),
@@ -295,7 +314,9 @@ async def get_available_long(
         # Product match is required regardless of which identity matched -
         # the same instrument in a different product must never count.
         # Raises for an unrecognized product on a row for THIS instrument.
-        if normalize_product_type(getattr(pos, "product_type", None)) != target_product:
+        # On derivative exchanges CNC/LONGTERM and NRML are one holding (see
+        # DERIVATIVE_EXCHANGES); MIS is always separate.
+        if normalize_product_for_exchange(getattr(pos, "product_type", None), pos_exchange or clean_exchange) != target_product:
             continue
         available += int(getattr(pos, "quantity", 0) or 0)
 
