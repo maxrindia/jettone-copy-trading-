@@ -172,7 +172,7 @@ export default function PlaceOrderModal({ open, observeOnly, onClose, onPlaced }
                 id="po-symbol"
                 value={symbol}
                 onChange={(e) => setSymbol(e.target.value)}
-                placeholder="e.g. NIFTY24AUG24500CE"
+                placeholder="Enter Symbol"
                 disabled={submitting}
                 aria-invalid={!!fieldErrors.symbol}
                 className={`w-full px-3 py-2 rounded-lg border text-sm font-mono focus:outline-none focus:ring-2 focus:ring-[#111111] disabled:opacity-60 ${
@@ -213,7 +213,7 @@ export default function PlaceOrderModal({ open, observeOnly, onClose, onPlaced }
                   step={1}
                   value={quantity}
                   onChange={(e) => setQuantity(e.target.value)}
-                  placeholder="0"
+                  placeholder="Enter Quantity"
                   disabled={submitting}
                   aria-invalid={!!fieldErrors.quantity}
                   className={`w-full px-3 py-2 rounded-lg border text-sm tabular-nums focus:outline-none focus:ring-2 focus:ring-[#111111] disabled:opacity-60 ${
@@ -285,7 +285,7 @@ export default function PlaceOrderModal({ open, observeOnly, onClose, onPlaced }
                     min="0.05"
                     value={price}
                     onChange={(e) => setPrice(e.target.value)}
-                    placeholder="e.g. 2950"
+                    placeholder="Enter Price"
                     disabled={submitting}
                     aria-invalid={!!fieldErrors.price}
                     className={`w-full px-3 py-2 rounded-lg border text-sm tabular-nums focus:outline-none focus:ring-2 focus:ring-[#111111] disabled:opacity-60 ${

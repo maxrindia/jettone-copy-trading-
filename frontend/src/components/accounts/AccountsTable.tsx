@@ -15,7 +15,8 @@ export interface AccountsTableRow {
   id: string;
   displayName: string;
   aliceUserId: string;
-  role: "MASTER" | "FOLLOWER";
+  /** Current role in its strategy; null = not in any strategy. */
+  role: "MASTER" | "CHILD" | null;
   /** Redacted StaticIP.in proxy host for this specific account (see
    * lib/account-proxy.ts), or null when this account has no dedicated proxy
    * configured and its calls go out through the shared VPS IP instead. */
@@ -139,7 +140,7 @@ function exportCsv(rows: AccountsTableRow[]) {
       i + 1,
       row.displayName,
       row.aliceUserId,
-      row.role === "MASTER" ? "Master" : "Child",
+      row.role === "MASTER" ? "Master" : row.role === "CHILD" ? "Child" : "Unassigned",
       row.proxyHost ?? "Shared VPS",
       row.tradingEnabled ? "On" : "Off",
       formatDate(row.createdAt),

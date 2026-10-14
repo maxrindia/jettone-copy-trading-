@@ -26,6 +26,8 @@ interface DematCardItem {
   display_name: string;
   alice_user_id: string;
   account_type: "MASTER" | "FOLLOWER";
+  /** Current role from the strategy membership; null = in no strategy. `account_type` is only the creation-time label. */
+  strategy_role?: "MASTER" | "CHILD" | null;
   is_active: boolean;
   session_valid: boolean;
   is_emergency_stopped: boolean;
@@ -47,12 +49,12 @@ function AccountBadges({ card }: { card: DematCardItem }) {
     <>
       <span
         className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border ${
-          card.account_type === "MASTER"
+          card.strategy_role === "MASTER"
             ? "bg-orange-50 text-orange-700 border-orange-200"
             : "bg-[#F7F7F7] text-[#374151] border-[#E5E7EB]"
         }`}
       >
-        {card.account_type === "MASTER" ? "Master" : "Child"}
+        {card.strategy_role === "MASTER" ? "Master" : card.strategy_role === "CHILD" ? "Child" : "Unassigned"}
       </span>
       {card.is_emergency_stopped && (
         <span className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-red-50 text-red-700 border border-red-200">
@@ -231,9 +233,6 @@ export default function DematPage() {
           </div>
           <div>
             <h1 className="text-xl font-bold text-[#111111] tracking-tight">Demat Accounts</h1>
-            <p className="text-xs text-[#6B7280]">
-              Manage Master &amp; Child accounts, session status, and trading toggle
-            </p>
           </div>
         </div>
 
@@ -345,7 +344,7 @@ export default function DematPage() {
               id: card.id,
               displayName: card.display_name,
               aliceUserId: card.alice_user_id,
-              role: card.account_type === "MASTER" ? "MASTER" : "FOLLOWER",
+              role: card.strategy_role ?? null,
               proxyHost: accountProxyHost(card.notes),
               staticIpStatus: card.static_ip_status,
               createdAt: card.created_at,

@@ -1047,7 +1047,7 @@ export default function GroupStrategyDetailPage() {
                       setIsScriptDropdownOpen(true);
                     }}
                     onFocus={() => setIsScriptDropdownOpen(true)}
-                    placeholder="Search Script (e.g. YESBANK, RELIANCE, NIFTY)"
+                    placeholder="Search Script"
                     className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs font-semibold text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-black"
                   />
 

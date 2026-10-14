@@ -19,7 +19,7 @@ from app.services.alice_blue.client import AliceBlueClient
 from app.services.alice_blue.exceptions import AuthenticationError, IPNotWhitelistedError
 from app.models.accounts import Account, ApiCredential, CopySetting, AccountType
 from app.models.trades import CopyTrade, CopyTradeStatus, Order, OrderStatus
-from app.models.strategies import GroupStrategy, StrategyMember
+from app.models.strategies import GroupStrategy, StrategyAccountRole, StrategyMember
 from app.schemas.accounts import (
     AccountCreate,
     AccountResponse,
@@ -160,6 +160,17 @@ async def list_accounts(
 
     if db_changed:
         await db.commit()
+
+    # Current role per account (strategy_account_roles) - the same source the
+    # Dashboard's strategy rows use. Never derived from `account_type`.
+    role_rows = await db.execute(
+        select(StrategyAccountRole.account_id, StrategyAccountRole.role, GroupStrategy.name)
+        .join(GroupStrategy, GroupStrategy.id == StrategyAccountRole.strategy_id)
+        .where(GroupStrategy.deleted_at.is_(None))
+    )
+    roles = {row.account_id: (row.role, row.name) for row in role_rows}
+    for acc in accounts:
+        acc.strategy_role, acc.strategy_name = roles.get(acc.id, (None, None))
 
     return accounts
 

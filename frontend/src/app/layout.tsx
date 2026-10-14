@@ -3,8 +3,7 @@ import "@fontsource-variable/inter";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "JETTONE | Copy Trading Terminal",
-  description: "Automated 1 Master to 5 Followers Copy Trading Engine",
+  title: "JETTONE",
 };
 
 export default function RootLayout({

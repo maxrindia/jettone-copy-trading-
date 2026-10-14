@@ -78,6 +78,11 @@ class AccountResponse(AccountBase):
     # Set only by endpoints that can change whether the running engine holds
     # a broker client for this account (see AliceBlueAccountManager.sync_account).
     runtime_client_status: Optional[str] = None
+    # The account's CURRENT role, from the strategy membership registry
+    # (strategy_account_roles). `account_type` above is only the label the account was
+    # created with; None here = the account is not in any strategy.
+    strategy_role: Optional[Literal["MASTER", "CHILD"]] = None
+    strategy_name: Optional[str] = None
     copy_settings: Optional[CopySettingResponse] = None
     created_at: datetime
     updated_at: datetime

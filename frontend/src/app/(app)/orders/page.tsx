@@ -90,10 +90,7 @@ export default function OrdersPage() {
 
   return (
     <div className="space-y-6 w-full pb-16">
-      <PageHeader
-        title="Order Manager"
-        description="Unified order lifecycle: Internal UI orders & External broker mobile orders"
-      />
+      <PageHeader title="Order Manager" />
 
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex gap-1 bg-[#F3F4F6] p-1 rounded-[10px] border border-[#E5E7EB] flex-wrap">

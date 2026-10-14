@@ -65,7 +65,7 @@ export function EmergencyStopModal({
             <input
               type="text"
               required
-              placeholder="e.g. Market volatility spike, testing pause..."
+              placeholder="Enter Reason"
               value={reason}
               onChange={(e) => setReason(e.target.value)}
               className="w-full bg-[#0b0f19] border border-[#1e293b] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500"

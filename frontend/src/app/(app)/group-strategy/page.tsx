@@ -19,7 +19,6 @@ import {
   CheckCircle2,
   ReceiptText,
   CalendarDays,
-  MoreVertical,
 } from "lucide-react";
 import { useEngineData, extractError } from "@/lib/use-engine-data";
 import { EmptyState, ErrorPanel, LoadingPanel } from "@/components/ui/DataStates";
@@ -675,7 +674,6 @@ export default function GroupStrategyPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showOrderModal, setShowOrderModal] = useState<BackendStrategyResponse | null>(null);
   // Which strategy card's "⋮" overflow menu is open (only one at a time)
-  const [openCardMenu, setOpenCardMenu] = useState<string | null>(null);
 
   // Create Strategy Form State
   const [newStratName, setNewStratName] = useState("");
@@ -883,9 +881,6 @@ export default function GroupStrategyPage() {
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div>
           <h1 className="text-xl font-extrabold text-[#111111] tracking-tight">Group Strategy</h1>
-          <p className="text-xs text-[#6B7280] mt-0.5">
-            Manage group trading strategies, master accounts, and child accounts.
-          </p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -1000,55 +995,24 @@ export default function GroupStrategyPage() {
 
                     {/* Action buttons matching reference rounded boxes */}
                     <div className="flex items-center gap-1.5 text-[#6B7280] shrink-0" onClick={(e) => e.stopPropagation()}>
-                      <div className="relative">
-                        <button
-                          onClick={() => setOpenCardMenu(openCardMenu === strat.id ? null : strat.id)}
-                          className={`w-8 h-8 rounded-lg border flex items-center justify-center transition-colors shadow-xs ${
-                            openCardMenu === strat.id
-                              ? "bg-gray-100 border-[#D1D5DB] text-[#111111]"
-                              : "bg-[#F9FAFB] border-[#E5E7EB] hover:bg-gray-100 hover:text-[#111111]"
-                          }`}
-                          title="More actions"
-                          aria-haspopup="menu"
-                          aria-expanded={openCardMenu === strat.id}
-                        >
-                          <MoreVertical className="w-3.5 h-3.5" />
-                        </button>
-
-                        {openCardMenu === strat.id && (
-                          <>
-                            {/* click-away backdrop */}
-                            <div className="fixed inset-0 z-20" onClick={() => setOpenCardMenu(null)} />
-                            <div
-                              role="menu"
-                              className="absolute right-0 top-9 z-30 w-44 bg-white border border-[#E5E7EB] rounded-[10px] shadow-[0_8px_24px_rgba(15,23,42,0.12)] py-1"
-                            >
-                              <button
-                                role="menuitem"
-                                onClick={() => {
-                                  setOpenCardMenu(null);
-                                  router.push(`/group-strategy/${strat.id}`);
-                                }}
-                                className="w-full px-3 py-2 flex items-center gap-2 text-xs font-medium text-[#4B5563] hover:bg-[#F9FAFB] transition-colors text-left"
-                              >
-                                <Eye className="w-3.5 h-3.5 shrink-0" />
-                                View details
-                              </button>
-                              <button
-                                role="menuitem"
-                                onClick={() => {
-                                  setOpenCardMenu(null);
-                                  handleDeleteStrategy(strat.id);
-                                }}
-                                className="w-full px-3 py-2 flex items-center gap-2 text-xs font-medium text-red-600 hover:bg-red-50 transition-colors text-left"
-                              >
-                                <Trash2 className="w-3.5 h-3.5 shrink-0" />
-                                Delete strategy
-                              </button>
-                            </div>
-                          </>
-                        )}
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() => router.push(`/group-strategy/${strat.id}`)}
+                        className="w-8 h-8 rounded-lg border border-[#E5E7EB] bg-[#F9FAFB] flex items-center justify-center transition-colors shadow-xs hover:bg-gray-100 hover:text-[#111111]"
+                        title="View details"
+                        aria-label="View details"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteStrategy(strat.id)}
+                        className="w-8 h-8 rounded-lg border border-red-200 bg-red-50 text-red-600 flex items-center justify-center transition-colors shadow-xs hover:bg-red-100"
+                        title="Delete strategy"
+                        aria-label="Delete strategy"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
 
                     </div>
                   </div>
@@ -1270,7 +1234,7 @@ export default function GroupStrategyPage() {
                   <input
                     type="text"
                     required
-                    placeholder="e.g. NIFTY INTRADAY BREAKOUT"
+                    placeholder="Enter Strategy Name"
                     value={newStratName}
                     onChange={(e) => setNewStratName(e.target.value)}
                     className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-black"
@@ -1298,7 +1262,7 @@ export default function GroupStrategyPage() {
                   <input
                     type="number"
                     step="1000"
-                    placeholder="100000"
+                    placeholder="Enter Allocated Capital"
                     value={newStratCapital}
                     onChange={(e) => setNewStratCapital(e.target.value)}
                     className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] focus:outline-none focus:ring-2 focus:ring-black"
@@ -1419,7 +1383,7 @@ export default function GroupStrategyPage() {
                       setIsScriptDropdownOpen(true);
                     }}
                     onFocus={() => setIsScriptDropdownOpen(true)}
-                    placeholder="Search Script (e.g. YESBANK, RELIANCE, NIFTY)"
+                    placeholder="Search Script"
                     className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs font-semibold text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-black"
                   />
 

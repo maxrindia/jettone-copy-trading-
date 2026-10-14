@@ -60,7 +60,6 @@ export default function ReconciliationPage() {
     <div className="space-y-6 max-w-page mx-auto">
       <PageHeader
         title="Position Reconciliation"
-        description="Expected positions vs actual Alice Blue broker positions"
         actions={
           <>
             <label className="flex items-center gap-1.5 text-xs text-[#6B7280] cursor-pointer select-none">

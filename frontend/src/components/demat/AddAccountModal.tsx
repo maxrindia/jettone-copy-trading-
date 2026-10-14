@@ -3,6 +3,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { X, Info, Copy, Check } from "lucide-react";
+import { copyToClipboard } from "@/lib/clipboard";
 import { extractError } from "@/lib/use-engine-data";
 import OptionDropdown, { type DropdownGroup } from "@/components/ui/OptionDropdown";
 import DatePicker from "@/components/ui/DatePicker";
@@ -95,6 +96,7 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
   const [proxyUrlInput, setProxyUrlInput] = useState("");
   const [proxyExpiry, setProxyExpiry] = useState("");
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -405,20 +407,31 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
             <div className="p-3 rounded-[10px] bg-[#F9FAFB] border border-[#E5E7EB] flex items-center justify-between gap-2">
               <div className="text-xs text-[#4B5563] truncate">
                 <span className="font-semibold text-[#111111]">Redirect URL: </span>
-                <span className="text-[#374151] font-normal">{redirectUrl || "https://jettonewealth.com/platform/dematconnected"}</span>
+                <span className="text-[#374151] font-normal">{redirectUrl}</span>
               </div>
               <button
                 type="button"
-                onClick={() => {
-                  const urlToCopy = redirectUrl || "https://jettonewealth.com/platform/dematconnected";
-                  navigator.clipboard?.writeText(urlToCopy);
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 2000);
+                onClick={async () => {
+                  const ok = await copyToClipboard(redirectUrl);
+                  setCopied(ok);
+                  setCopyFailed(!ok);
+                  setTimeout(() => {
+                    setCopied(false);
+                    setCopyFailed(false);
+                  }, 2000);
                 }}
-                className="p-1.5 rounded-lg text-[#9CA3AF] hover:text-[#111111] hover:bg-gray-200 transition-colors shrink-0"
-                title="Copy Redirect URL"
+                disabled={!redirectUrl}
+                className="p-1.5 rounded-lg text-[#9CA3AF] hover:text-[#111111] hover:bg-gray-200 transition-colors shrink-0 disabled:opacity-50"
+                title={copyFailed ? "Copy failed - select the URL and copy it manually" : "Copy Redirect URL"}
+                aria-label="Copy Redirect URL"
               >
-                {copied ? <Check className="w-3.5 h-3.5 text-green-600" /> : <Copy className="w-3.5 h-3.5" />}
+                {copied ? (
+                  <Check className="w-3.5 h-3.5 text-green-600" />
+                ) : copyFailed ? (
+                  <X className="w-3.5 h-3.5 text-red-600" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5" />
+                )}
               </button>
             </div>
 
@@ -472,7 +485,7 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
                   <div className="space-y-2.5">
                     <input
                       type="text"
-                      placeholder="Alice Blue User ID (e.g. 2679246)"
+                      placeholder="Alice Blue User ID"
                       value={brokerUserId}
                       onChange={(e) => setBrokerUserId(e.target.value)}
                       className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#111111]"
@@ -499,7 +512,7 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
                   <div className="space-y-2.5">
                     <input
                       type="text"
-                      placeholder="Flattrade Client Code (e.g. FT012345)"
+                      placeholder="Flattrade Client Code"
                       value={brokerUserId}
                       onChange={(e) => setBrokerUserId(e.target.value)}
                       className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#111111]"
@@ -951,7 +964,7 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
                         </label>
                         <input
                           type="text"
-                          placeholder="dc-mum-xxx.staticip.in"
+                          placeholder="Proxy Host"
                           value={proxyHost}
                           onChange={(e) => setProxyHost(e.target.value)}
                           className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#111111] font-mono"
@@ -964,7 +977,7 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
                         <input
                           type="text"
                           inputMode="numeric"
-                          placeholder="443"
+                          placeholder="Port"
                           value={proxyPort}
                           onChange={(e) => setProxyPort(e.target.value)}
                           className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#111111] font-mono"
