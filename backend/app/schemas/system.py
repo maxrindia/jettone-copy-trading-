@@ -33,4 +33,6 @@ class StaticIPStatusResponse(BaseModel):
     active_count: int = 0
     untracked_count: int = 0
     expired_count: int = 0
+    # Proxy configurations whose assigned public IP is not recorded; not in available_count.
+    unmapped_count: int = 0
     broker: str = "Alice Blue ANT/A3"

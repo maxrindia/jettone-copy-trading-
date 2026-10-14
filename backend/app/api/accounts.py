@@ -29,7 +29,7 @@ from app.schemas.accounts import (
 )
 
 from app.services.brokers.catalog import SUPPORTED_BROKERS
-from app.services.static_ip import account_static_ip_host
+from app.services.static_ip import account_static_ip_host, account_static_ip_key
 from app.services.pnl.service import PnlService
 
 logger = logging.getLogger(__name__)
@@ -97,16 +97,18 @@ class AllAccountMetrics(BaseModel):
 
 async def _sync_static_ip_expiry(db: AsyncSession, account: Account) -> None:
     """
-    A Static IP is identified by its host, so one expiry applies to every account using that
-    host: renewing it (or entering its expiry again) updates the existing IP everywhere instead
-    of leaving per-account copies that disagree. Only touches proxy_expires_on.
+    A Static IP is identified by its recorded assigned public IP (else, as a fallback, its proxy
+    host + username), so one expiry applies to every account using that same IP: renewing it (or
+    entering its expiry again) updates the existing IP everywhere instead of leaving per-account
+    copies that disagree. Another IP on the same provider host is untouched. Only touches
+    proxy_expires_on.
     """
-    host = account_static_ip_host(account.notes)
-    if host is None or account.proxy_expires_on is None:
+    identity = account_static_ip_key(account)
+    if identity is None or account.proxy_expires_on is None:
         return
     res = await db.execute(select(Account).where(Account.deleted_at.is_(None), Account.id != account.id))
     for other in res.scalars().all():
-        if account_static_ip_host(other.notes) == host:
+        if account_static_ip_key(other) == identity:
             other.proxy_expires_on = account.proxy_expires_on
 
 
@@ -395,6 +397,7 @@ async def create_account(
         account.last_authenticated_at = None
         account.notes = payload.notes
         account.proxy_expires_on = payload.proxy_expires_on
+        account.static_ip_address = payload.static_ip_address
     else:
         account = Account(
             account_type=payload.account_type,
@@ -406,6 +409,7 @@ async def create_account(
             last_authenticated_at=None,
             notes=payload.notes,
             proxy_expires_on=payload.proxy_expires_on,
+            static_ip_address=payload.static_ip_address,
         )
         db.add(account)
 
@@ -830,7 +834,7 @@ async def update_account(
     for field, value in update_data.items():
         setattr(account, field, value)
 
-    if "proxy_expires_on" in update_data:
+    if "proxy_expires_on" in update_data or "static_ip_address" in update_data:
         await _sync_static_ip_expiry(db, account)
 
     await db.commit()

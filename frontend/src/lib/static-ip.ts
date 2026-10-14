@@ -14,6 +14,19 @@ export interface StaticIpCounts {
   active_count: number;
   untracked_count: number;
   expired_count: number;
+  /** Proxy configurations whose assigned public IP was not entered; not part of available_count. */
+  unmapped_count?: number;
+}
+
+const IPV4_LITERAL = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+const IPV6_LITERAL = /^[0-9a-f:.]+$/i;
+
+/** True for "" (the field is optional) or a literal IPv4 / IPv6 address. Hostnames are not accepted. */
+export function isValidAssignedIp(value: string): boolean {
+  const v = value.trim();
+  if (!v) return true;
+  if (IPV4_LITERAL.test(v)) return true;
+  return (v.match(/:/g) ?? []).length >= 2 && IPV6_LITERAL.test(v);
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -44,16 +57,21 @@ export function staticIpCaption(c: StaticIpCounts | null): string {
   if (c.active_count > 0) parts.push(`${c.active_count} active`);
   if (c.untracked_count > 0) parts.push(`${c.untracked_count} no expiry`);
   if (c.expired_count > 0) parts.push(`${c.expired_count} expired`);
+  const unmapped = c.unmapped_count ?? 0;
+  if (unmapped > 0) parts.push(`${unmapped} IP not entered`);
   return parts.length > 0 ? parts.join(" · ") : "No Static IP configured";
 }
 
 export function staticIpTitle(c: StaticIpCounts | null): string {
   if (!c) return "Loading Static IPs…";
   return (
-    "Distinct, non-expired Static IPs across your Demat accounts. " +
+    "Distinct, non-expired assigned Static IPs you entered on your Demat accounts. " +
     `Active (expiry date in the future): ${c.active_count}. ` +
     `Expiry not recorded: ${c.untracked_count}${c.untracked_count > 0 ? " (counted, but cannot be confirmed active)" : ""}. ` +
-    `Expired (not counted): ${c.expired_count}.`
+    `Expired (not counted): ${c.expired_count}.` +
+    ((c.unmapped_count ?? 0) > 0
+      ? ` Proxies with no assigned IP entered (not counted): ${c.unmapped_count}.`
+      : "")
   );
 }
 

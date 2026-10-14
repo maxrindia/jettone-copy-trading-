@@ -86,4 +86,5 @@ async def get_static_ip_status(db: AsyncSession = Depends(get_db)):
         active_count=summary.active,
         untracked_count=summary.untracked,
         expired_count=summary.expired,
+        unmapped_count=summary.unmapped,
     )

@@ -34,9 +34,9 @@ TOKEN = {"X-Internal-Token": "test-internal-token"}
 TODAY = date(2026, 10, 8)
 
 
-def acct(host=None, expiry=None, scheme="https://u:p@", port=""):
+def acct(host=None, expiry=None, scheme="https://u:p@", port="", ip=None):
     notes = "Broker: alicebluenew" + (f", ProxyURL: {scheme}{host}{port}" if host else "")
-    return SimpleNamespace(notes=notes, proxy_expires_on=expiry)
+    return SimpleNamespace(notes=notes, proxy_expires_on=expiry, static_ip_address=ip)
 
 
 # ── identity ────────────────────────────────────────────────────────────────
@@ -85,43 +85,102 @@ def test_no_static_ip_has_no_status_even_with_a_stray_expiry():
     assert static_ip_status("Broker: alicebluenew", date(2020, 1, 1), TODAY) is None
 
 
-# ── counting ────────────────────────────────────────────────────────────────
+# ── counting: distinct, VERIFIED assigned public IPs only ────────────────────
 
-def test_spec_example_counts_one():
-    accounts = [
-        acct("178.18.252.165", date(2026, 10, 15)),
-        acct("178.18.252.165", date(2026, 10, 20)),
-        acct("dc-mum-007.staticip.in", date(2026, 10, 1)),
-    ]
-    s = summarize_static_ips(accounts, TODAY)
-    assert (s.available, s.active, s.expired, s.untracked) == (1, 1, 1, 0)
+GATEWAY = "dc-mum-007.staticip.in"
 
 
-def test_same_host_different_ports_and_case_counts_once():
+def test_two_accounts_with_two_distinct_assigned_ips_count_two():
     s = summarize_static_ips(
-        [acct("A.example.com", date(2026, 11, 1), port=":443"), acct("a.example.com", date(2026, 11, 1), port=":8080")],
+        [
+            acct(GATEWAY, date(2026, 11, 5), scheme="https://user_a:p@", ip="203.0.113.10"),
+            acct(GATEWAY, date(2026, 11, 5), scheme="https://user_b:p@", ip="203.0.113.11"),
+        ],
+        TODAY,
+    )
+    assert (s.available, s.active, s.unmapped) == (2, 2, 0)
+
+
+def test_two_usernames_sharing_one_assigned_ip_count_once():
+    s = summarize_static_ips(
+        [
+            acct(GATEWAY, date(2026, 11, 5), scheme="https://user_a:p@", ip="203.0.113.10"),
+            acct(GATEWAY, date(2026, 11, 5), scheme="https://user_b:p@", ip="203.0.113.10"),
+        ],
+        TODAY,
+    )
+    assert (s.available, s.active) == (1, 1)
+
+
+def test_the_same_address_written_differently_is_one_ip():
+    s = summarize_static_ips(
+        [acct(GATEWAY, date(2026, 11, 5), ip="2001:db8::1"), acct(GATEWAY, date(2026, 11, 5), ip="2001:0db8:0:0:0:0:0:1")],
         TODAY,
     )
     assert s.available == 1
 
 
-def test_null_expiry_is_available_but_untracked_never_expired():
-    s = summarize_static_ips([acct("a.example.com", None), acct("b.example.com", date(2026, 10, 9))], TODAY)
+def test_expired_assignment_is_not_available():
+    s = summarize_static_ips([acct(GATEWAY, date(2026, 10, 7), ip="203.0.113.10")], TODAY)
+    assert (s.available, s.active, s.expired) == (0, 0, 1)
+
+
+def test_a_still_valid_use_keeps_a_shared_ip_available():
+    s = summarize_static_ips(
+        [acct(GATEWAY, date(2026, 1, 1), ip="203.0.113.10"), acct(GATEWAY, date(2026, 12, 1), ip="203.0.113.10")],
+        TODAY,
+    )
+    assert (s.available, s.expired) == (1, 0)
+
+
+def test_missing_assigned_ip_is_never_counted_as_verified():
+    s = summarize_static_ips(
+        [acct(GATEWAY, date(2026, 11, 5), scheme="https://user_a:p@"), acct(GATEWAY, date(2026, 11, 5), scheme="https://user_b:p@")],
+        TODAY,
+    )
+    assert (s.available, s.active, s.untracked, s.expired) == (0, 0, 0, 0)
+    assert s.unmapped == 2                       # two distinct proxy configurations still need an IP
+
+
+def test_unmapped_proxy_with_the_same_host_and_username_counts_once():
+    s = summarize_static_ips([acct(GATEWAY, None, scheme="https://user_a:p1@"), acct(GATEWAY, None, scheme="https://user_a:p2@")], TODAY)
+    assert s.unmapped == 1
+
+
+def test_missing_expiry_is_available_but_untracked_never_expired():
+    s = summarize_static_ips([acct(GATEWAY, None, ip="203.0.113.10"), acct(GATEWAY, date(2026, 10, 9), ip="203.0.113.11")], TODAY)
     assert (s.available, s.active, s.untracked, s.expired) == (2, 1, 1, 0)
 
 
-def test_expired_excluded_and_accounts_without_static_ip_ignored():
-    s = summarize_static_ips([acct("a.example.com", date(2026, 1, 1)), acct(None, None), acct(None, date(2020, 1, 1))], TODAY)
-    assert (s.available, s.expired) == (0, 1)
+def test_expiry_boundary_today_is_active_and_yesterday_is_expired():
+    s = summarize_static_ips(
+        [acct(GATEWAY, TODAY, ip="203.0.113.10"), acct(GATEWAY, date(2026, 10, 7), ip="203.0.113.11")], TODAY
+    )
+    assert (s.active, s.expired, s.available) == (1, 1, 1)
 
 
-def test_host_valid_on_any_account_stays_available():
-    s = summarize_static_ips([acct("a.example.com", date(2026, 1, 1)), acct("a.example.com", date(2026, 12, 1))], TODAY)
-    assert (s.available, s.expired) == (1, 0)
+def test_accounts_with_neither_a_proxy_nor_an_ip_are_ignored():
+    s = summarize_static_ips([acct(None, None), acct(None, date(2020, 1, 1))], TODAY)
+    assert (s.available, s.expired, s.unmapped) == (0, 0, 0)
+
+
+def test_assigned_ip_without_a_proxy_still_counts():
+    s = summarize_static_ips([acct(None, date(2026, 11, 5), ip="203.0.113.10")], TODAY)
+    assert (s.available, s.active) == (1, 1)
 
 
 def test_no_accounts_is_zero():
     assert summarize_static_ips([], TODAY).available == 0
+
+
+def test_hostname_is_not_an_ip_address():
+    from app.services.static_ip import normalize_ip_address
+
+    assert normalize_ip_address(" 203.0.113.10 ") == "203.0.113.10"
+    assert normalize_ip_address("") is None and normalize_ip_address(None) is None
+    for bad in ("dc-mum-007.staticip.in", "203.0.113", "300.1.1.1", "203.0.113.10:443"):
+        with pytest.raises(ValueError):
+            normalize_ip_address(bad)
 
 
 # ── API ─────────────────────────────────────────────────────────────────────
@@ -248,19 +307,21 @@ async def test_invalid_expiry_is_rejected(client):
 
 
 @pytest.mark.asyncio
-async def test_kpi_endpoint_counts_distinct_non_expired_hosts(client):
-    await client.post("/api/v1/accounts", json=payload("K1", "178.18.252.165", "2099-10-15"), headers=TOKEN)
-    await client.post("/api/v1/accounts", json=payload("K2", "178.18.252.165:443", "2099-10-20"), headers=TOKEN)
-    await client.post("/api/v1/accounts", json=payload("K3", "dc-mum-007.staticip.in", "2020-10-01"), headers=TOKEN)
-    await client.post("/api/v1/accounts", json=payload("K4", "untracked.example.com"), headers=TOKEN)
-    await client.post("/api/v1/accounts", json=payload("K5"), headers=TOKEN)
+async def test_kpi_endpoint_counts_distinct_verified_ips_and_reports_unmapped(client):
+    await client.post("/api/v1/accounts", json=payload("K1", "gw.example.com", "2099-10-15", static_ip_address="203.0.113.10"), headers=TOKEN)
+    await client.post("/api/v1/accounts", json=payload("K2", "gw2.example.com:443", "2099-10-20", static_ip_address="203.0.113.10"), headers=TOKEN)
+    await client.post("/api/v1/accounts", json=payload("K3", "gw.example.com", "2020-10-01", static_ip_address="203.0.113.11"), headers=TOKEN)
+    await client.post("/api/v1/accounts", json=payload("K4", "gw.example.com", None, static_ip_address="203.0.113.12"), headers=TOKEN)
+    await client.post("/api/v1/accounts", json=payload("K5", "unmapped.example.com", "2099-01-01"), headers=TOKEN)
+    await client.post("/api/v1/accounts", json=payload("K6"), headers=TOKEN)
     resp = await client.get("/api/v1/system/static-ip", headers=TOKEN)
     assert resp.status_code == 200
     body = resp.json()
-    assert body["active_count"] == 1
-    assert body["expired_count"] == 1
-    assert body["untracked_count"] == 1
+    assert body["active_count"] == 1        # 203.0.113.10 (shared by K1 and K2)
+    assert body["expired_count"] == 1       # 203.0.113.11
+    assert body["untracked_count"] == 1     # 203.0.113.12 (no expiry recorded)
     assert body["available_count"] == 2
+    assert body["unmapped_count"] == 1      # K5: a proxy with no recorded IP is not counted
 
 
 @pytest.mark.asyncio
@@ -269,3 +330,55 @@ async def test_soft_deleted_account_is_not_counted(client, db_session):
     await client.delete(f"/api/v1/accounts/{created['id']}", headers=TOKEN)
     body = (await client.get("/api/v1/system/static-ip", headers=TOKEN)).json()
     assert body["available_count"] == 0
+
+
+# -- the assigned public IP field --------------------------------------------
+
+@pytest.mark.asyncio
+async def test_assigned_ip_is_stored_normalized_and_returned(client):
+    resp = await client.post(
+        "/api/v1/accounts",
+        json=payload("IP1", "dc-mum-007.staticip.in", "2099-01-01", static_ip_address=" 2001:0db8:0:0:0:0:0:1 "),
+        headers=TOKEN,
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["static_ip_address"] == "2001:db8::1"
+    assert body["static_ip_host"] == "dc-mum-007.staticip.in"       # gateway host display unchanged (host-only)
+    assert "u:p" not in str(body["static_ip_host"])
+
+
+@pytest.mark.asyncio
+async def test_a_hostname_is_rejected_as_the_assigned_ip(client):
+    resp = await client.post(
+        "/api/v1/accounts", json=payload("IP2", "gw.example.com", None, static_ip_address="dc-mum-007.staticip.in"), headers=TOKEN
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_assigned_ip_can_be_set_and_cleared_without_touching_other_fields(client):
+    created = (await client.post("/api/v1/accounts", json=payload("IP3", "gw.example.com", "2099-01-01"), headers=TOKEN)).json()
+    assert created["static_ip_address"] is None
+    resp = await client.put(f"/api/v1/accounts/{created['id']}", json={"static_ip_address": "203.0.113.10"}, headers=TOKEN)
+    assert resp.status_code == 200 and resp.json()["static_ip_address"] == "203.0.113.10"
+    assert resp.json()["proxy_expires_on"] == "2099-01-01"
+    resp = await client.put(f"/api/v1/accounts/{created['id']}", json={"static_ip_address": ""}, headers=TOKEN)
+    assert resp.json()["static_ip_address"] is None
+
+
+@pytest.mark.asyncio
+async def test_renewing_one_assigned_ip_updates_only_accounts_with_that_ip(client):
+    def body(uid, user, ip):
+        p = payload(uid, None, "2020-01-01", static_ip_address=ip)
+        p["notes"] = f"Broker: alicebluenew, ProxyURL: https://{user}:pw@gateway.example.com"
+        return p
+
+    a = (await client.post("/api/v1/accounts", json=body("GW1", "user_a", "203.0.113.10"), headers=TOKEN)).json()
+    await client.post("/api/v1/accounts", json=body("GW2", "user_b", "203.0.113.10"), headers=TOKEN)   # same IP, other login
+    await client.post("/api/v1/accounts", json=body("GW3", "user_c", "203.0.113.11"), headers=TOKEN)   # another IP, same gateway
+    await client.put(f"/api/v1/accounts/{a['id']}", json={"proxy_expires_on": "2099-03-01"}, headers=TOKEN)
+    rows = {r["alice_user_id"]: r for r in (await client.get("/api/v1/accounts", headers=TOKEN)).json()}
+    assert rows["GW1"]["proxy_expires_on"] == rows["GW2"]["proxy_expires_on"] == "2099-03-01"
+    assert rows["GW3"]["proxy_expires_on"] == "2020-01-01"
+    assert rows["GW1"]["static_ip_host"] == rows["GW3"]["static_ip_host"] == "gateway.example.com"

@@ -9,7 +9,7 @@ import OptionDropdown, { type DropdownGroup } from "@/components/ui/OptionDropdo
 import DatePicker from "@/components/ui/DatePicker";
 import { normalizeProxyHost } from "@/lib/proxy-host";
 import { buildProxyUrl, parseProxyUrl, validateProxyUrlInput } from "@/lib/proxy-config";
-import { isValidExpiryInput } from "@/lib/static-ip";
+import { isValidAssignedIp, isValidExpiryInput } from "@/lib/static-ip";
 import { confirmAliceBlueLogin, recordReconnectIntent, setReconnectTarget } from "@/lib/alice-blue-login";
 
 export interface AddDematPayload {
@@ -30,6 +30,7 @@ export interface EditDematAccountData {
   alice_user_id: string;
   notes?: string | null;
   proxy_expires_on?: string | null;
+  static_ip_address?: string | null;
 }
 
 interface AddAccountModalProps {
@@ -95,6 +96,7 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
   const [connectionType, setConnectionType] = useState<ConnectionType>("host");
   const [proxyUrlInput, setProxyUrlInput] = useState("");
   const [proxyExpiry, setProxyExpiry] = useState("");
+  const [assignedIp, setAssignedIp] = useState("");
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -167,6 +169,7 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
         setConnectionType("host");
         setProxyUrlInput("");
         setProxyExpiry(accountToEdit.proxy_expires_on ?? "");
+        setAssignedIp(accountToEdit.static_ip_address ?? "");
         if (parsedProxy) {
           setStaticIpEnabled(true);
           setProxyScheme(parsedProxy.scheme ?? "https");
@@ -188,6 +191,7 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
         setEmail("");
         setConnectWithIp(false);
         setIpAddress("");
+        setAssignedIp("");
         setBrokerUserId("");
         setApiKey("");
         setApiSecret("");
@@ -272,6 +276,12 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
     }
     // Date only (YYYY-MM-DD, IST calendar). null clears it: "expiry not tracked".
     const expiryToStore = staticIpEnabled && proxyExpiry ? proxyExpiry : null;
+    // The public IP StaticIP.in assigned to this account (null clears it). Never the gateway host.
+    if (staticIpEnabled && !isValidAssignedIp(assignedIp)) {
+      setError("Assigned public IP must be an IPv4 or IPv6 address, not a hostname.");
+      return;
+    }
+    const assignedIpToStore = staticIpEnabled && assignedIp.trim() ? assignedIp.trim() : null;
 
     setSubmitting(true);
     try {
@@ -297,6 +307,7 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
             broker: broker,
             notes: notesString,
             proxy_expires_on: expiryToStore,
+            static_ip_address: assignedIpToStore,
             is_active: true,
           }),
         });
@@ -312,6 +323,7 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
             broker: broker,
             notes: notesString,
             proxy_expires_on: expiryToStore,
+            static_ip_address: assignedIpToStore,
           }),
         });
       }
@@ -1026,6 +1038,28 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
                       </p>
                     </div>
                   )}
+
+                  <div>
+                    <label
+                      htmlFor="assigned-public-ip"
+                      className="block text-[10px] font-semibold text-[#4B5563] mb-1 uppercase tracking-wider"
+                    >
+                      Assigned Public IP
+                    </label>
+                    <input
+                      id="assigned-public-ip"
+                      type="text"
+                      value={assignedIp}
+                      onChange={(e) => setAssignedIp(e.target.value)}
+                      placeholder="Assigned Public IP"
+                      autoComplete="off"
+                      className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#111111]"
+                    />
+                    <p className="mt-1 text-[10px] text-[#6B7280]">
+                      The IP shown for this plan in your StaticIP.in dashboard. Used only to count distinct Static IPs;
+                      it does not change routing.
+                    </p>
+                  </div>
 
                   <div>
                     <label className="block text-[10px] font-semibold text-[#4B5563] mb-1 uppercase tracking-wider">

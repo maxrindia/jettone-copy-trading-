@@ -2,9 +2,9 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 from typing import List, Literal, Optional
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 from app.models.accounts import AccountType, QuantityMode
-from app.services.static_ip import account_static_ip_host, static_ip_status
+from app.services.static_ip import account_static_ip_host, normalize_ip_address, static_ip_status
 
 
 class CopySettingBase(BaseModel):
@@ -50,6 +50,16 @@ class AccountBase(BaseModel):
     notes: Optional[str] = None
     # Last valid day of the Static IP (date only, IST). Omitted/None = expiry not tracked.
     proxy_expires_on: Optional[date] = None
+    # The public IP StaticIP.in assigned to this account. Optional; blank = not recorded.
+    static_ip_address: Optional[str] = None
+
+    @field_validator("static_ip_address")
+    @classmethod
+    def _valid_ip(cls, value: Optional[str]) -> Optional[str]:
+        try:
+            return normalize_ip_address(value)
+        except ValueError:
+            raise ValueError("static_ip_address must be an IPv4 or IPv6 address (not a hostname)")
 
 
 class AccountCreate(AccountBase):
@@ -65,7 +75,16 @@ class AccountUpdate(BaseModel):
     is_emergency_stopped: Optional[bool] = None
     notes: Optional[str] = None
     proxy_expires_on: Optional[date] = None
+    static_ip_address: Optional[str] = None
     visibility: Optional[Literal["PUBLIC", "PRIVATE"]] = None
+
+    @field_validator("static_ip_address")
+    @classmethod
+    def _valid_ip(cls, value: Optional[str]) -> Optional[str]:
+        try:
+            return normalize_ip_address(value)
+        except ValueError:
+            raise ValueError("static_ip_address must be an IPv4 or IPv6 address (not a hostname)")
 
 
 class AccountResponse(AccountBase):
@@ -97,4 +116,4 @@ class AccountResponse(AccountBase):
     @property
     def static_ip_status(self) -> Optional[str]:
         """ACTIVE / EXPIRED / UNTRACKED, or None when the account has no Static IP."""
-        return static_ip_status(self.notes, self.proxy_expires_on)
+        return static_ip_status(self.notes, self.proxy_expires_on, assigned_ip=self.static_ip_address)

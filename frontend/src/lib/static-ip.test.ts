@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeStaticIp, formatExpiry, isValidExpiryInput, staticIpCaption } from "./static-ip";
+import { describeStaticIp, formatExpiry, isValidAssignedIp, isValidExpiryInput, staticIpCaption } from "./static-ip";
 
 const counts = (active: number, untracked: number, expired: number) => ({
   available_count: active + untracked,
@@ -64,5 +64,25 @@ describe("describeStaticIp", () => {
     expect(d.label).not.toMatch(/expired/i);
     expect(d.detail).toBe("Configured · expiry not tracked");
     expect(d.action).toBe("Set expiry");
+  });
+});
+
+describe("assigned public IP", () => {
+  it("accepts blank (optional), IPv4 and IPv6 literals", () => {
+    expect(isValidAssignedIp("")).toBe(true);
+    expect(isValidAssignedIp(" 203.0.113.10 ")).toBe(true);
+    expect(isValidAssignedIp("2001:db8::1")).toBe(true);
+  });
+
+  it("rejects hostnames and malformed addresses", () => {
+    for (const bad of ["dc-mum-007.staticip.in", "203.0.113", "300.1.1.1", "203.0.113.10:443"]) {
+      expect(isValidAssignedIp(bad)).toBe(false);
+    }
+  });
+
+  it("says when a proxy has no assigned IP entered, without counting it", () => {
+    const c = { available_count: 0, active_count: 0, untracked_count: 0, expired_count: 0, unmapped_count: 2 };
+    expect(staticIpCaption(c)).toBe("2 IP not entered");
+    expect(staticIpCaption({ ...c, active_count: 1, available_count: 1 })).toBe("1 active · 2 IP not entered");
   });
 });

@@ -60,6 +60,10 @@ class Account(Base, TimestampMixin):
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Last valid day (IST calendar date) of the Static IP in notes' ProxyURL; NULL = expiry not tracked.
     proxy_expires_on: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    # The public IP address StaticIP.in assigned to this account (entered by the
+    # owner; never derived from the proxy host/username). NULL = not recorded, in
+    # which case the account's proxy is NOT counted as a verified Static IP.
+    static_ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # Relationship to CopySetting
