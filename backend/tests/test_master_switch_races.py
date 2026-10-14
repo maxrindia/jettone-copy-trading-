@@ -227,6 +227,8 @@ async def _swap_master_in_db(strategy_id, new_master_id, old_master_id):
 @pytest.mark.asyncio
 async def test_new_master_event_during_switch_waits_and_is_processed_not_dropped(db_session, mock_redis, monkeypatch):
     monkeypatch.setattr("app.services.runtime.engine_loop.settings.ENGINE_LIVE_TRADING_ENABLED", True)
+    # Live Trading state is read from the database (stored value, else this env default).
+    monkeypatch.setattr("app.services.live_trading.AsyncSessionLocal", __import__("conftest").TestingSessionLocal)
     monkeypatch.setattr("app.services.runtime.engine_loop.is_master_trading_enabled", AsyncMock(return_value=True))
     dhinesh, vikash = await _account(db_session, "dhinesh", AccountType.MASTER), await _account(db_session, "vikash")
     strategy = await link_strategy(db_session, dhinesh, [vikash])
@@ -257,6 +259,8 @@ async def test_new_master_event_during_switch_waits_and_is_processed_not_dropped
 @pytest.mark.asyncio
 async def test_old_master_event_during_switch_is_recorded_reported_and_not_copied(db_session, mock_redis, monkeypatch):
     monkeypatch.setattr("app.services.runtime.engine_loop.settings.ENGINE_LIVE_TRADING_ENABLED", True)
+    # Live Trading state is read from the database (stored value, else this env default).
+    monkeypatch.setattr("app.services.live_trading.AsyncSessionLocal", __import__("conftest").TestingSessionLocal)
     monkeypatch.setattr("app.services.runtime.engine_loop.is_master_trading_enabled", AsyncMock(return_value=True))
     dhinesh, vikash = await _account(db_session, "dhinesh", AccountType.MASTER), await _account(db_session, "vikash")
     strategy = await link_strategy(db_session, dhinesh, [vikash])

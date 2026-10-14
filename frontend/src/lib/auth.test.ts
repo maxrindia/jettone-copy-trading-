@@ -6,9 +6,9 @@
  * handful of hardcoded literal passwords. This file proves that only the
  * real bcrypt-hashed owner password (ADMIN_PASSWORD_HASH) can authenticate.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import bcrypt from "bcryptjs";
-import { verifyCredentials } from "./auth";
+import { _resetLoginThrottleForTests, verifyCredentials } from "./auth";
 
 const TEST_PASSWORD = "correct-horse-battery-staple";
 let originalHash: string | undefined;
@@ -21,6 +21,10 @@ beforeAll(async () => {
   // scripts/hash-password.mjs. bcrypt.compare() works against a hash of any
   // cost, so this doesn't change what verifyCredentials() is actually doing.
   process.env.ADMIN_PASSWORD_HASH = await bcrypt.hash(TEST_PASSWORD, 4);
+});
+
+beforeEach(() => {
+  _resetLoginThrottleForTests();
 });
 
 afterAll(() => {
@@ -82,5 +86,41 @@ describe("verifyCredentials", () => {
     } finally {
       process.env.ADMIN_PASSWORD_HASH = saved;
     }
+  });
+});
+
+describe("username and brute-force brake", () => {
+  it("accepts the username 'admin' with the right password", async () => {
+    const user = await verifyCredentials("admin", TEST_PASSWORD);
+    expect(user?.role).toBe("admin");
+  });
+
+  it("is case-insensitive for the username and trims it", async () => {
+    expect(await verifyCredentials("  ADMIN ", TEST_PASSWORD)).not.toBeNull();
+  });
+
+  it("rejects any other username even with the right password", async () => {
+    expect(await verifyCredentials("root", TEST_PASSWORD)).toBeNull();
+    expect(await verifyCredentials("someone@example.com", TEST_PASSWORD)).toBeNull();
+  });
+
+  it("locks out after 5 consecutive failures, even for the right password, until reset", async () => {
+    for (let i = 0; i < 5; i += 1) {
+      expect(await verifyCredentials("admin", "wrong-" + i)).toBeNull();
+    }
+    expect(await verifyCredentials("admin", TEST_PASSWORD)).toBeNull(); // locked
+    _resetLoginThrottleForTests();
+    expect(await verifyCredentials("admin", TEST_PASSWORD)).not.toBeNull();
+  });
+
+  it("a successful login clears the failure count", async () => {
+    for (let i = 0; i < 4; i += 1) {
+      await verifyCredentials("admin", "wrong-" + i);
+    }
+    expect(await verifyCredentials("admin", TEST_PASSWORD)).not.toBeNull();
+    for (let i = 0; i < 4; i += 1) {
+      await verifyCredentials("admin", "wrong-again-" + i);
+    }
+    expect(await verifyCredentials("admin", TEST_PASSWORD)).not.toBeNull(); // 4 < 5: still allowed
   });
 });

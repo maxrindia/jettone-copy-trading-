@@ -62,6 +62,7 @@ from app.services.pnl.historical import (
     compute_historical_realized,
 )
 from app.services.pnl.service import AccountPnlSummary, AccountRealizedTimeline, PnlService
+from app.services.live_trading import get_live_trading_state
 from app.services.reliability.emergency_stop import EmergencyStopService, is_master_trading_enabled
 
 logger = logging.getLogger("dashboard")
@@ -969,7 +970,7 @@ async def get_dashboard_summary(
             "strategies": {"total": len(strategies), "active": len(running_candidates)},
         },
         "status": {
-            "live_trading_enabled": settings.ENGINE_LIVE_TRADING_ENABLED,
+            "live_trading_enabled": (await get_live_trading_state(db)).enabled,
             "master_trading_enabled": await is_master_trading_enabled(redis),
             "kill_switch_active": await EmergencyStopService(redis).is_global_active(),
             "master": (

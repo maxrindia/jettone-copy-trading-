@@ -859,6 +859,8 @@ async def test_old_master_events_after_switch_are_not_replicated_new_master_even
     db_session, mock_redis, monkeypatch, trio
 ):
     monkeypatch.setattr("app.services.runtime.engine_loop.settings.ENGINE_LIVE_TRADING_ENABLED", True)
+    # Live Trading state is read from the database (stored value, else this env default).
+    monkeypatch.setattr("app.services.live_trading.AsyncSessionLocal", TestingSessionLocal)
     monkeypatch.setattr("app.services.runtime.engine_loop.is_master_trading_enabled", AsyncMock(return_value=True))
     detectors = {}
     trade = MagicMock(event_type="LIMIT_CREATED", master_order_id="X", symbol="RELIANCE", side="BUY", quantity=10)

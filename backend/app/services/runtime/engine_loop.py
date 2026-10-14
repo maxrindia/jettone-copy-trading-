@@ -29,6 +29,7 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
+from app.services.live_trading import event_allowed_when_live_off, is_live_trading_enabled
 from app.models.strategies import GroupStrategy, StrategyMember
 from app.models.trades import Order, OrderSide, OrderSource, OrderStatus
 from app.services import strategy_membership as membership
@@ -262,9 +263,12 @@ class EngineLoop:
         )
         await self._fill_syncer.start()
 
-        live_mode = settings.ENGINE_LIVE_TRADING_ENABLED
+        # Live Trading is a runtime switch (UI), re-read for every event below;
+        # this only logs where it stands at startup.
+        live_mode = await is_live_trading_enabled()
         logger.info(
-            f"EngineLoop mode: {'LIVE TRADING' if live_mode else 'OBSERVE-ONLY (no orders will be placed)'}."
+            f"EngineLoop mode: {'LIVE TRADING' if live_mode else 'OBSERVE-ONLY (no orders will be placed)'} "
+            "(switchable at runtime from the app)."
         )
 
         async def persist_and_process_event(event):
@@ -363,9 +367,14 @@ class EngineLoop:
                         if trade_event is None:
                             return
 
-                        if not live_mode:
+                        # Re-evaluated per event so the UI switch applies at once.
+                        # OFF: no new order, no modification; a master CANCELLATION
+                        # may still propagate (it only reduces exposure).
+                        if not await is_live_trading_enabled() and not event_allowed_when_live_off(
+                            trade_event.event_type
+                        ):
                             logger.info(
-                                f"[EngineLoop][observe-only] Would process {trade_event.event_type} for {trade_event.symbol} "
+                                f"[EngineLoop][live-trading OFF] Would process {trade_event.event_type} for {trade_event.symbol} "
                                 f"{trade_event.side} qty={trade_event.quantity}"
                             )
                             return

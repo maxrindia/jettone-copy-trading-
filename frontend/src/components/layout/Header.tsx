@@ -6,6 +6,7 @@ import { LogOut, ArrowUpRight, Loader2 } from "lucide-react";
 import { useEngineData } from "@/lib/use-engine-data";
 import Button from "@/components/ui/Button";
 import { setSigningOut as markSigningOut } from "@/lib/session-guard";
+import LiveTradingToggle from "@/components/layout/LiveTradingToggle";
 
 export default function Header() {
   const { data: session, status } = useSession();
@@ -53,6 +54,7 @@ export default function Header() {
   return (
     <header className="h-16 bg-white border-b border-[#E5E7EB] px-6 lg:px-8 flex items-center justify-between gap-4 sticky top-0 z-30 shrink-0">
       <div className="flex items-center gap-3 min-w-0">
+        {session && <LiveTradingToggle />}
         {emergencyStop && (
           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold border bg-red-50 text-red-700 border-red-200">
             <span className="relative flex w-1.5 h-1.5" aria-hidden>

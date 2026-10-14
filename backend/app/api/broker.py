@@ -29,6 +29,7 @@ from app.services.alice_blue.types import (
 from app.services.copy_engine.events import MasterTradeEvent
 from app.services.copy_engine.pipeline import CopyEnginePipeline
 from app.services.copy_engine.validator import EventValidator
+from app.services.live_trading import get_live_trading_state
 from app.services.monitoring.notifier import emit_system_event
 from app.services.reliability.emergency_stop import (
     is_master_trading_enabled,
@@ -306,7 +307,7 @@ async def place_manual_master_order(
     """
     Places a REAL order on the master account and replicates it to all
     followers through the standard copy pipeline (validation, risk, dedup).
-    Gated by ENGINE_LIVE_TRADING_ENABLED and the master trading toggle.
+    Gated by the Live Trading switch and the master trading toggle.
 
     Crash-safety: a PENDING Order row is persisted under `client_order_id`
     BEFORE the broker is called, and the broker is submitted exactly once.
@@ -315,10 +316,10 @@ async def place_manual_master_order(
     broker_order_id) remains the recovery anchor -- the order is never
     reported back as unplaced.
     """
-    if not settings.ENGINE_LIVE_TRADING_ENABLED:
+    if not (await get_live_trading_state(db)).enabled:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Engine is in observe-only mode (ENGINE_LIVE_TRADING_ENABLED=false).",
+            detail="Live Trading is OFF. Turn it ON in the app header to place orders.",
         )
     if not await is_master_trading_enabled(redis):
         raise HTTPException(

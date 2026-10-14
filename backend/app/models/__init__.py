@@ -5,6 +5,7 @@ from app.models.audit import AuditLog, SystemEvent, EventSeverity
 from app.models.users import AppUser, UserRole
 from app.models.reconciliation import ReconciliationRecord
 from app.models.strategies import GroupStrategy, StrategyMember, StrategyAccountRole
+from app.models.platform_settings import PlatformSetting
 
 __all__ = [
     "Base",
@@ -27,6 +28,7 @@ __all__ = [
     "UserRole",
     "ReconciliationRecord",
     "GroupStrategy",
+    "PlatformSetting",
     "StrategyMember",
     "StrategyAccountRole",
 ]
