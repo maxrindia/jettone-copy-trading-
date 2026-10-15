@@ -492,7 +492,7 @@ async def test_old_reconciliation_items_warn_but_do_not_block(db_session, trio):
 
 @pytest.mark.asyncio
 async def test_open_positions_block_and_nothing_is_squared_off_or_cancelled(db_session, trio):
-    trio.brokers[str(trio.vikash.id)]._positions = [_pos(qty=10), _pos(symbol="ITC-EQ", qty=0)]
+    trio.brokers[str(trio.vikash.id)]._positions = [_pos(qty=10, product="NRML"), _pos(symbol="ITC-EQ", qty=0)]
     with pytest.raises(strategy_switch.SwitchBlocked) as exc:
         await strategy_switch.execute_switch(db_session, trio.strategy.id, trio.arun.id, "CHILD",
                                              _provider(trio.brokers))
@@ -557,7 +557,7 @@ async def test_broker_verification_failure_fails_closed(db_session, trio, failur
 async def test_preflight_and_switch_endpoints(api_client, trio):
     for acc in (trio.dhinesh, trio.vikash, trio.arun):
         api_client.brokers[str(acc.id)] = _Broker()
-    api_client.brokers[str(trio.vikash.id)]._positions = [_pos(qty=-5)]
+    api_client.brokers[str(trio.vikash.id)]._positions = [_pos(qty=-5, product="NRML")]
 
     resp = await api_client.get(
         f"/api/v1/strategies/{trio.strategy.id}/switch-master/preflight",
@@ -1097,7 +1097,7 @@ async def test_earlier_day_reconciliation_copy_never_blocks_whatever_the_product
 async def test_unresolved_reconciliation_does_not_hide_a_real_live_blocker(db_session, trio):
     """Reconciliation noise is advisory, but a live open position still blocks."""
     await _old_unresolved_copy(db_session, trio.vikash.id, "CNC")
-    trio.brokers[str(trio.dhinesh.id)]._positions = [_pos(qty=1)]
+    trio.brokers[str(trio.dhinesh.id)]._positions = [_pos(qty=1, product="NRML")]
     pre = await _preflight(db_session, trio, trio.arun)
     assert not pre.allowed
     assert {b.code for b in pre.blockers} == {"OPEN_POSITIONS"}
@@ -1122,7 +1122,7 @@ async def test_only_unverifiable_blockers_can_be_overridden(db_session, trio):
 @pytest.mark.asyncio
 async def test_real_blockers_are_never_overridable(db_session, trio):
     await _unreadable(trio, trio.arun.id)                      # unverifiable...
-    trio.brokers[str(trio.vikash.id)]._positions = [_pos(qty=3)]  # ...plus a REAL open position
+    trio.brokers[str(trio.vikash.id)]._positions = [_pos(qty=3, product="NRML")]  # ...plus a REAL open carry position
     pre = await _preflight(db_session, trio, trio.arun)
     assert not pre.allowed and not pre.can_override
     with pytest.raises(strategy_switch.SwitchBlocked):

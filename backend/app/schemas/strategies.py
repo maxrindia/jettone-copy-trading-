@@ -88,6 +88,10 @@ class MasterSwitchRequest(BaseModel):
     old_master_action: str = Field(default="REMOVE", pattern="^(CHILD|REMOVE)$")
     # Only honored when the sole blockers are "broker verification unavailable".
     acknowledge_unverified: bool = False
+    # Required when the preflight reports open CNC positions: the user
+    # acknowledges they stay open in Alice Blue and are not closed or
+    # transferred by Jettone. Enforced by the engine, not just the UI.
+    acknowledge_cnc_positions: bool = False
 
 
 class StrategyResponse(BaseModel):

@@ -218,6 +218,7 @@ async def switch_master(
                 activations=preflight.activations()
             ),
             acknowledge_unverified=payload.acknowledge_unverified,
+            acknowledge_cnc_positions=payload.acknowledge_cnc_positions,
         )
     except strategy_switch.SwitchValidationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)

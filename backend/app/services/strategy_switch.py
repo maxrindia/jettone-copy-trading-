@@ -19,13 +19,25 @@ Preflight blockers (any one blocks; every check fails closed):
 totals are warnings, not blockers: they are noisy or incomplete, and
 everything a switch depends on is verified live. See CARRY_POSITION_UNVERIFIED.)
 - OPEN_POSITIONS          the live broker position book shows a non-zero
-                          position on any account of the strategy
+                          position on any account of the strategy in a
+                          product other than CNC or intraday (NRML/carry, or a
+                          product Jettone cannot classify - fail closed)
 - CARRY_POSITION_UNVERIFIED  Jettone's own records show an open CNC/NRML
                           quantity. No Alice Blue holdings endpoint has been
                           verified, so a flat position book is NOT taken as
                           proof that delivery/carry-forward holdings are gone.
 - BROKER_VERIFICATION_UNAVAILABLE  an order book or position book could not be
                           fetched, or the engine holds no broker client
+
+Open CNC (delivery) and intraday positions do NOT block a switch. They are
+reported as warnings:
+
+- CNC_POSITIONS_OPEN      delivery positions stay open in Alice Blue; Jettone
+                          never closes or transfers them. The switch then needs
+                          the user's explicit acknowledgement
+                          (acknowledge_cnc_positions), re-checked server side
+                          under the locks.
+- INTRADAY_POSITIONS_OPEN informational only.
 
 Activation boundary: the new Master's order book is snapshotted here, under
 the lock, while it has no working order. Its monitor treats exactly those
@@ -60,7 +72,11 @@ from app.models.strategies import (
 from app.models.trades import CopyTrade, CopyTradeStatus, Order, OrderSide, OrderSource, OrderStatus
 from app.services import strategy_membership as membership
 from app.services.alice_blue.client import order_book_row_id
-from app.services.copy_engine.risk_inputs import UnknownProductTypeError, normalize_product_type
+from app.services.copy_engine.risk_inputs import (
+    UnknownProductTypeError,
+    normalize_product_for_exchange,
+    normalize_product_type,
+)
 from app.services.monitoring.notifier import emit_system_event
 
 logger = logging.getLogger(__name__)
@@ -118,6 +134,9 @@ class SwitchPreflight:
     warnings: List[SwitchBlocker]
     limitations: List[str]
     checked_accounts: List[Dict[str, str]]
+    # True when open CNC positions exist: the switch is allowed only with an
+    # explicit acknowledgement that Jettone will not close or transfer them.
+    requires_cnc_acknowledgement: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -454,12 +473,37 @@ async def run_preflight(
                 "Alice Blue position book could not be fetched, so open positions cannot be ruled out.")
         else:
             open_pos = [p for p in positions if int(getattr(p, "quantity", 0) or 0) != 0]
-            if open_pos:
+            cnc_pos, intraday_pos, blocking_pos = [], [], []
+            for p in open_pos:
+                try:
+                    bucket = normalize_product_for_exchange(p.product_type, getattr(p, "exchange", None))
+                except UnknownProductTypeError:
+                    bucket = None  # cannot classify -> keeps blocking (fail closed)
+                if bucket == "CNC":
+                    cnc_pos.append(p)
+                elif bucket == "MIS":
+                    intraday_pos.append(p)
+                else:
+                    blocking_pos.append(p)
+
+            def _pos_label(p) -> str:
+                return f"{p.symbol} {p.product_type} qty {int(p.quantity):+d}"
+
+            if blocking_pos:
                 add(blockers, "OPEN_POSITIONS", acc,
-                    f"{len(open_pos)} open position(s). Square them off in Alice Blue before switching - "
+                    f"{len(blocking_pos)} open position(s). Square them off in Alice Blue before switching - "
                     "Jettone never squares off automatically.",
-                    len(open_pos),
-                    [f"{p.symbol} {p.product_type} qty {int(p.quantity):+d}" for p in open_pos])
+                    len(blocking_pos), [_pos_label(p) for p in blocking_pos])
+            if cnc_pos:
+                add(warnings, "CNC_POSITIONS_OPEN", acc,
+                    f"{len(cnc_pos)} open CNC (delivery) position(s). They stay open in Alice Blue; Jettone "
+                    "will not close or transfer them automatically.",
+                    len(cnc_pos), [_pos_label(p) for p in cnc_pos])
+            if intraday_pos:
+                add(warnings, "INTRADAY_POSITIONS_OPEN", acc,
+                    f"{len(intraday_pos)} open intraday position(s). Exits for them will not be copied from "
+                    "the old Master after the switch.",
+                    len(intraday_pos), [_pos_label(p) for p in intraday_pos])
 
     result = SwitchPreflight(
         strategy_id=str(strategy.id),
@@ -475,6 +519,7 @@ async def run_preflight(
         checked_accounts=[
             {"account_id": str(a), "account_name": names.get(a, str(a)), "role": r} for a, r in scope.items()
         ],
+        requires_cnc_acknowledgement=any(w.code == "CNC_POSITIONS_OPEN" for w in warnings),
     )
     # Kept off the dataclass fields so they never reach the API response.
     result.new_master_order_ids = new_master_snapshot
@@ -491,6 +536,7 @@ async def execute_switch(
     *,
     after_commit: Optional[Callable[["SwitchPreflight"], Any]] = None,
     acknowledge_unverified: bool = False,
+    acknowledge_cnc_positions: bool = False,
 ) -> SwitchPreflight:
     """Re-verifies and commits a Master switch under the switch locks.
 
@@ -515,6 +561,16 @@ async def execute_switch(
             logger.warning(
                 f"[MasterSwitch] Switching strategy {strategy_id} with UNVERIFIED broker state "
                 f"(user acknowledged): {[(b.account_name, b.message) for b in preflight.blockers]}"
+            )
+
+        if preflight.requires_cnc_acknowledgement and not acknowledge_cnc_positions:
+            # Decided on the preflight re-run under the locks, so a client can
+            # never skip the acknowledgement by not asking for the preflight.
+            raise SwitchValidationError(
+                409,
+                "CNC_ACKNOWLEDGEMENT_REQUIRED",
+                "Open CNC positions will stay open in Alice Blue. Acknowledge that Jettone will not close "
+                "or transfer them to switch the Master.",
             )
 
         strategy = await _load_strategy(db, strategy_id)

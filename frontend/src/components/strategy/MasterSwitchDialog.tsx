@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { AlertTriangle, CheckCircle2, RotateCw, X } from "lucide-react";
 import Button from "@/components/ui/Button";
 import { extractError } from "@/lib/use-engine-data";
+import { CNC_ACKNOWLEDGEMENT_TEXT, canConfirmSwitch, requiresCncAcknowledgement } from "@/lib/master-switch";
 
 export interface SwitchAccount {
   id: string;
@@ -29,6 +30,8 @@ interface SwitchPreflight {
   warnings: SwitchBlocker[];
   limitations: string[];
   checked_accounts: { account_id: string; account_name: string; role: string }[];
+  /** Open CNC positions exist: the switch needs the user's acknowledgement (enforced by the engine). */
+  requires_cnc_acknowledgement?: boolean;
 }
 
 type OldMasterAction = "CHILD" | "REMOVE";
@@ -42,6 +45,8 @@ const ADVISORY_CODES = new Set(["RECONCILIATION_UNRESOLVED", "RECONCILIATION_HIS
 const BLOCKER_TITLES: Record<string, string> = {
   PENDING_MASTER_ORDERS: "Pending Master orders",
   PENDING_CHILD_ORDERS: "Pending or partially filled Child orders",
+  CNC_POSITIONS_OPEN: "Open CNC (delivery) positions",
+  INTRADAY_POSITIONS_OPEN: "Open intraday positions",
   COPY_IN_FLIGHT: "Copy placement in progress",
   RECONCILIATION_UNRESOLVED: "Flagged for review today",
   OPEN_POSITIONS: "Open positions detected",
@@ -137,6 +142,10 @@ export default function MasterSwitchDialog({
   // Only offered when Alice Blue could not be read (never for real findings):
   // the user confirms they checked the accounts themselves.
   const [acknowledged, setAcknowledged] = useState(false);
+  // Open CNC positions stay open in Alice Blue; the switch needs this explicit,
+  // initially-unchecked acknowledgement. The dialog is unmounted when closed,
+  // and every re-check also clears it, so it never carries over.
+  const [cncAcknowledged, setCncAcknowledged] = useState(false);
 
   // keepError: re-check after a refused switch without wiping the reason
   // the switch was refused - the user must see both.
@@ -155,6 +164,7 @@ export default function MasterSwitchDialog({
       }
       setPreflight(body as SwitchPreflight);
       setAcknowledged(false);
+      setCncAcknowledged(false);
     } catch {
       setPreflight(null);
       if (!keepError) setError("Could not reach the trading engine to check the switch.");
@@ -186,6 +196,7 @@ export default function MasterSwitchDialog({
           new_master_account_id: newMaster.id,
           old_master_action: action,
           acknowledge_unverified: acknowledged,
+          acknowledge_cnc_positions: cncAcknowledged,
         }),
       });
       const body = await resp.json().catch(() => null);
@@ -206,8 +217,17 @@ export default function MasterSwitchDialog({
 
   const blocked = preflight !== null && !preflight.allowed;
   const overridable = blocked && preflight?.can_override === true;
-  const canSwitch = Boolean(preflight?.allowed) || (overridable && acknowledged);
+  const needsCncAck = requiresCncAcknowledgement(preflight);
+  const canSwitch = canConfirmSwitch({
+    preflight,
+    checking,
+    unverifiedAcknowledged: acknowledged,
+    cncAcknowledged,
+  });
   const visibleWarnings = (preflight?.warnings ?? []).filter((w) => !ADVISORY_CODES.has(w.code));
+  const hasOpenPositionWarning = visibleWarnings.some(
+    (w) => w.code === "CNC_POSITIONS_OPEN" || w.code === "INTRADAY_POSITIONS_OPEN",
+  );
 
   return createPortal(
     <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
@@ -299,7 +319,7 @@ export default function MasterSwitchDialog({
                 {[
                   <>No pending orders on {preflight.checked_accounts.map((a) => a.account_name).join(", ")}</>,
                   <>No copies in progress</>,
-                  <>No open positions</>,
+                  ...(hasOpenPositionWarning ? [] : [<>No open positions</>]),
                   <>
                     {newMaster.display_name}&apos;s new orders will be copied to this strategy&apos;s Children
                   </>,
@@ -360,6 +380,25 @@ export default function MasterSwitchDialog({
               ))}
             </ul>
           )}
+
+          {preflight && needsCncAck && (
+            <div className="rounded-[10px] border border-amber-300 bg-amber-50 p-3">
+              <p className="text-xs font-semibold text-amber-900">CNC positions stay open</p>
+              <p className="mt-1 text-[11px] leading-relaxed text-amber-800">
+                Changing the Master does not touch these positions. Close or manage them in Alice Blue yourself.
+              </p>
+              <label className="mt-2 flex cursor-pointer items-start gap-2 text-xs text-amber-900">
+                <input
+                  type="checkbox"
+                  checked={cncAcknowledged}
+                  onChange={(e) => setCncAcknowledged(e.target.checked)}
+                  disabled={switching}
+                  className="mt-0.5 accent-[#111111]"
+                />
+                <span>{CNC_ACKNOWLEDGEMENT_TEXT}</span>
+              </label>
+            </div>
+          )}
         </div>
 
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-[#E5E7EB] px-5 py-3">
@@ -374,7 +413,7 @@ export default function MasterSwitchDialog({
             size="sm"
             onClick={() => void handleSwitch()}
             loading={switching}
-            disabled={!canSwitch || checking}
+            disabled={!canSwitch || switching}
           >
             {overridable ? "Change Master anyway" : "Change Master"}
           </Button>
