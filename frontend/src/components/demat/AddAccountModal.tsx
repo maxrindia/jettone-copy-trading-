@@ -11,6 +11,7 @@ import { normalizeProxyHost } from "@/lib/proxy-host";
 import { buildProxyUrl, parseProxyUrl, validateProxyUrlInput } from "@/lib/proxy-config";
 import { isValidAssignedIp, isValidExpiryInput } from "@/lib/static-ip";
 import { confirmAliceBlueLogin, recordReconnectIntent, setReconnectTarget } from "@/lib/alice-blue-login";
+import Tooltip from "@/components/ui/Tooltip";
 
 export interface AddDematPayload {
   account_type: "MASTER" | "FOLLOWER";
@@ -421,7 +422,7 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
                 <span className="font-semibold text-[#111111]">Redirect URL: </span>
                 <span className="text-[#374151] font-normal">{redirectUrl}</span>
               </div>
-              <button
+              <Tooltip content={copyFailed ? "Copy failed - select the URL and copy it manually" : "Copy Redirect URL"}><button
                 type="button"
                 onClick={async () => {
                   const ok = await copyToClipboard(redirectUrl);
@@ -434,7 +435,6 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
                 }}
                 disabled={!redirectUrl}
                 className="p-1.5 rounded-lg text-[#9CA3AF] hover:text-[#111111] hover:bg-gray-200 transition-colors shrink-0 disabled:opacity-50"
-                title={copyFailed ? "Copy failed - select the URL and copy it manually" : "Copy Redirect URL"}
                 aria-label="Copy Redirect URL"
               >
                 {copied ? (
@@ -444,7 +444,7 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
                 ) : (
                   <Copy className="w-3.5 h-3.5" />
                 )}
-              </button>
+              </button></Tooltip>
             </div>
 
             {/* Field 1: Broker */}

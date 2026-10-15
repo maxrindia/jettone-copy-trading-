@@ -17,6 +17,7 @@ import QuantityPolicyDialog, {
   type QuantityMode,
   type QuantityPolicy,
 } from "@/components/strategy/QuantityPolicyDialog";
+import Tooltip from "@/components/ui/Tooltip";
 
 interface DematCardItem {
   id: string;
@@ -683,13 +684,15 @@ export default function GroupStrategyDetailPage() {
             <Play className="w-3.5 h-3.5 fill-current" />
             Place Order
           </button>
+          <Tooltip content="Delete Strategy">
           <button
             onClick={handleDeleteStrategy}
             className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-red-50 hover:bg-red-100 border border-red-200 text-red-600 transition-colors"
-            title="Delete Strategy"
+            aria-label="Delete Strategy"
           >
             <Trash2 className="w-4 h-4" />
           </button>
+          </Tooltip>
         </div>
       </div>
 
@@ -832,16 +835,15 @@ export default function GroupStrategyDetailPage() {
                       Child
                     </span>
                     {policy && (
-                      <button
+                      <Tooltip content="Change how this Child's copy quantity is calculated"><button
                         type="button"
                         onClick={() =>
                           setQuantityTarget({ accountId: member.account_id, accountName: displayName, policy })
                         }
-                        title="Change how this Child's copy quantity is calculated"
-                        className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-[#F7F7F7] text-[#374151] border border-[#E5E7EB] hover:border-[#111111] underline decoration-dotted underline-offset-2"
+                        className="px-2 py-0.5 rounded-lg text-[10px] font-bold bg-[#F7F7F7] text-[#374151] border border-[#E5E7EB] hover:border-[#111111]"
                       >
                         {quantityPolicyLabel(policy)}
-                      </button>
+                      </button></Tooltip>
                     )}
                     <span className="font-mono text-[10px] bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded border border-[#E5E7EB]">
                       {aliceUserId}

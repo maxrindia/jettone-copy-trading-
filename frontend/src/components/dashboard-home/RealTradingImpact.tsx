@@ -5,6 +5,7 @@ import { formatInr, moneyToneClass } from "@/lib/money";
 import type { RealTradingImpact as RealTradingImpactData } from "@/lib/dashboard";
 import { CardHeader } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/DataStates";
+import Tooltip from "@/components/ui/Tooltip";
 
 /**
  * "Real Trading Impact" - what happened to follower performance compared
@@ -50,10 +51,10 @@ export default function RealTradingImpact({ impact }: { impact: RealTradingImpac
 
 function Stat({ label, value, unavailableReason, note }: { label: string; value: string | null; unavailableReason?: string | null; note?: string }) {
   return (
-    <div className="min-w-[9rem]" title={value === null ? unavailableReason ?? undefined : note}>
+    <Tooltip content={value === null ? unavailableReason ?? undefined : note} focusable><div className="min-w-[9rem]">
       <p className="text-[10px] text-[#9CA3AF]">{label}</p>
       <p className={`text-sm font-extrabold font-mono ${moneyToneClass(value)}`}>{formatInr(value)}</p>
-    </div>
+    </div></Tooltip>
   );
 }
 

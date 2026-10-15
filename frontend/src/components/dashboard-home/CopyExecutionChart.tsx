@@ -4,6 +4,7 @@ import { formatInr, moneyToneClass } from "@/lib/money";
 import { edgeItemTooltip, type ExecutionEdge } from "@/lib/dashboard";
 import { EmptyState } from "@/components/ui/DataStates";
 import { CardHeader } from "@/components/ui/Card";
+import Tooltip from "@/components/ui/Tooltip";
 
 /**
  * "Copy Execution Quality" - child price vs master price for the selected
@@ -42,10 +43,12 @@ export default function CopyExecutionChart({
             const pct = Math.min(100, (Math.abs(value) / maxAbs) * 100);
             const strategyName = item.group_strategy_id ? strategyNames[item.group_strategy_id] : undefined;
             return (
-              <li
+              <Tooltip
                 key={`${item.symbol}-${item.time}-${i}`}
-                title={edgeItemTooltip(item, strategyName)}
+                as="li"
+                content={edgeItemTooltip(item, strategyName)}
                 className="px-5 py-2.5 flex items-center gap-3 text-xs"
+                focusable
               >
                 <div className="w-32 shrink-0">
                   <span className="font-bold text-[#111111]">{item.symbol}</span>{" "}
@@ -65,7 +68,7 @@ export default function CopyExecutionChart({
                 <div className={`w-16 text-right font-mono font-bold ${moneyToneClass(item.impact)}`}>
                   {formatInr(item.impact)}
                 </div>
-              </li>
+              </Tooltip>
             );
           })}
         </ul>

@@ -31,6 +31,7 @@ import {
   type StrategyRealizedPoint,
 } from "@/lib/dashboard";
 import { formatInr, moneyToneClass } from "@/lib/money";
+import Tooltip from "@/components/ui/Tooltip";
 
 interface Account {
   id: string;
@@ -414,12 +415,11 @@ function TradingChart({
     <div className="relative">
       <div className="relative h-32 bg-gradient-to-b from-white to-[#F9FAFB] border border-[#E5E7EB] rounded-[10px] overflow-hidden select-none">
         {partialNote && (
-          <span
+          <Tooltip content={partialNote} focusable><span
             className="absolute top-2 left-2 z-10 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide bg-amber-50 text-amber-700 border border-amber-200"
-            title={partialNote}
           >
             Partial
-          </span>
+          </span></Tooltip>
         )}
         <svg
           className="w-full h-full cursor-crosshair"
@@ -995,24 +995,22 @@ export default function GroupStrategyPage() {
 
                     {/* Action buttons matching reference rounded boxes */}
                     <div className="flex items-center gap-1.5 text-[#6B7280] shrink-0" onClick={(e) => e.stopPropagation()}>
-                      <button
+                      <Tooltip content="View details"><button
                         type="button"
                         onClick={() => router.push(`/group-strategy/${strat.id}`)}
                         className="w-8 h-8 rounded-lg border border-[#E5E7EB] bg-[#F9FAFB] flex items-center justify-center transition-colors shadow-xs hover:bg-gray-100 hover:text-[#111111]"
-                        title="View details"
                         aria-label="View details"
                       >
                         <Eye className="w-3.5 h-3.5" />
-                      </button>
-                      <button
+                      </button></Tooltip>
+                      <Tooltip content="Delete strategy"><button
                         type="button"
                         onClick={() => handleDeleteStrategy(strat.id)}
                         className="w-8 h-8 rounded-lg border border-red-200 bg-red-50 text-red-600 flex items-center justify-center transition-colors shadow-xs hover:bg-red-100"
-                        title="Delete strategy"
                         aria-label="Delete strategy"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      </button></Tooltip>
 
                     </div>
                   </div>
@@ -1087,18 +1085,18 @@ export default function GroupStrategyPage() {
                         <span className="font-bold text-sm text-[#111111] [@container_(max-width:302px)]:text-[13px]">{perf?.execution?.considered_orders ?? 0}</span>
                       </div>
                       <div className="grid grid-cols-3 text-center [@container_(max-width:252px)]:gap-x-2">
-                        <div title="Pending: orders still working">
+                        <Tooltip content="Pending: orders still working"><div>
                           <span className="text-[#9CA3AF] block text-[10px] font-medium [@container_(max-width:302px)]:text-[9px]">Pend</span>
                           <span className="font-bold text-amber-500 text-xs [@container_(max-width:302px)]:text-[11px]">{perf?.execution?.working_orders ?? 0}</span>
-                        </div>
-                        <div title="Done: orders filled">
+                        </div></Tooltip>
+                        <Tooltip content="Done: orders filled"><div>
                           <span className="text-[#9CA3AF] block text-[10px] font-medium [@container_(max-width:302px)]:text-[9px]">Done</span>
                           <span className="font-bold text-green-600 text-xs [@container_(max-width:302px)]:text-[11px]">{perf?.execution?.filled_orders ?? 0}</span>
-                        </div>
-                        <div title="Rejected: orders the broker rejected">
+                        </div></Tooltip>
+                        <Tooltip content="Rejected: orders the broker rejected"><div>
                           <span className="text-[#9CA3AF] block text-[10px] font-medium [@container_(max-width:302px)]:text-[9px]">Rej</span>
                           <span className="font-bold text-red-500 text-xs [@container_(max-width:302px)]:text-[11px]">{perf?.execution?.rejected_orders ?? 0}</span>
-                        </div>
+                        </div></Tooltip>
                       </div>
                     </div>
 
@@ -1109,16 +1107,16 @@ export default function GroupStrategyPage() {
                         <span className="font-bold text-sm text-[#111111] [@container_(max-width:302px)]:text-[13px]">{perf?.execution?.target_quantity ?? 0}</span>
                       </div>
                       <div className="grid grid-cols-2 text-center [@container_(max-width:252px)]:gap-x-2">
-                        <div title="Done: quantity filled">
+                        <Tooltip content="Done: quantity filled"><div>
                           <span className="text-[#9CA3AF] block text-[10px] font-medium [@container_(max-width:302px)]:text-[9px]">Done</span>
                           <span className="font-bold text-green-600 text-xs [@container_(max-width:302px)]:text-[11px]">{perf?.execution?.filled_quantity ?? 0}</span>
-                        </div>
-                        <div title="Left: target quantity not yet filled">
+                        </div></Tooltip>
+                        <Tooltip content="Left: target quantity not yet filled"><div>
                           <span className="text-[#9CA3AF] block text-[10px] font-medium [@container_(max-width:302px)]:text-[9px]">Left</span>
                           <span className="font-bold text-red-500 text-xs [@container_(max-width:302px)]:text-[11px]">
                             {Math.max(0, (perf?.execution?.target_quantity ?? 0) - (perf?.execution?.filled_quantity ?? 0))}
                           </span>
-                        </div>
+                        </div></Tooltip>
                       </div>
                     </div>
 
@@ -1129,14 +1127,14 @@ export default function GroupStrategyPage() {
                         <span className="font-bold text-sm text-[#111111] [@container_(max-width:302px)]:text-[13px]">{strat.member_count}</span>
                       </div>
                       <div className="grid grid-cols-2 text-center [@container_(max-width:252px)]:gap-x-2">
-                        <div title="Online: children with trading on and a valid session">
+                        <Tooltip content="Online: children with trading on and a valid session"><div>
                           <span className="text-[#9CA3AF] block text-[10px] font-medium [@container_(max-width:302px)]:text-[9px]">Online</span>
                           <span className="font-bold text-green-600 text-xs [@container_(max-width:302px)]:text-[11px]">{connectedChildren}</span>
-                        </div>
-                        <div title="Failed: children that are off or have no valid session">
+                        </div></Tooltip>
+                        <Tooltip content="Failed: children that are off or have no valid session"><div>
                           <span className="text-[#9CA3AF] block text-[10px] font-medium [@container_(max-width:302px)]:text-[9px]">Failed</span>
                           <span className="font-bold text-red-500 text-xs [@container_(max-width:302px)]:text-[11px]">{failedChildren}</span>
-                        </div>
+                        </div></Tooltip>
                       </div>
                     </div>
                   </div>

@@ -4,6 +4,7 @@ import clsx from "clsx";
 import { CalendarDays } from "lucide-react";
 import FloatingTip from "@/components/group-strategy/FloatingTip";
 import { formatInr, moneyToneClass } from "@/lib/money";
+import { TOOLTIP_SURFACE_CLASS } from "@/components/ui/Tooltip";
 
 /**
  * The ONE tooltip used by every Group Strategy P&L view (7-Day bars, Daily
@@ -28,7 +29,7 @@ export default function PnlTooltip({
   value: string | null;
 }) {
   return (
-    <FloatingTip className="w-max max-w-[220px] rounded-lg border border-[#E5E7EB] bg-white px-2.5 py-1.5 shadow-[0_4px_14px_rgba(15,23,42,0.12)]">
+    <FloatingTip className={clsx("w-max max-w-[220px] px-2.5 py-1.5", TOOLTIP_SURFACE_CLASS)}>
       <div className="flex items-center gap-1 text-[10px] font-semibold text-[#4B5563]">
         <CalendarDays className="h-3 w-3 shrink-0 text-gray-500" aria-hidden />
         <span>{date}</span>

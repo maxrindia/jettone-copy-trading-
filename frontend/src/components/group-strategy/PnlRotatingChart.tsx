@@ -23,6 +23,7 @@ import {
   type PnlChartPoint,
   type PnlChartSeries,
 } from "@/lib/pnl-chart";
+import HelpTooltip from "@/components/ui/Tooltip";
 
 /**
  * The Group Strategy card's P&L frame: ONE fixed-size frame whose content
@@ -351,9 +352,10 @@ export default function PnlRotatingChart({
       <div className="flex min-w-0 items-center gap-1 text-[10px] font-semibold text-[#6B7280]">
         <span className="truncate">{labels[active]}</span>
         {activeData?.note && (
-          <span title={activeData.note} aria-label={activeData.note} className="inline-flex shrink-0">
+          <HelpTooltip as="span" content={activeData.note} className="inline-flex shrink-0" focusable>
             <Info className="h-3 w-3 text-amber-500" aria-hidden />
-          </span>
+            <span className="sr-only">{activeData.note}</span>
+          </HelpTooltip>
         )}
       </div>
       <div className="flex shrink-0 items-center">

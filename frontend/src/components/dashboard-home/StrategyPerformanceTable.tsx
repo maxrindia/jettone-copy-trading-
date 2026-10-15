@@ -9,6 +9,7 @@ import {
 } from "@/lib/dashboard";
 import { CardHeader } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/DataStates";
+import Tooltip from "@/components/ui/Tooltip";
 
 /**
  * The dashboard's main, strategy-centric section: every real GroupStrategy
@@ -62,16 +63,15 @@ export default function StrategyPerformanceTable({ strategies }: { strategies: S
                             Running
                           </span>
                         ) : row.status === "DISABLED" ? (
-                          <span
+                          <Tooltip content={strategyStatusLabel(row)} focusable><span
                             className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold bg-gray-100 text-gray-500 border border-gray-200"
-                            title={strategyStatusLabel(row)}
                           >
                             Disabled
-                          </span>
+                          </span></Tooltip>
                         ) : (
-                          <span className="text-[#9CA3AF]" title={strategyStatusLabel(row)}>
+                          <Tooltip content={strategyStatusLabel(row)} focusable><span className="text-[#9CA3AF]">
                             Not running
-                          </span>
+                          </span></Tooltip>
                         )}
                       </td>
                       <td className="px-3 py-3 font-medium text-[#374151] whitespace-nowrap">{row.master.display_name ?? ""}</td>
@@ -80,13 +80,12 @@ export default function StrategyPerformanceTable({ strategies }: { strategies: S
                       </td>
                       <td className="px-3 py-3 text-right whitespace-nowrap">
                         {pnl.value === null ? (
-                          <span className="font-medium text-[#9CA3AF]" title={pnl.reason ?? undefined}>Unavailable</span>
+                          <Tooltip content={pnl.reason ?? undefined} focusable><span className="font-medium text-[#9CA3AF]">Unavailable</span></Tooltip>
                         ) : (
-                          <span
-                            title={
+                          <Tooltip content={
                               pnl.partialNote ??
                               (pnl.isRealizedOnly ? "Realized only - unrealized has no historical data source" : undefined)
-                            }
+                            } focusable><span
                           >
                             <span className={`font-sans font-semibold ${moneyToneClass(pnl.value)}`}>{formatInr(pnl.value)}</span>
                             {pnl.isRealizedOnly && (
@@ -99,7 +98,7 @@ export default function StrategyPerformanceTable({ strategies }: { strategies: S
                                 Partial
                               </span>
                             )}
-                          </span>
+                          </span></Tooltip>
                         )}
                       </td>
                       <td className="px-3 py-3 text-right font-sans font-medium whitespace-nowrap">{strategyFillRateLabel(row)}</td>

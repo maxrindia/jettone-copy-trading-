@@ -11,6 +11,7 @@ import {
   type LiveTradingEnvelope,
   type LiveTradingTone,
 } from "@/lib/live-trading";
+import Tooltip from "@/components/ui/Tooltip";
 
 const TONE_CLASSES: Record<LiveTradingTone, { pill: string; dot: string }> = {
   on: { pill: "bg-green-50 text-green-800 border-green-200", dot: "bg-green-500" },
@@ -80,7 +81,7 @@ export default function LiveTradingToggle() {
 
   return (
     <div className="relative" ref={boxRef}>
-      <button
+      <Tooltip content={badge.note ?? "Turn Live Trading ON or OFF"}><button
         type="button"
         onClick={() => {
           setFailure(null);
@@ -90,12 +91,11 @@ export default function LiveTradingToggle() {
         disabled={state === null}
         aria-haspopup="dialog"
         aria-expanded={open}
-        title={badge.note ?? "Turn Live Trading ON or OFF"}
         className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[#111111]/20 disabled:opacity-60 ${tone.pill}`}
       >
         <span className={`h-1.5 w-1.5 rounded-full ${tone.dot}`} aria-hidden />
         {badge.label}
-      </button>
+      </button></Tooltip>
       {error && state === null && (
         <span className="ml-2 text-[11px] text-red-600" role="status">
           state unavailable

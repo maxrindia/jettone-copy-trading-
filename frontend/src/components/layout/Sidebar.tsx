@@ -56,7 +56,7 @@ function RailTooltip({ children }: { children: ReactNode }) {
   return (
     <span
       role="tooltip"
-      className="pointer-events-none absolute left-full ml-3 top-1/2 -translate-y-1/2 whitespace-nowrap rounded-lg bg-[#111111] px-2 py-1 text-[11px] font-medium text-white shadow-md opacity-0 translate-x-[-4px] transition-[opacity,transform] duration-150 group-hover:opacity-100 group-hover:translate-x-0 group-focus-visible:opacity-100 group-focus-visible:translate-x-0 motion-reduce:transition-none"
+      className="pointer-events-none absolute left-full ml-3 top-1/2 -translate-y-1/2 whitespace-nowrap rounded-lg border border-[#E5E7EB] bg-white px-2 py-1 text-[11px] font-medium text-[#374151] shadow-[0_6px_20px_rgba(15,23,42,0.12)] opacity-0 translate-x-[-4px] transition-[opacity,transform] duration-150 group-hover:opacity-100 group-hover:translate-x-0 group-focus-visible:opacity-100 group-focus-visible:translate-x-0 motion-reduce:transition-none"
     >
       {children}
     </span>

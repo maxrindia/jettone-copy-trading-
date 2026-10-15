@@ -19,6 +19,7 @@ import {
   type DateRangeInfo,
   type ExecutionEdge,
 } from "@/lib/dashboard";
+import Tooltip from "@/components/ui/Tooltip";
 
 /**
  * Clean, modern KPI card matching the reference design.
@@ -58,9 +59,11 @@ function KpiCard({
 }: KpiCardProps) {
   const Wrapper = onClick ? "button" : "div";
   return (
+    <Tooltip content={title}>
     <Wrapper
       onClick={onClick}
-      title={title}
+      // The help text is on the card itself, so a non-clickable card must be focusable to reach it.
+      tabIndex={!onClick && title ? 0 : undefined}
       className={`group relative p-4 rounded-[10px] bg-white border border-gray-100 shadow-[0_1px_2px_rgba(15,23,42,0.03)] hover:shadow-sm hover:border-gray-200 transition-all duration-150 text-left flex flex-col justify-between ${
         onClick ? "cursor-pointer" : ""
       }`}
@@ -94,6 +97,7 @@ function KpiCard({
         </p>
       </div>
     </Wrapper>
+    </Tooltip>
   );
 }
 

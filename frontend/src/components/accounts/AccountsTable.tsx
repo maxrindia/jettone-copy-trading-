@@ -5,6 +5,7 @@ import { Wifi, WifiOff, Download, Search, ChevronUp, ChevronDown, ChevronsUpDown
 import { openPositionsLabel, pnlHeadline, pnlTooltip, type AccountMetrics } from "@/lib/account-metrics";
 import { formatInr, moneyToneClass } from "@/lib/money";
 import type { AccountCardDangerAction } from "./AccountCard";
+import Tooltip from "@/components/ui/Tooltip";
 
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return "";
@@ -98,7 +99,7 @@ function SortHeader({
 function TradingSwitch({ row }: { row: AccountsTableRow }) {
   const [isToggling, setIsToggling] = useState(false);
   return (
-    <button
+    <Tooltip content={row.staticIpStatus === "EXPIRED" ? "Static IP expired: renew it or set a new IP to trade" : undefined} className="inline-flex [&>button:disabled]:pointer-events-none"><button
       role="switch"
       aria-checked={row.tradingEnabled}
       onClick={async (e) => {
@@ -112,7 +113,6 @@ function TradingSwitch({ row }: { row: AccountsTableRow }) {
         }
       }}
       disabled={isToggling || row.staticIpStatus === "EXPIRED"}
-      title={row.staticIpStatus === "EXPIRED" ? "Static IP expired: renew it or set a new IP to trade" : undefined}
       className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
         row.tradingEnabled ? "bg-[#16A34A]" : "bg-[#EF4444]"
       } ${isToggling || row.staticIpStatus === "EXPIRED" ? "opacity-50 cursor-not-allowed" : ""}`}
@@ -122,7 +122,7 @@ function TradingSwitch({ row }: { row: AccountsTableRow }) {
           row.tradingEnabled ? "translate-x-4" : "translate-x-0"
         }`}
       />
-    </button>
+    </button></Tooltip>
   );
 }
 
@@ -320,9 +320,9 @@ export default function AccountsTable({ rows, vpsIp }: { rows: AccountsTableRow[
                         )}
                       </span>
                     ) : (
-                      <span className="text-[#9CA3AF]" title={vpsIp ? `Uses the shared VPS IP: ${vpsIp}` : "No dedicated proxy configured"}>
+                      <Tooltip content={vpsIp ? `Uses the shared VPS IP: ${vpsIp}` : "No dedicated proxy configured"} focusable><span className="text-[#9CA3AF]">
                         Shared VPS
-                      </span>
+                      </span></Tooltip>
                     )}
                   </td>
 
@@ -330,8 +330,10 @@ export default function AccountsTable({ rows, vpsIp }: { rows: AccountsTableRow[
 
                   <td className="px-3 py-3 text-right font-bold text-[#111111]">{m.in_group}</td>
 
-                  <td className="px-3 py-3 text-right whitespace-nowrap" title={pnlTooltip(m)}>
-                    <span className={`font-bold ${moneyToneClass(pnl.value)}`}>{formatInr(pnl.value)}</span>
+                  <td className="px-3 py-3 text-right whitespace-nowrap">
+                    <Tooltip content={pnlTooltip(m)} focusable>
+                      <span className={`font-bold ${moneyToneClass(pnl.value)}`}>{formatInr(pnl.value)}</span>
+                    </Tooltip>
                   </td>
 
                   <td className="px-3 py-3 text-right font-bold text-[#111111]">{openPositionsLabel(m)}</td>
@@ -339,12 +341,11 @@ export default function AccountsTable({ rows, vpsIp }: { rows: AccountsTableRow[
                   <td className="px-4 py-3 text-right whitespace-nowrap">
                     <span className="font-bold text-[#111111]">{m.orders_count}</span>
                     {m.needs_review_count > 0 && (
-                      <span
+                      <Tooltip content={`${m.needs_review_count} trade(s) need reconciliation review - the engine couldn't confirm their outcome`} focusable><span
                         className="ml-1.5 px-1 py-0.5 rounded text-[9px] font-bold text-amber-700 bg-amber-50 border border-amber-200"
-                        title={`${m.needs_review_count} trade(s) need reconciliation review - the engine couldn't confirm their outcome`}
                       >
                         {m.needs_review_count} review
-                      </span>
+                      </span></Tooltip>
                     )}
                   </td>
                 </tr>

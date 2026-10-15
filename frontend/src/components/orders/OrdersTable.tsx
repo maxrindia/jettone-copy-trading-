@@ -6,6 +6,7 @@ import { EmptyState } from "@/components/ui/DataStates";
 import { Card } from "@/components/ui/Card";
 import { TRADING_TIMEZONE } from "@/lib/dashboard";
 import { describeOrderType } from "@/lib/order-type";
+import Tooltip from "@/components/ui/Tooltip";
 
 export interface UnifiedOrder {
   id: string;
@@ -232,19 +233,17 @@ export default function OrdersTable({
                       {acc?.display_name ?? o.account_id.slice(0, 8)}
                     </span>
                     {isMaster ? (
-                      <span
+                      <Tooltip content="Master" focusable><span
                         className="w-4 h-4 flex items-center justify-center rounded text-[9px] font-bold bg-orange-100 text-orange-800"
-                        title="Master"
                       >
                         M
-                      </span>
+                      </span></Tooltip>
                     ) : (
-                      <span
+                      <Tooltip content="Child" focusable><span
                         className="w-4 h-4 flex items-center justify-center rounded text-[9px] font-bold bg-gray-100 text-gray-600"
-                        title="Child"
                       >
                         C
-                      </span>
+                      </span></Tooltip>
                     )}
                   </div>
                 </td>

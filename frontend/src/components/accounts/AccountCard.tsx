@@ -24,6 +24,7 @@ import {
 import { formatExpiry } from "@/lib/static-ip";
 import { openPositionsLabel, pnlHeadline, pnlTooltip, type AccountMetrics } from "@/lib/account-metrics";
 import { formatInr, moneyToneClass } from "@/lib/money";
+import Tooltip from "@/components/ui/Tooltip";
 
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return "";
@@ -164,16 +165,14 @@ export default function AccountCard({
     <div className="flex items-center gap-1 pl-1">
       {/* ── 3-Dot Options Dropdown ── */}
       <div className="relative" ref={menuRef}>
-        <button
+        <Tooltip content="Options"><button
           onClick={(e) => {
             e.stopPropagation();
             setMenuOpen((v) => !v);
           }}
-          className="p-1 hover:bg-gray-100 rounded-lg hover:text-[#111111] transition-colors"
-          title="Options"
-        >
+          className="p-1 hover:bg-gray-100 rounded-lg hover:text-[#111111] transition-colors" aria-label="Options">
           <MoreVertical className="w-3.5 h-3.5" />
-        </button>
+        </button></Tooltip>
 
         {menuOpen && (
           <div
@@ -216,9 +215,9 @@ export default function AccountCard({
         )}
       </div>
 
-      <button onClick={onViewHistory} className="hover:text-[#111111] transition-colors" title="View order history">
+      <Tooltip content="View order history"><button onClick={onViewHistory} className="hover:text-[#111111] transition-colors" aria-label="View order history">
         <Eye className="w-3.5 h-3.5" />
-      </button>
+      </button></Tooltip>
     </div>
   );
 
@@ -295,14 +294,14 @@ export default function AccountCard({
               </div>
               <div className="text-xs font-bold text-[#111111]">{metrics.in_group}</div>
             </div>
-            <div title={pnlTooltip(metrics)}>
+            <Tooltip content={pnlTooltip(metrics)} as="div" className="block" focusable><div>
               <div className="flex items-center justify-center gap-1 text-[10px] text-[#6B7280]">
                 <Wallet className="w-2.5 h-2.5 text-[#9CA3AF]" />
                 P&amp;L
               </div>
               <div className={`text-xs font-bold ${moneyToneClass(pnl.value)}`}>{formatInr(pnl.value)}</div>
               <div className="text-[9px] leading-tight text-[#9CA3AF]">{pnl.caption}</div>
-            </div>
+            </div></Tooltip>
             <div>
               <div className="flex items-center justify-center gap-1 text-[10px] text-[#6B7280]">
                 <Layers className="w-2.5 h-2.5 text-[#9CA3AF]" />
@@ -350,7 +349,7 @@ export default function AccountCard({
               </div>
               <div className="text-xs font-bold text-[#111111]">{metrics.cancelled_count}</div>
             </div>
-            <div title="The engine couldn't confirm this trade's outcome - see the Reconciliation page.">
+            <Tooltip content="The engine couldn't confirm this trade's outcome - see the Reconciliation page." as="div" className="block" focusable><div>
               <div className="flex items-center justify-center gap-1 text-[10px] text-[#6B7280]">
                 <AlertTriangle className={`w-2.5 h-2.5 ${metrics.needs_review_count > 0 ? "text-amber-500" : "text-gray-300"}`} />
                 Review
@@ -358,7 +357,7 @@ export default function AccountCard({
               <div className={`text-xs font-bold ${metrics.needs_review_count > 0 ? "text-amber-600" : "text-[#111111]"}`}>
                 {metrics.needs_review_count}
               </div>
-            </div>
+            </div></Tooltip>
           </div>
         </div>
       </div>
