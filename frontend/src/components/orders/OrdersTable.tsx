@@ -5,6 +5,7 @@ import { ReceiptText, Layers, Smartphone, Monitor } from "lucide-react";
 import { EmptyState } from "@/components/ui/DataStates";
 import { Card } from "@/components/ui/Card";
 import { TRADING_TIMEZONE } from "@/lib/dashboard";
+import { describeOrderType } from "@/lib/order-type";
 
 export interface UnifiedOrder {
   id: string;
@@ -174,14 +175,10 @@ export default function OrdersTable({
             const isRejected = o.status.toUpperCase() === "REJECTED";
             const isCancelled = o.status.toUpperCase() === "CANCELLED";
 
-            // Order type classification. Case- and hyphen-safe: the engine stores
-            // Jettone-placed stop-market orders as "SL-M" but broker-reported ones
-            // (order book / websocket) as "SLM".
-            const orderTypeUpper = (o.order_type ?? "").toUpperCase();
-            const orderTypeKey = orderTypeUpper.replace(/[^A-Z]/g, "");
-            const isSLOrder = orderTypeKey === "SL" || orderTypeKey === "STOPLOSS";
-            const isSLMOrder = orderTypeKey === "SLM" || orderTypeKey === "STOPLOSSMARKET";
-            const isAnyStop = isSLOrder || isSLMOrder;
+            // Order type label (display only; see lib/order-type.ts): native
+            // SL / SL-M, or a triggered SL the broker now reports as LIMIT/MARKET.
+            const orderType = describeOrderType(o.order_type, o.trigger_price);
+            const isAnyStop = orderType.isStop;
 
             return (
               <tr key={o.id} className="hover:bg-[#F9FAFB] transition-colors">
@@ -265,17 +262,17 @@ export default function OrdersTable({
                 {/* Type */}
                 <td className="py-3.5 px-4">
                   <span
-                    className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                      orderTypeKey === "MARKET"
+                    className={`whitespace-nowrap px-2 py-0.5 rounded text-[10px] font-bold border ${
+                      orderType.kind === "MARKET"
                         ? "bg-green-50 text-green-700 border-green-200"
-                        : orderTypeKey === "LIMIT"
+                        : orderType.kind === "LIMIT"
                         ? "bg-amber-50 text-amber-700 border-amber-200"
                         : isAnyStop
                         ? "bg-orange-50 text-orange-700 border-orange-200"
                         : "bg-[#F7F7F7] text-[#4B5563] border-[#E5E7EB]"
                     }`}
                   >
-                    {isSLOrder ? "SL" : isSLMOrder ? "SL-M" : orderTypeUpper || o.order_type}
+                    {orderType.label}
                   </span>
                 </td>
 

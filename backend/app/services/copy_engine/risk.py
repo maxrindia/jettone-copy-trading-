@@ -29,7 +29,16 @@ class RiskEngine:
         open_exposure: Decimal = Decimal("0"),
         follower_runtime_paused: bool = False,
         global_emergency_stop: bool = False,
+        reduces_position: bool = False,
     ) -> RiskCheckResult:
+        """
+        reduces_position: the caller has VERIFIED (broker-confirmed position for
+        the exact instrument and product) that this order is a SELL fully
+        covered by the follower's existing long, i.e. it only closes exposure.
+        Such an order needs no new margin and cannot raise exposure, so checks
+        5 (margin) and 8 (max exposure) are skipped for it. Every other check
+        still applies. Default False keeps every caller's behaviour unchanged.
+        """
         failures: List[str] = []
 
         # Check 1: Global emergency stop
@@ -58,7 +67,7 @@ class RiskEngine:
 
         # Check 5: Sufficient margin (funds check)
         # Margin estimated roughly as order_value for MIS or required span
-        if funds.available_margin < order_value and order_value > Decimal("0"):
+        if not reduces_position and funds.available_margin < order_value and order_value > Decimal("0"):
             # Margin breach
             failures.append("INSUFFICIENT_MARGIN")
 
@@ -71,7 +80,7 @@ class RiskEngine:
             failures.append("MAX_DAILY_LOSS_BREACHED")
 
         # Check 8: Max exposure limit
-        if settings.max_exposure and (open_exposure + order_value) > settings.max_exposure:
+        if not reduces_position and settings.max_exposure and (open_exposure + order_value) > settings.max_exposure:
             failures.append("MAX_EXPOSURE_BREACHED")
 
         return RiskCheckResult(

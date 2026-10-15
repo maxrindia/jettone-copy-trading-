@@ -28,7 +28,7 @@ from app.services.alice_blue.types import (
 from app.services.copy_engine.calculator import QuantityCalculator
 from app.services.copy_engine.events import MasterTradeEvent, derive_copy_event_id
 from app.services.alice_blue.instruments import InstrumentResolutionError
-from app.services.copy_engine.risk import RiskEngine
+from app.services.copy_engine.risk import RiskCheckResult, RiskEngine
 from app.services.copy_engine.risk_inputs import (
     PositionSafetyError,
     get_available_long,
@@ -759,7 +759,12 @@ class CopyEnginePipeline:
                     await session.commit()
                 return {"status": "REJECTED", "reasons": ["RISK_INPUTS_UNAVAILABLE"]}
 
-            risk_res = RiskEngine.evaluate(
+            risk_res = await self._evaluate_risk_exit_aware(
+                client=client,
+                side=event.side,
+                exchange=event.exchange,
+                product_type=event.product_type,
+                instrument_token=event.instrument_id,
                 account=follower,
                 settings=settings_obj,
                 symbol=event.symbol,
@@ -1172,7 +1177,12 @@ class CopyEnginePipeline:
                     await session.commit()
                 return {"status": "REJECTED", "reasons": ["RISK_INPUTS_UNAVAILABLE"]}
 
-            risk_res = RiskEngine.evaluate(
+            risk_res = await self._evaluate_risk_exit_aware(
+                client=client,
+                side=event.side,
+                exchange=event.exchange,
+                product_type=event.product_type,
+                instrument_token=event.instrument_id,
                 account=follower,
                 settings=settings_obj,
                 symbol=event.symbol,
@@ -1684,7 +1694,12 @@ class CopyEnginePipeline:
                 logger.error(f"[Pipeline] Risk input fetch failed for {acc_id_str} during SL-trigger execution: {exc}")
                 return await _risk_reject("RISK_INPUTS_UNAVAILABLE", remaining_qty)
 
-            risk_res = RiskEngine.evaluate(
+            risk_res = await self._evaluate_risk_exit_aware(
+                client=client,
+                side=ord_rec.side,
+                exchange=ord_rec.exchange,
+                product_type=ord_rec.product_type,
+                instrument_token=event.instrument_id,
                 account=account,
                 settings=settings_obj,
                 symbol=ord_rec.symbol,
@@ -2384,7 +2399,12 @@ class CopyEnginePipeline:
                     results[acc_id_str] = "REJECTED: RISK_INPUTS_UNAVAILABLE"
                     continue
 
-                risk_res = RiskEngine.evaluate(
+                risk_res = await self._evaluate_risk_exit_aware(
+                    client=client,
+                    side=ord_rec.side,
+                    exchange=ord_rec.exchange,
+                    product_type=ord_rec.product_type,
+                    instrument_token=instrument_token,
                     account=account,
                     settings=settings_obj,
                     symbol=ord_rec.symbol,
@@ -2837,6 +2857,89 @@ class CopyEnginePipeline:
 
         return {"status": "REJECTED", "reasons": [reason_code]}
 
+    # Risk failures that a verified position-reducing SELL may skip: it needs no
+    # new margin and can only lower exposure. Nothing else is ever skipped.
+    _EXIT_SKIPPABLE_RISK_FAILURES = frozenset({"INSUFFICIENT_MARGIN", "MAX_EXPOSURE_BREACHED"})
+
+    async def _is_verified_exit(
+        self,
+        *,
+        client: Optional[AliceBlueClient],
+        side: Any,
+        exchange: str,
+        symbol: str,
+        product_type: Any,
+        instrument_token: Optional[str],
+        quantity: int,
+    ) -> bool:
+        """
+        True only when this is a SELL and the follower's broker-confirmed LONG
+        position for that exact instrument AND product (get_available_long,
+        the same lookup the SELL position-safety gate uses) covers the whole
+        quantity. A BUY, no/short position, a long smaller than the quantity,
+        or any failure to establish the position returns False, so the caller
+        keeps its normal risk behaviour (fail closed). Deliberately ignores
+        SELL_POSITION_SAFETY_BYPASS: the position is always checked here.
+        """
+        side_text = str(getattr(side, "value", side) or "").strip().upper()
+        if side_text != "SELL" or quantity <= 0 or client is None:
+            return False
+        try:
+            available_long = await get_available_long(
+                client=client,
+                exchange=exchange,
+                symbol=symbol,
+                product_type=product_type,
+                provided_token=instrument_token,
+            )
+        except Exception as exc:  # InstrumentResolutionError, PositionSafetyError, broker errors
+            logger.warning(
+                f"[Pipeline] Exit check for {symbol} SELL qty={quantity}: position could not be "
+                f"established ({type(exc).__name__}); normal margin/exposure checks apply."
+            )
+            return False
+        return available_long >= quantity
+
+    async def _evaluate_risk_exit_aware(
+        self,
+        *,
+        client: Optional[AliceBlueClient],
+        side: Any,
+        exchange: str,
+        product_type: Any,
+        instrument_token: Optional[str],
+        **risk_kwargs: Any,
+    ) -> RiskCheckResult:
+        """
+        RiskEngine.evaluate, plus: when the ONLY failures are margin and/or max
+        exposure and the order is a verified position-reducing SELL
+        (_is_verified_exit), re-evaluates with reduces_position=True. The
+        position is read only in that case, so ordinary copies make no extra
+        broker call. All other failures (emergency stop, copy disabled, symbol,
+        max trade value, daily loss) still reject.
+        """
+        result = RiskEngine.evaluate(**risk_kwargs)
+        if result.passed or not result.failures:
+            return result
+        if not set(result.failures) <= self._EXIT_SKIPPABLE_RISK_FAILURES:
+            return result
+        verified = await self._is_verified_exit(
+            client=client,
+            side=side,
+            exchange=exchange,
+            symbol=risk_kwargs["symbol"],
+            product_type=product_type,
+            instrument_token=instrument_token,
+            quantity=int(risk_kwargs["quantity"]),
+        )
+        if not verified:
+            return result
+        logger.info(
+            f"[Pipeline] Verified exit SELL {risk_kwargs['symbol']} qty={risk_kwargs['quantity']}: "
+            f"skipping {','.join(result.failures)} (follower long covers the quantity)."
+        )
+        return RiskEngine.evaluate(**risk_kwargs, reduces_position=True)
+
     async def _enforce_sell_position_safety(
         self,
         *,
@@ -3185,7 +3288,12 @@ class CopyEnginePipeline:
                     await session.commit()
                 return {"status": "REJECTED", "reasons": ["RISK_INPUTS_UNAVAILABLE"]}
 
-            risk_res = RiskEngine.evaluate(
+            risk_res = await self._evaluate_risk_exit_aware(
+                client=client,
+                side=event.side,
+                exchange=event.exchange,
+                product_type=event.product_type,
+                instrument_token=event.instrument_id,
                 account=follower,
                 settings=settings_obj,
                 symbol=event.symbol,
