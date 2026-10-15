@@ -94,13 +94,23 @@ export function pnlHeadline(m: AccountMetrics): { value: string | null; caption:
   return { value: null, caption: PNL_BASIS_LABEL };
 }
 
+/**
+ * What a P&L cell shows. An unverified P&L (null) is "N/A", never "₹0.00":
+ * a genuine zero is a verified value of 0.00 and still shows as ₹0.00.
+ */
+export function pnlDisplay(m: AccountMetrics): { text: string; unavailable: boolean; value: string | null } {
+  const { value } = pnlHeadline(m);
+  if (value === null) return { text: "N/A", unavailable: true, value: null };
+  return { text: formatInr(value), unavailable: false, value };
+}
+
 export function pnlTooltip(m: AccountMetrics): string {
   const lines = [
     "Gross P&L · Before charges",
     `Realized ${formatInr(m.realized_pnl)} · Unrealized ${formatInr(m.unrealized_pnl)} · Total ${formatInr(m.total_pnl)}`,
   ];
   if (m.pnl_status === "UNAVAILABLE") {
-    lines.push("Broker data unavailable - ₹0.00 shown as a placeholder, not a confirmed value.");
+    lines.push("P&L could not be verified from the broker data, so no value is shown.");
   } else if (m.pnl_status === "PARTIAL") {
     lines.push("Partially verified:");
   }

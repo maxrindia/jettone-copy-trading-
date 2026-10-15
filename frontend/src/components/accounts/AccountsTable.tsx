@@ -2,10 +2,9 @@
 
 import { ReactNode, useMemo, useState } from "react";
 import { Wifi, WifiOff, Download, Search, ChevronUp, ChevronDown, ChevronsUpDown } from "lucide-react";
-import { openPositionsLabel, pnlHeadline, pnlTooltip, type AccountMetrics } from "@/lib/account-metrics";
-import { formatInr, moneyToneClass } from "@/lib/money";
+import { openPositionsLabel, pnlDisplay, pnlHeadline, type AccountMetrics } from "@/lib/account-metrics";
+import { moneyToneClass } from "@/lib/money";
 import type { AccountCardDangerAction } from "./AccountCard";
-import Tooltip from "@/components/ui/Tooltip";
 import { describeAssignedIp, formatExpiry, formatExpiryCell } from "@/lib/static-ip";
 
 /** A timestamp as the same "05-Nov-2026" date the Expiry Date shows, in IST; "Not set" when missing or invalid. */
@@ -61,7 +60,7 @@ type SortKey = "name" | "role" | "session" | "trading" | "ip" | "created" | "exp
 type SortDir = "asc" | "desc";
 
 /** The single header text style: every column header (sortable or not) uses it. */
-const HEADER_TEXT_CLASS = "font-bold uppercase tracking-[0.06em] text-[10px] whitespace-nowrap";
+const HEADER_TEXT_CLASS = "font-sans font-bold uppercase tracking-[0.06em] text-[10px] leading-4 whitespace-nowrap";
 
 function sortValue(row: AccountsTableRow, key: SortKey): number | string {
   const m = row.metrics;
@@ -84,7 +83,8 @@ function sortValue(row: AccountsTableRow, key: SortKey): number | string {
       // ISO dates sort lexically; accounts with no expiry sort last.
       return row.expiresOn ? `0${row.expiresOn}` : "1";
     case "pnl":
-      return parseFloat(pnlHeadline(m).value ?? "0") || 0;
+      // Unverified P&L is not zero: it sorts below every real value.
+      return pnlHeadline(m).value === null ? Number.MIN_SAFE_INTEGER : parseFloat(pnlHeadline(m).value as string) || 0;
     case "pos":
       return m.open_positions_count ?? 0;
     case "orders":
@@ -128,7 +128,7 @@ function SortHeader({
 function TradingSwitch({ row }: { row: AccountsTableRow }) {
   const [isToggling, setIsToggling] = useState(false);
   return (
-    <Tooltip content={row.staticIpStatus === "EXPIRED" ? "Static IP expired: renew it or set a new IP to trade" : undefined} className="inline-flex [&>button:disabled]:pointer-events-none"><button
+    <button
       role="switch"
       aria-checked={row.tradingEnabled}
       onClick={async (e) => {
@@ -151,7 +151,7 @@ function TradingSwitch({ row }: { row: AccountsTableRow }) {
           row.tradingEnabled ? "translate-x-4" : "translate-x-0"
         }`}
       />
-    </button></Tooltip>
+    </button>
   );
 }
 
@@ -339,7 +339,9 @@ export default function AccountsTable({ rows, vpsIp }: { rows: AccountsTableRow[
                   <td className="px-3 py-3">
                     <div className="min-w-0">
                       <div className="font-bold text-[#111111] truncate">{row.displayName}</div>
-                      <div className="text-[10px] text-[#9CA3AF] truncate tabular-nums">{row.aliceUserId}</div>
+                      <div className="text-[11px] font-medium text-[#6B7280] truncate tabular-nums">
+                        {row.aliceUserId || "—"}
+                      </div>
                     </div>
                   </td>
 
@@ -363,23 +365,14 @@ export default function AccountsTable({ rows, vpsIp }: { rows: AccountsTableRow[
                     {(() => {
                       const ip = describeAssignedIp(row.assignedIp, row.proxyHost);
                       if (ip.kind === "shared_vps") {
-                        return (
-                          <Tooltip content={vpsIp ? `Uses the shared VPS IP: ${vpsIp}` : "No dedicated proxy configured"} focusable>
-                            <span className="text-[#9CA3AF]">{ip.text}</span>
-                          </Tooltip>
-                        );
+                        return <span className="text-[#9CA3AF]">{ip.text}</span>;
                       }
                       return (
                         <span className="inline-flex items-center gap-1.5">
                           {ip.kind === "assigned" ? (
                             <span className="font-medium text-[#4B5563] tabular-nums">{ip.text}</span>
                           ) : (
-                            <Tooltip
-                              content="No public IP has been entered for this account's Static IP. Edit the account to add it."
-                              focusable
-                            >
-                              <span className="text-[#9CA3AF]">{ip.text}</span>
-                            </Tooltip>
+                            <span className="text-[#9CA3AF]">{ip.text}</span>
                           )}
                           {row.staticIpStatus === "EXPIRED" && (
                             <span className="px-1.5 py-0.5 rounded-lg text-[10px] font-bold bg-red-50 text-red-700 border border-red-200">
@@ -408,9 +401,11 @@ export default function AccountsTable({ rows, vpsIp }: { rows: AccountsTableRow[
                   </td>
 
                   <td className="px-3 py-3 text-right whitespace-nowrap">
-                    <Tooltip content={pnlTooltip(m)} focusable>
-                      <span className={`font-bold ${moneyToneClass(pnl.value)}`}>{formatInr(pnl.value)}</span>
-                    </Tooltip>
+                    {pnlDisplay(m).unavailable ? (
+                      <span className="font-bold text-[#9CA3AF]">{pnlDisplay(m).text}</span>
+                    ) : (
+                      <span className={`font-bold ${moneyToneClass(pnl.value)}`}>{pnlDisplay(m).text}</span>
+                    )}
                   </td>
 
                   <td className="px-3 py-3 text-right font-bold text-[#111111]">{openPositionsLabel(m)}</td>

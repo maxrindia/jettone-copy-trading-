@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { X, Info, Copy, Check } from "lucide-react";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -10,6 +10,7 @@ import DatePicker from "@/components/ui/DatePicker";
 import { normalizeProxyHost } from "@/lib/proxy-host";
 import { buildProxyUrl, parseProxyUrl, validateProxyUrlInput } from "@/lib/proxy-config";
 import { isValidAssignedIp, isValidExpiryInput } from "@/lib/static-ip";
+import { buildAccountUpdateBody, createSubmitGuard, runSubmit, type SubmitMode } from "@/lib/account-update";
 import { confirmAliceBlueLogin, recordReconnectIntent, setReconnectTarget } from "@/lib/alice-blue-login";
 import Tooltip from "@/components/ui/Tooltip";
 
@@ -38,6 +39,8 @@ interface AddAccountModalProps {
   open: boolean;
   onClose: () => void;
   onCreated: () => void;
+  /** Called after the account details were saved (by Save, or by Save & Reconnect before its reconnect step). */
+  onSaved?: () => void;
   accountToEdit?: EditDematAccountData | null;
 }
 
@@ -73,7 +76,7 @@ const CONNECTION_TYPES = [
 ] as const;
 type ConnectionType = (typeof CONNECTION_TYPES)[number]["value"];
 
-export default function AddAccountModal({ open, onClose, onCreated, accountToEdit }: AddAccountModalProps) {
+export default function AddAccountModal({ open, onClose, onCreated, onSaved, accountToEdit }: AddAccountModalProps) {
   const [mounted, setMounted] = useState(false);
   const [redirectUrl, setRedirectUrl] = useState("");
   const [broker, setBroker] = useState("");
@@ -102,6 +105,9 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
   const [copyFailed, setCopyFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [submitMode, setSubmitMode] = useState<SubmitMode>("reconnect");
+  // Synchronous re-entry guard: at most one save/reconnect runs at a time.
+  const submitGuard = useRef(createSubmitGuard());
 
   useEffect(() => {
     setMounted(true);
@@ -212,8 +218,16 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
 
   if (!mounted || !open) return null;
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    void submit("reconnect");
+  };
+
+  // "save" persists the edited details only (no broker login, no session, no
+  // redirect). "reconnect" saves first and starts the Alice Blue login only
+  // after the save succeeded.
+  const submit = async (mode: SubmitMode) => {
+    if (submitGuard.current.busy) return;
     setError(null);
 
     if (!broker) {
@@ -284,91 +298,121 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
     }
     const assignedIpToStore = staticIpEnabled && assignedIp.trim() ? assignedIp.trim() : null;
 
+    if (!submitGuard.current.tryEnter()) return;
     setSubmitting(true);
+    setSubmitMode(mode);
+
+    const notesString = [
+      broker ? `Broker: ${broker}` : null,
+      mobile ? `Mobile: ${mobile}` : null,
+      email ? `Email: ${email}` : null,
+      apiKey ? `APIKey: ${apiKey}` : null,
+      apiSecret ? `APISecret: ${apiSecret}` : null,
+      proxyUrlToStore ? `ProxyURL: ${proxyUrlToStore}` : null,
+    ].filter(Boolean).join(", ");
+    const editing = Boolean(accountToEdit && accountToEdit.id);
+
     try {
-      const notesString = [
-        broker ? `Broker: ${broker}` : null,
-        mobile ? `Mobile: ${mobile}` : null,
-        email ? `Email: ${email}` : null,
-        apiKey ? `APIKey: ${apiKey}` : null,
-        apiSecret ? `APISecret: ${apiSecret}` : null,
-        proxyUrlToStore ? `ProxyURL: ${proxyUrlToStore}` : null,
-      ].filter(Boolean).join(", ");
+      const outcome = await runSubmit(
+        mode,
+        // Step 1 - save the latest edited details (existing update / create API).
+        async () => {
+          let resp;
+          if (accountToEdit && accountToEdit.id) {
+            resp = await fetch(`/api/v1/accounts/${accountToEdit.id}`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(
+                buildAccountUpdateBody({
+                  displayName: nickname.trim(),
+                  broker,
+                  notes: notesString,
+                  proxyExpiresOn: expiryToStore,
+                  staticIpAddress: assignedIpToStore,
+                }),
+              ),
+            });
+          } else {
+            resp = await fetch("/api/v1/accounts", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                account_type: accountType,
+                display_name: nickname.trim(),
+                alice_user_id: brokerUserId.trim() || `ACC${Math.floor(100000 + Math.random() * 900000)}`,
+                api_secret: apiSecret.trim() || "placeholder_secret",
+                broker: broker,
+                notes: notesString,
+                proxy_expires_on: expiryToStore,
+                static_ip_address: assignedIpToStore,
+              }),
+            });
+          }
 
-      let targetAccId = accountToEdit?.id;
-      let targetUserId = brokerUserId.trim() || accountToEdit?.alice_user_id;
+          if (!resp.ok) {
+            const body = (await resp.json().catch(() => null)) as unknown;
+            throw new Error(extractError(body) ?? `Failed (${resp.status})`);
+          }
 
-      let resp;
-      if (accountToEdit && accountToEdit.id) {
-        resp = await fetch(`/api/v1/accounts/${accountToEdit.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            display_name: nickname.trim(),
-            broker: broker,
-            notes: notesString,
-            proxy_expires_on: expiryToStore,
-            static_ip_address: assignedIpToStore,
-            is_active: true,
-          }),
-        });
-      } else {
-        resp = await fetch("/api/v1/accounts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            account_type: accountType,
-            display_name: nickname.trim(),
-            alice_user_id: brokerUserId.trim() || `ACC${Math.floor(100000 + Math.random() * 900000)}`,
-            api_secret: apiSecret.trim() || "placeholder_secret",
-            broker: broker,
-            notes: notesString,
-            proxy_expires_on: expiryToStore,
-            static_ip_address: assignedIpToStore,
-          }),
-        });
+          const resData = await resp.json().catch(() => null);
+          return {
+            id: (resData?.id as string | undefined) ?? accountToEdit?.id,
+            userId: (resData?.alice_user_id as string | undefined) ?? (brokerUserId.trim() || accountToEdit?.alice_user_id),
+          };
+        },
+        // Step 2 - only reached after the save succeeded: the Alice Blue login redirect.
+        async (saved) => {
+          // Open Alice Blue ANT Web Login in new tab (bypasses popup blockers) if broker is Alice Blue
+          const appCodeToUse = apiKey.trim() || "uCKZ00C9th";
+          const uIdToUse = (saved.userId || brokerUserId).trim();
+          if (
+            typeof window !== "undefined" &&
+            saved.id &&
+            (broker === "alicebluenew" || broker === "Alice Blue") &&
+            confirmAliceBlueLogin(uIdToUse || "this account")
+          ) {
+            // Bind target account context for DematConnected callback verification.
+            // Only set once the user has actually confirmed the redirect, so a
+            // cancelled confirm doesn't leave a stale reconnect target behind.
+            setReconnectTarget(saved.id, saved.userId);
+            await recordReconnectIntent(saved.id);
+
+            const popupUrl = `https://ant.aliceblueonline.com/?appcode=${encodeURIComponent(appCodeToUse)}${uIdToUse ? `&userId=${encodeURIComponent(uIdToUse)}` : ""}`;
+            const a = document.createElement("a");
+            a.href = popupUrl;
+            a.target = "_blank";
+            a.rel = "noreferrer noopener";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+          }
+        },
+      );
+
+      switch (outcome.status) {
+        case "saved":
+          // Details saved; no login was started. The page shows the success feedback.
+          onSaved?.();
+          onClose();
+          break;
+        case "reconnected":
+          onCreated();
+          onClose();
+          break;
+        case "save_failed":
+          // Nothing was reconnected; keep the dialog open so the details can be corrected.
+          setError(editing ? `Could not save the account details: ${outcome.message}` : outcome.message);
+          break;
+        case "reconnect_failed":
+          // The details ARE saved; only the login could not be started.
+          onSaved?.();
+          setError(
+            `${editing ? "Your details were saved" : "The account was created"}, but the reconnect could not be started: ${outcome.message}`,
+          );
+          break;
       }
-
-      if (!resp.ok) {
-        const body = (await resp.json()) as unknown;
-        throw new Error(extractError(body) ?? `Failed (${resp.status})`);
-      }
-
-      const resData = await resp.json().catch(() => null);
-      if (resData?.id) targetAccId = resData.id;
-      if (resData?.alice_user_id) targetUserId = resData.alice_user_id;
-
-      // Open Alice Blue ANT Web Login in new tab (bypasses popup blockers) if broker is Alice Blue
-      const appCodeToUse = apiKey.trim() || "uCKZ00C9th";
-      const uIdToUse = (targetUserId || brokerUserId).trim();
-      if (
-        typeof window !== "undefined" &&
-        targetAccId &&
-        (broker === "alicebluenew" || broker === "Alice Blue") &&
-        confirmAliceBlueLogin(uIdToUse || "this account")
-      ) {
-        // Bind target account context for DematConnected callback verification.
-        // Only set once the user has actually confirmed the redirect, so a
-        // cancelled confirm doesn't leave a stale reconnect target behind.
-        setReconnectTarget(targetAccId, targetUserId);
-        await recordReconnectIntent(targetAccId);
-
-        const popupUrl = `https://ant.aliceblueonline.com/?appcode=${encodeURIComponent(appCodeToUse)}${uIdToUse ? `&userId=${encodeURIComponent(uIdToUse)}` : ""}`;
-        const a = document.createElement("a");
-        a.href = popupUrl;
-        a.target = "_blank";
-        a.rel = "noreferrer noopener";
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-      }
-
-      onCreated();
-      onClose();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to create account";
-      setError(msg);
     } finally {
+      submitGuard.current.leave();
       setSubmitting(false);
     }
   };
@@ -1088,25 +1132,36 @@ export default function AddAccountModal({ open, onClose, onCreated, accountToEdi
 
         {/* Fixed Bottom Action Bar */}
         <div className="px-6 py-4 pb-5 bg-white border-t border-[#E5E7EB] flex items-center justify-end gap-2.5 shrink-0 box-border">
-          <button
-            type="button"
-            onClick={onClose}
-            className="inline-flex items-center justify-center gap-1.5 h-8 px-3.5 rounded-lg border text-xs font-semibold shadow-sm transition-all active:scale-[0.98] bg-red-600 hover:bg-red-700 text-white border-red-600 hover:border-red-700"
-          >
-            Close
-          </button>
+          {accountToEdit ? (
+            <button
+              type="button"
+              onClick={() => void submit("save")}
+              disabled={submitting}
+              className="inline-flex items-center justify-center gap-1.5 h-8 px-3.5 rounded-lg border text-xs font-semibold shadow-sm transition-all active:scale-[0.98] bg-[#111111] hover:bg-[#1F2937] text-white disabled:opacity-50 border-[#111111]"
+            >
+              {submitting && submitMode === "save" ? "Saving..." : "Save"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onClose}
+              className="inline-flex items-center justify-center gap-1.5 h-8 px-3.5 rounded-lg border text-xs font-semibold shadow-sm transition-all active:scale-[0.98] bg-red-600 hover:bg-red-700 text-white border-red-600 hover:border-red-700"
+            >
+              Close
+            </button>
+          )}
           <button
             type="submit"
             form="add-demat-form"
             disabled={submitting}
             className="inline-flex items-center justify-center gap-1.5 h-8 px-3.5 rounded-lg border text-xs font-semibold shadow-sm transition-all active:scale-[0.98] bg-jettone-orange hover:bg-jettone-orange-hover text-white disabled:opacity-50 border-jettone-orange hover:border-jettone-orange-hover"
           >
-            {submitting
+            {submitting && (submitMode === "reconnect" || !accountToEdit)
               ? accountToEdit
                 ? "Connecting..."
                 : "Adding..."
               : accountToEdit
-              ? "Reconnect & Login"
+              ? "Save & Reconnect"
               : "Add"}
           </button>
         </div>

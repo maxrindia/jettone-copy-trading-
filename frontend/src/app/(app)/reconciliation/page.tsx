@@ -7,6 +7,7 @@ import { EmptyState, ErrorPanel, LoadingPanel } from "@/components/ui/DataStates
 import { PageHeader, Card } from "@/components/ui/Card";
 import Button from "@/components/ui/Button";
 import { ReconciliationRecordItem } from "@/types";
+import { formatExpiry } from "@/lib/static-ip";
 
 /**
  * GET /reliability/reconciliation/records replies through reliability.py's
@@ -24,6 +25,27 @@ interface ReconciliationRecordsResponse {
   error: string | null;
 }
 
+/** "15-Oct-2026 11:41" in IST - the same DD-Mon-YYYY the Demat table uses, plus the time. */
+function formatRunTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(d);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+  const date = formatExpiry(`${get("year")}-${get("month")}-${get("day")}`) || "—";
+  return `${date} ${get("hour")}:${get("minute")}`;
+}
+
+// Same header and cell typography as the Demat Accounts table.
+const TH = "px-3 py-2.5 font-sans font-bold text-[10px] leading-4 text-[#9CA3AF] uppercase tracking-[0.06em] whitespace-nowrap";
+
 export default function ReconciliationPage() {
   const [showResolved, setShowResolved] = useState(false);
   const path = showResolved
@@ -35,8 +57,8 @@ export default function ReconciliationPage() {
   const [runState, setRunState] = useState<"idle" | "running" | "error">("idle");
   const [runError, setRunError] = useState<string | null>(null);
 
-  const accounts = useEngineData<{ id: string; display_name: string }[]>("/accounts");
-  const accountNameById = new Map((accounts.data ?? []).map((a) => [a.id, a.display_name]));
+  const accounts = useEngineData<{ id: string; display_name: string; alice_user_id?: string }[]>("/accounts");
+  const accountById = new Map((accounts.data ?? []).map((a) => [a.id, a]));
 
   const runCheck = async () => {
     setRunState("running");
@@ -102,47 +124,56 @@ export default function ReconciliationPage() {
 
       {!isLoading && !error && records && records.length > 0 && (
         <Card className="overflow-x-auto">
-          <table className="w-full text-left text-[13px] text-[#4B5563] min-w-[820px]">
-            <thead className="bg-[#F9FAFB] text-[#6B7280] uppercase text-[10px] tracking-[0.08em] border-b border-[#E5E7EB]">
-              <tr>
-                <th className="py-3 px-4 font-semibold">Run Time</th>
-                <th className="py-3 px-4 font-semibold">Account</th>
-                <th className="py-3 px-4 font-semibold">Symbol</th>
-                <th className="py-3 px-4 font-semibold text-right">Expected</th>
-                <th className="py-3 px-4 font-semibold text-right">Actual</th>
-                <th className="py-3 px-4 font-semibold text-right">Discrepancy</th>
-                <th className="py-3 px-4 font-semibold">Status</th>
+          <table className="w-full text-left text-xs min-w-[820px]">
+            <thead>
+              <tr className="text-left border-b border-[#F3F4F6]">
+                <th className={TH}>Run Time</th>
+                <th className={TH}>Account</th>
+                <th className={TH}>Symbol</th>
+                <th className={`${TH} text-right`}>Expected</th>
+                <th className={`${TH} text-right`}>Actual</th>
+                <th className={`${TH} text-right`}>Discrepancy</th>
+                <th className={TH}>Status</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#F3F4F6] bg-white">
-              {records.map((r) => (
-                <tr key={r.id} className="hover:bg-[#F9FAFB] transition-colors">
-                  <td className="py-3.5 px-4 font-mono text-xs text-[#6B7280] tabular-nums">
-                    {new Date(r.run_at).toLocaleString()}
-                  </td>
-                  <td className="py-3.5 px-4 font-bold text-[#111111]">
-                    {accountNameById.get(r.account_id) ?? r.account_id.slice(0, 8)}
-                  </td>
-                  <td className="py-3.5 px-4 font-medium text-[#111111]">{r.symbol}</td>
-                  <td className="py-3.5 px-4 font-mono font-medium text-[#111111] text-right tabular-nums">{r.expected_qty}</td>
-                  <td className="py-3.5 px-4 font-mono font-medium text-[#111111] text-right tabular-nums">{r.actual_qty}</td>
-                  <td className={`py-3.5 px-4 font-mono font-bold text-right tabular-nums ${r.discrepancy_qty === 0 ? "text-[#6B7280]" : "text-red-600"}`}>
-                    {r.discrepancy_qty > 0 ? `+${r.discrepancy_qty}` : r.discrepancy_qty}
-                  </td>
-                  <td className="py-3.5 px-4">
-                    <span
-                      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                        r.resolved
-                          ? "bg-green-50 text-green-700 border-green-200"
-                          : "bg-amber-50 text-amber-800 border-amber-200"
+              {records.map((r) => {
+                const account = accountById.get(r.account_id);
+                return (
+                  <tr key={r.id} className="hover:bg-[#FAFAFB] transition-colors">
+                    <td className="px-3 py-3 whitespace-nowrap text-[#4B5563] tabular-nums">{formatRunTime(r.run_at)}</td>
+                    <td className="px-3 py-3">
+                      <div className="font-bold text-[#111111] truncate">
+                        {account?.display_name ?? r.account_id.slice(0, 8)}
+                      </div>
+                      {account?.alice_user_id && (
+                        <div className="text-[11px] font-medium text-[#6B7280] truncate tabular-nums">{account.alice_user_id}</div>
+                      )}
+                    </td>
+                    <td className="px-3 py-3 font-bold text-[#111111]">{r.symbol}</td>
+                    <td className="px-3 py-3 text-right font-bold text-[#111111] tabular-nums">{r.expected_qty}</td>
+                    <td className="px-3 py-3 text-right font-bold text-[#111111] tabular-nums">{r.actual_qty}</td>
+                    <td
+                      className={`px-3 py-3 text-right font-bold tabular-nums ${
+                        r.discrepancy_qty === 0 ? "text-[#6B7280]" : "text-red-600"
                       }`}
                     >
-                      <span className={`w-1.5 h-1.5 rounded-full ${r.resolved ? "bg-green-500" : "bg-amber-500"}`} aria-hidden />
-                      {r.resolved ? "RESOLVED" : "OPEN MISMATCH"}
-                    </span>
-                  </td>
-                </tr>
-              ))}
+                      {r.discrepancy_qty > 0 ? `+${r.discrepancy_qty}` : r.discrepancy_qty}
+                    </td>
+                    <td className="px-3 py-3 whitespace-nowrap">
+                      <span
+                        className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border ${
+                          r.resolved
+                            ? "bg-green-50 text-green-700 border-green-200"
+                            : "bg-amber-50 text-amber-800 border-amber-200"
+                        }`}
+                      >
+                        {r.resolved ? "Resolved" : "Open mismatch"}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </Card>

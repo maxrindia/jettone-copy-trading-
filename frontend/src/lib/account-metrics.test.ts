@@ -3,7 +3,7 @@
  * helpers (no React rendering here - see alice-blue-login.test.ts for why).
  */
 import { describe, expect, it } from "vitest";
-import { emptyMetrics, openPositionsLabel, pnlHeadline, pnlTooltip, type AccountMetrics } from "./account-metrics";
+import { emptyMetrics, openPositionsLabel, pnlDisplay, pnlHeadline, pnlTooltip, type AccountMetrics } from "./account-metrics";
 import { formatInr } from "./money";
 
 function metrics(overrides: Partial<AccountMetrics>): AccountMetrics {
@@ -46,8 +46,26 @@ describe("pnlTooltip", () => {
     expect(tip).toContain("Alice Blue check: MATCH");
   });
 
-  it("explains that an unavailable value is only a placeholder", () => {
-    expect(pnlTooltip(emptyMetrics("acc"))).toContain("shown as a placeholder, not a confirmed value");
+  it("says an unverified P&L has no value instead of implying zero", () => {
+    const tip = pnlTooltip(emptyMetrics("acc"));
+    expect(tip).toContain("could not be verified");
+    expect(tip).not.toContain("placeholder");
+  });
+});
+
+describe("pnlDisplay", () => {
+  it("shows N/A, not a zero amount, when P&L could not be verified", () => {
+    expect(pnlDisplay(emptyMetrics("acc"))).toEqual({ text: "N/A", unavailable: true, value: null });
+  });
+
+  it("still shows a verified zero as a zero amount, and real values with their sign", () => {
+    const zero = metrics({ realized_pnl: "0.00", unrealized_pnl: "0.00", total_pnl: "0.00", pnl_status: "OK" });
+    expect(pnlDisplay(zero)).toEqual({ text: "₹0.00", unavailable: false, value: "0.00" });
+    expect(pnlDisplay(metrics({ total_pnl: "-1.52", realized_pnl: "-1.52", unrealized_pnl: "0.00" })).text).toBe("−₹1.52");
+  });
+
+  it("falls back to realized alone when that is all that was verified", () => {
+    expect(pnlDisplay(metrics({ total_pnl: null, realized_pnl: "12.50" })).text).toBe("+₹12.50");
   });
 });
 

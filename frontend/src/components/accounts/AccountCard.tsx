@@ -22,7 +22,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { formatExpiry } from "@/lib/static-ip";
-import { openPositionsLabel, pnlHeadline, pnlTooltip, type AccountMetrics } from "@/lib/account-metrics";
+import { openPositionsLabel, pnlDisplay, pnlHeadline, pnlTooltip, type AccountMetrics } from "@/lib/account-metrics";
 import { formatInr, moneyToneClass } from "@/lib/money";
 import Tooltip from "@/components/ui/Tooltip";
 
@@ -299,7 +299,9 @@ export default function AccountCard({
                 <Wallet className="w-2.5 h-2.5 text-[#9CA3AF]" />
                 P&amp;L
               </div>
-              <div className={`text-xs font-bold ${moneyToneClass(pnl.value)}`}>{formatInr(pnl.value)}</div>
+              <div className={`text-xs font-bold ${pnlDisplay(metrics).unavailable ? "text-[#9CA3AF]" : moneyToneClass(pnl.value)}`}>
+                {pnlDisplay(metrics).text}
+              </div>
               <div className="text-[9px] leading-tight text-[#9CA3AF]">{pnl.caption}</div>
             </div></Tooltip>
             <div>

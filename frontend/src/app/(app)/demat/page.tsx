@@ -83,6 +83,7 @@ export default function DematPage() {
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<DematCardItem | null>(null);
+  const [savedNotice, setSavedNotice] = useState<string | null>(null);
   const [renewingAccount, setRenewingAccount] = useState<DematCardItem | null>(null);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
 
@@ -225,8 +226,21 @@ export default function DematPage() {
 
   const activeAccounts = accounts ?? [];
 
+  // Success feedback for "Save" (the dialog closes), cleared after a few seconds.
+  useEffect(() => {
+    if (!savedNotice) return;
+    const t = setTimeout(() => setSavedNotice(null), 4000);
+    return () => clearTimeout(t);
+  }, [savedNotice]);
+
   return (
     <div className="space-y-6 max-w-page mx-auto pb-12">
+      {savedNotice && (
+        <div role="status" className="p-3 rounded-[10px] bg-green-50 border border-green-200 text-xs font-semibold text-green-700">
+          {savedNotice}
+        </div>
+      )}
+
       {/* Header Bar */}
       <div className="flex items-center justify-between flex-wrap gap-4">
         <div className="flex items-center gap-3">
@@ -400,6 +414,12 @@ export default function DematPage() {
           setEditingAccount(null);
           refresh();
           refreshMetrics();
+        }}
+        onSaved={() => {
+          // Details saved from the Reconnect dialog: refresh the list and confirm.
+          refresh();
+          refreshMetrics();
+          setSavedNotice("Account details saved.");
         }}
       />
     </div>
