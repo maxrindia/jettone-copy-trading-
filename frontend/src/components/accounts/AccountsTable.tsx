@@ -6,6 +6,7 @@ import { openPositionsLabel, pnlHeadline, pnlTooltip, type AccountMetrics } from
 import { formatInr, moneyToneClass } from "@/lib/money";
 import type { AccountCardDangerAction } from "./AccountCard";
 import Tooltip from "@/components/ui/Tooltip";
+import { describeAssignedIp, formatExpiryCell } from "@/lib/static-ip";
 
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return "";
@@ -22,6 +23,11 @@ export interface AccountsTableRow {
    * lib/account-proxy.ts), or null when this account has no dedicated proxy
    * configured and its calls go out through the shared VPS IP instead. */
   proxyHost: string | null;
+  /** The public IP recorded for this account's Static IP (accounts.static_ip_address);
+   * null when it has not been entered. Never derived from the proxy host. */
+  assignedIp?: string | null;
+  /** Last valid day of the Static IP (accounts.proxy_expires_on, YYYY-MM-DD); null when not set. */
+  expiresOn?: string | null;
   /** ACTIVE / EXPIRED / UNTRACKED from the engine; null when the account has no Static IP. */
   staticIpStatus?: "ACTIVE" | "EXPIRED" | "UNTRACKED" | null;
   /** When this account was connected to Jettone (Account.created_at). */
@@ -40,7 +46,7 @@ export interface AccountsTableRow {
   dangerAction: AccountCardDangerAction;
 }
 
-type SortKey = "name" | "ip" | "in_group" | "pnl" | "pos" | "orders";
+type SortKey = "name" | "ip" | "expiry" | "in_group" | "pnl" | "pos" | "orders";
 type SortDir = "asc" | "desc";
 
 function sortValue(row: AccountsTableRow, key: SortKey): number | string {
@@ -49,9 +55,12 @@ function sortValue(row: AccountsTableRow, key: SortKey): number | string {
     case "name":
       return row.displayName.toLowerCase();
     case "ip":
-      // Unconfigured accounts (no dedicated proxy) sort after configured
-      // ones regardless of direction, by comparing on presence first.
-      return row.proxyHost ? `0${row.proxyHost.toLowerCase()}` : "1";
+      // Accounts with a recorded public IP first, then proxies without one,
+      // then shared-VPS accounts.
+      return row.assignedIp ? `0${row.assignedIp}` : row.proxyHost ? "1" : "2";
+    case "expiry":
+      // ISO dates sort lexically; accounts with no expiry sort last.
+      return row.expiresOn ? `0${row.expiresOn}` : "1";
     case "in_group":
       return m.in_group;
     case "pnl":
@@ -130,7 +139,7 @@ function TradingSwitch({ row }: { row: AccountsTableRow }) {
  * same filtered/sorted rows, same real values, nothing recomputed. */
 function exportCsv(rows: AccountsTableRow[]) {
   const header = [
-    "S.No", "Name", "Broker User ID", "Role", "IP Address", "Trading", "Created Date", "Session", "Last Authenticated",
+    "S.No", "Name", "Broker User ID", "Role", "IP Address", "Expiry Date", "Trading", "Created Date", "Session", "Last Authenticated",
     "In Group", "P&L", "Open Positions", "Orders", "Pending", "Completed", "Rejected", "Cancelled", "Needs Review",
   ];
   const lines = rows.map((row, i) => {
@@ -141,7 +150,8 @@ function exportCsv(rows: AccountsTableRow[]) {
       row.displayName,
       row.aliceUserId,
       row.role === "MASTER" ? "Master" : row.role === "CHILD" ? "Child" : "Unassigned",
-      row.proxyHost ?? "Shared VPS",
+      describeAssignedIp(row.assignedIp, row.proxyHost).text,
+      formatExpiryCell(row.expiresOn),
       row.tradingEnabled ? "On" : "Off",
       formatDate(row.createdAt),
       row.sessionValid ? "Live" : "Offline",
@@ -244,15 +254,16 @@ export default function AccountsTable({ rows, vpsIp }: { rows: AccountsTableRow[
         <table className="w-full text-xs table-fixed">
           <colgroup>
             <col className="w-[4%]" />
-            <col className="w-[19%]" />
-            <col className="w-[11%]" />
+            <col className="w-[16%]" />
+            <col className="w-[10%]" />
+            <col className="w-[7%]" />
+            <col className="w-[14%]" />
+            <col className="w-[10%]" />
             <col className="w-[8%]" />
-            <col className="w-[15%]" />
-            <col className="w-[11%]" />
+            <col className="w-[7%]" />
             <col className="w-[8%]" />
-            <col className="w-[9%]" />
             <col className="w-[6%]" />
-            <col className="w-[9%]" />
+            <col className="w-[10%]" />
           </colgroup>
           <thead>
             <tr className="text-left border-b border-[#F3F4F6]">
@@ -264,6 +275,9 @@ export default function AccountsTable({ rows, vpsIp }: { rows: AccountsTableRow[
               <th className="px-3 py-2.5 font-bold text-[10px] text-[#9CA3AF] uppercase tracking-[0.06em]">Trading</th>
               <th className="px-3 py-2.5">
                 <SortHeader label="IP Address" sortKey="ip" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+              </th>
+              <th className="px-3 py-2.5">
+                <SortHeader label="Expiry Date" sortKey="expiry" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
               </th>
               <th className="px-3 py-2.5 font-bold text-[10px] text-[#9CA3AF] uppercase tracking-[0.06em]">Created Date</th>
               <th className="px-3 py-2.5 text-right">
@@ -310,20 +324,39 @@ export default function AccountsTable({ rows, vpsIp }: { rows: AccountsTableRow[
                   </td>
 
                   <td className="px-3 py-3 whitespace-nowrap">
-                    {row.proxyHost ? (
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="font-mono text-[#111111]">{row.proxyHost}</span>
-                        {row.staticIpStatus === "EXPIRED" && (
-                          <span className="px-1.5 py-0.5 rounded-lg text-[10px] font-bold bg-red-50 text-red-700 border border-red-200">
-                            Expired
-                          </span>
-                        )}
-                      </span>
-                    ) : (
-                      <Tooltip content={vpsIp ? `Uses the shared VPS IP: ${vpsIp}` : "No dedicated proxy configured"} focusable><span className="text-[#9CA3AF]">
-                        Shared VPS
-                      </span></Tooltip>
-                    )}
+                    {(() => {
+                      const ip = describeAssignedIp(row.assignedIp, row.proxyHost);
+                      if (ip.kind === "shared_vps") {
+                        return (
+                          <Tooltip content={vpsIp ? `Uses the shared VPS IP: ${vpsIp}` : "No dedicated proxy configured"} focusable>
+                            <span className="text-[#9CA3AF]">{ip.text}</span>
+                          </Tooltip>
+                        );
+                      }
+                      return (
+                        <span className="inline-flex items-center gap-1.5">
+                          {ip.kind === "assigned" ? (
+                            <span className="font-mono text-[#111111]">{ip.text}</span>
+                          ) : (
+                            <Tooltip
+                              content="No public IP has been entered for this account's Static IP. Edit the account to add it."
+                              focusable
+                            >
+                              <span className="text-[#9CA3AF]">{ip.text}</span>
+                            </Tooltip>
+                          )}
+                          {row.staticIpStatus === "EXPIRED" && (
+                            <span className="px-1.5 py-0.5 rounded-lg text-[10px] font-bold bg-red-50 text-red-700 border border-red-200">
+                              Expired
+                            </span>
+                          )}
+                        </span>
+                      );
+                    })()}
+                  </td>
+
+                  <td className="px-3 py-3 whitespace-nowrap text-[#4B5563]">
+                    {row.expiresOn ? formatExpiryCell(row.expiresOn) : <span className="text-[#9CA3AF]">Not set</span>}
                   </td>
 
                   <td className="px-3 py-3 whitespace-nowrap text-[#4B5563]">{formatDate(row.createdAt)}</td>
@@ -340,13 +373,6 @@ export default function AccountsTable({ rows, vpsIp }: { rows: AccountsTableRow[
 
                   <td className="px-4 py-3 text-right whitespace-nowrap">
                     <span className="font-bold text-[#111111]">{m.orders_count}</span>
-                    {m.needs_review_count > 0 && (
-                      <Tooltip content={`${m.needs_review_count} trade(s) need reconciliation review - the engine couldn't confirm their outcome`} focusable><span
-                        className="ml-1.5 px-1 py-0.5 rounded text-[9px] font-bold text-amber-700 bg-amber-50 border border-amber-200"
-                      >
-                        {m.needs_review_count} review
-                      </span></Tooltip>
-                    )}
                   </td>
                 </tr>
               );

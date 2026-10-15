@@ -3,7 +3,7 @@
 import { ReactNode } from "react";
 import { Activity, Boxes, CandlestickChart, CheckCircle2, Gauge, Landmark, Target, Wallet, Wifi } from "lucide-react";
 import { formatInr, moneyToneClass } from "@/lib/money";
-import { staticIpCaption, staticIpTitle, type StaticIpCounts } from "@/lib/static-ip";
+import { staticIpCaption, staticIpTitle, type StaticIpCardState, type StaticIpCounts } from "@/lib/static-ip";
 import {
   combinedPnlUnavailableReason,
   edgeCaption,
@@ -42,6 +42,8 @@ interface KpiCardProps {
   captionWrap?: boolean;
   title?: string;
   onClick?: () => void;
+  /** Shows a skeleton in place of the value and caption (only while genuinely pending). */
+  loading?: boolean;
 }
 
 function KpiCard({
@@ -56,6 +58,7 @@ function KpiCard({
   captionWrap = false,
   title,
   onClick,
+  loading = false,
 }: KpiCardProps) {
   const Wrapper = onClick ? "button" : "div";
   return (
@@ -89,12 +92,21 @@ function KpiCard({
       </div>
 
       <div className="relative z-10 mt-2.5">
-        <p className={`font-bold font-sans leading-none ${valueSizeClassName} ${valueClassName ?? "text-[#111111]"}`}>
-          {value}
-        </p>
-        <p className={`text-[11px] text-gray-400 font-normal mt-1 leading-snug ${captionWrap ? "" : "truncate"}`}>
-          {caption}
-        </p>
+        {loading ? (
+          <div role="status" aria-label={`${label} is loading`}>
+            <span className="block h-5 w-10 rounded bg-gray-100 animate-pulse" aria-hidden="true" />
+            <span className="mt-2 block h-3 w-24 rounded bg-gray-100 animate-pulse" aria-hidden="true" />
+          </div>
+        ) : (
+          <>
+            <p className={`font-bold font-sans leading-none ${valueSizeClassName} ${valueClassName ?? "text-[#111111]"}`}>
+              {value}
+            </p>
+            <p className={`text-[11px] text-gray-400 font-normal mt-1 leading-snug ${captionWrap ? "" : "truncate"}`}>
+              {caption}
+            </p>
+          </>
+        )}
       </div>
     </Wrapper>
     </Tooltip>
@@ -120,26 +132,59 @@ export function DematAccountsCard({ platform }: { platform: DashboardPlatform })
  * Distinct, non-expired Static IP hosts across the demat accounts, as counted by
  * the engine (GET /system/static-ip). An IP with no recorded expiry is counted but
  * called out in the caption ("no expiry"), never reported as active or expired.
- * `counts` is null while the request is loading.
+ * `state` is loading only while the first request is pending; a failed request
+ * shows an explicit unavailable state (click to retry), never a stuck spinner.
  */
-export function AvailableStaticIpCard({ counts }: { counts: StaticIpCounts | null }) {
-  const value = counts ? String(counts.available_count) : "—";
-
+export function AvailableStaticIpCard({
+  state,
+  onRetry,
+}: {
+  state: StaticIpCardState;
+  onRetry?: () => void;
+}) {
+  const icon = <Wifi className="w-4 h-4" />;
+  if (state.kind === "loading") {
+    return (
+      <KpiCard
+        icon={icon}
+        iconColor="text-[#16A34A]"
+        halfCircleColor="bg-green-100/70"
+        label="Available Static IP"
+        value=""
+        caption=""
+        loading
+      />
+    );
+  }
+  if (state.kind === "error") {
+    return (
+      <KpiCard
+        icon={icon}
+        iconColor="text-[#16A34A]"
+        halfCircleColor="bg-green-100/70"
+        label="Available Static IP"
+        value="—"
+        valueClassName="text-[#9CA3AF]"
+        caption="Unavailable · click to retry"
+        title={`${state.message} Click to try again.`}
+        onClick={onRetry}
+      />
+    );
+  }
+  const { counts } = state;
   return (
     <KpiCard
-      icon={<Wifi className="w-4 h-4" />}
+      icon={icon}
       iconColor="text-[#16A34A]"
       halfCircleColor="bg-green-100/70"
       label="Available Static IP"
-      value={value}
+      value={String(counts.available_count)}
       caption={staticIpCaption(counts)}
       title={staticIpTitle(counts)}
     />
   );
 }
 
-// Backward-compatibility alias
-export const StaticIpCard = AvailableStaticIpCard;
 
 export function StrategiesCard({ platform }: { platform: DashboardPlatform }) {
   return (

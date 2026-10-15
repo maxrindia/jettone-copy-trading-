@@ -59,12 +59,6 @@ export default function AccountOrderHistoryPage() {
           <h1 className="text-base sm:text-lg font-extrabold text-[#111111] tracking-tight truncate">
             {account ? `${account.display_name} — Order History` : "Order History"}
           </h1>
-          {account && (
-            <p className="text-[11px] text-[#6B7280] mt-0.5">
-              Account-specific order history for{" "}
-              <span className="font-mono font-bold text-[#111111]">{account.alice_user_id}</span>
-            </p>
-          )}
         </div>
       </div>
 

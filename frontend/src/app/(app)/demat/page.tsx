@@ -36,6 +36,8 @@ interface DematCardItem {
   notes: string | null;
   proxy_expires_on: string | null;
   static_ip_host: string | null;
+  /** The public IP assigned to this account's Static IP, as entered by the owner. */
+  static_ip_address?: string | null;
   static_ip_status: "ACTIVE" | "EXPIRED" | "UNTRACKED" | null;
   copy_settings: CopySettingResponse | null;
   created_at: string;
@@ -346,6 +348,8 @@ export default function DematPage() {
               aliceUserId: card.alice_user_id,
               role: card.strategy_role ?? null,
               proxyHost: accountProxyHost(card.notes),
+              assignedIp: card.static_ip_address ?? null,
+              expiresOn: card.proxy_expires_on ?? null,
               staticIpStatus: card.static_ip_status,
               createdAt: card.created_at,
               sessionValid: card.session_valid,

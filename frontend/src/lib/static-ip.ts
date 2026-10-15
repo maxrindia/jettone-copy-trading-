@@ -89,3 +89,52 @@ export function describeStaticIp(status: StaticIpStatus, expiresOn: string | nul
   if (status === "ACTIVE") return { label: "Static IP Active", detail: when ? `Expires: ${when}` : "", tone: "green", action: "Update" };
   return { label: "Static IP", detail: "Configured · expiry not tracked", tone: "gray", action: "Set expiry" };
 }
+
+// ── Dashboard "Available Static IP" card ────────────────────────────────────
+
+export type StaticIpCardState =
+  | { kind: "loading" }
+  | { kind: "ready"; counts: StaticIpCounts }
+  | { kind: "error"; message: string };
+
+/**
+ * What the card shows. `loading` is only ever true while the FIRST request is
+ * genuinely in flight: once a request has finished (success or failure) the
+ * state is ready or error, never loading, so the card cannot sit on a spinner
+ * forever. A later failed poll keeps showing the last good count.
+ */
+export function staticIpCardState(r: {
+  data: StaticIpCounts | null;
+  error: string | null;
+  isLoading: boolean;
+}): StaticIpCardState {
+  if (r.data) return { kind: "ready", counts: r.data };
+  if (r.error) return { kind: "error", message: r.error };
+  if (r.isLoading) return { kind: "loading" };
+  return { kind: "error", message: "The Static IP count could not be loaded." };
+}
+
+// ── Demat Accounts: IP address and expiry cells ─────────────────────────────
+
+export interface AssignedIpDisplay {
+  text: string;
+  kind: "assigned" | "not_entered" | "shared_vps";
+}
+
+/**
+ * The IP shown for an account is the public IP recorded for its Static IP
+ * (`static_ip_address`). It is never derived from the proxy host name. A proxy
+ * with no recorded IP says so; an account with no proxy at all goes out
+ * through the shared VPS IP.
+ */
+export function describeAssignedIp(assignedIp: string | null | undefined, proxyHost: string | null | undefined): AssignedIpDisplay {
+  const ip = (assignedIp ?? "").trim();
+  if (ip) return { text: ip, kind: "assigned" };
+  if (proxyHost) return { text: "Not entered", kind: "not_entered" };
+  return { text: "Shared VPS", kind: "shared_vps" };
+}
+
+/** "15-Oct-2026" (same style as the card's "Expires: ..."), or "Not set". */
+export function formatExpiryCell(iso: string | null | undefined): string {
+  return formatExpiry(iso) || "Not set";
+}

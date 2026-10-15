@@ -2,7 +2,7 @@
 
 import { useEngineData } from "@/lib/use-engine-data";
 import type { DashboardPlatform } from "@/lib/dashboard";
-import type { StaticIpCounts } from "@/lib/static-ip";
+import { staticIpCardState, type StaticIpCounts } from "@/lib/static-ip";
 import { ActiveStrategiesCard, AvailableStaticIpCard, DematAccountsCard, StrategiesCard } from "./KpiCards";
 
 interface StaticIpStatus extends StaticIpCounts {
@@ -24,7 +24,7 @@ export default function PlatformOverview({ platform }: { platform: DashboardPlat
   return (
     <div className="grid grid-cols-1 [@container_(min-width:26rem)]:grid-cols-2 [@container_(min-width:56rem)]:grid-cols-4 gap-3">
       <DematAccountsCard platform={platform} />
-      <AvailableStaticIpCard counts={staticIp.data ?? null} />
+      <AvailableStaticIpCard state={staticIpCardState(staticIp)} onRetry={staticIp.refresh} />
       <StrategiesCard platform={platform} />
       <ActiveStrategiesCard platform={platform} />
     </div>
