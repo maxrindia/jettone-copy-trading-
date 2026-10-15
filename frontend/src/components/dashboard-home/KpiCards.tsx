@@ -3,7 +3,7 @@
 import { ReactNode } from "react";
 import { Activity, Boxes, CandlestickChart, CheckCircle2, Gauge, Landmark, Target, Wallet, Wifi } from "lucide-react";
 import { formatInr, moneyToneClass } from "@/lib/money";
-import { staticIpCaption, staticIpTitle, type StaticIpCardState, type StaticIpCounts } from "@/lib/static-ip";
+import { staticIpCaption, type StaticIpCardState, type StaticIpCounts } from "@/lib/static-ip";
 import {
   combinedPnlUnavailableReason,
   edgeCaption,
@@ -19,7 +19,6 @@ import {
   type DateRangeInfo,
   type ExecutionEdge,
 } from "@/lib/dashboard";
-import Tooltip from "@/components/ui/Tooltip";
 
 /**
  * Clean, modern KPI card matching the reference design.
@@ -40,7 +39,6 @@ interface KpiCardProps {
   valueSizeClassName?: string;
   caption: ReactNode;
   captionWrap?: boolean;
-  title?: string;
   onClick?: () => void;
   /** Shows a skeleton in place of the value and caption (only while genuinely pending). */
   loading?: boolean;
@@ -56,17 +54,13 @@ function KpiCard({
   valueSizeClassName = "text-xl tracking-tight",
   caption,
   captionWrap = false,
-  title,
   onClick,
   loading = false,
 }: KpiCardProps) {
   const Wrapper = onClick ? "button" : "div";
   return (
-    <Tooltip content={title}>
     <Wrapper
       onClick={onClick}
-      // The help text is on the card itself, so a non-clickable card must be focusable to reach it.
-      tabIndex={!onClick && title ? 0 : undefined}
       className={`group relative p-4 rounded-[10px] bg-white border border-gray-100 shadow-[0_1px_2px_rgba(15,23,42,0.03)] hover:shadow-sm hover:border-gray-200 transition-all duration-150 text-left flex flex-col justify-between ${
         onClick ? "cursor-pointer" : ""
       }`}
@@ -109,7 +103,6 @@ function KpiCard({
         )}
       </div>
     </Wrapper>
-    </Tooltip>
   );
 }
 
@@ -166,7 +159,6 @@ export function AvailableStaticIpCard({
         value="—"
         valueClassName="text-[#9CA3AF]"
         caption="Unavailable · click to retry"
-        title={`${state.message} Click to try again.`}
         onClick={onRetry}
       />
     );
@@ -180,7 +172,6 @@ export function AvailableStaticIpCard({
       label="Available Static IP"
       value={String(counts.available_count)}
       caption={staticIpCaption(counts)}
-      title={staticIpTitle(counts)}
     />
   );
 }
@@ -209,7 +200,6 @@ export function ActiveStrategiesCard({ platform }: { platform: DashboardPlatform
       label="Active Strategies"
       value={String(platform.strategies.active)}
       caption={isRunning ? "Live trading active" : "Currently idle"}
-      title="Strategies enabled and linked to the live master."
     />
   );
 }
@@ -227,8 +217,8 @@ export function ActiveStrategiesCard({ platform }: { platform: DashboardPlatform
 // "Unavailable") with a single fixed caption, never a range-specific one
 // ("for this range", "select Today", etc.) - the reason a given range is
 // unavailable can vary, but the user-facing message stays generic. The
-// backend's specific reason (pnl.*_unavailable_reason) is still surfaced via
-// the `title` tooltip rather than dropped.
+// backend's specific reason (pnl.*_unavailable_reason) stays in the API
+// response; KPI cards carry no hover tooltip.
 const PNL_UNAVAILABLE_CLASS = "text-gray-300";
 const PNL_UNAVAILABLE_VALUE = "N/A";
 const PNL_UNAVAILABLE_CAPTION = "P&L history isn't available yet";
@@ -248,7 +238,6 @@ export function TotalGrossPnlCard({ pnl, range }: { pnl: DashboardPnl; range: Da
       value={unavailable ? PNL_UNAVAILABLE_VALUE : formatInr(pnl.combined_total)}
       valueClassName={unavailable ? PNL_UNAVAILABLE_CLASS : moneyToneClass(pnl.combined_total)}
       valueSizeClassName={PNL_VALUE_SIZE_CLASS}
-      title={unavailable ?? "Realized + Unrealized for every distinct account, for the selected period. Unrealized is only ever a right-now snapshot."}
       captionWrap
       caption={unavailable ? PNL_UNAVAILABLE_CAPTION : `Gross · Before charges · ${range.is_today ? "Today" : "selected period"}`}
     />
@@ -266,7 +255,6 @@ export function RealizedPnlCard({ pnl, range }: { pnl: DashboardPnl; range: Date
       value={unavailable ? PNL_UNAVAILABLE_VALUE : formatInr(pnl.combined_realized)}
       valueClassName={unavailable ? PNL_UNAVAILABLE_CLASS : moneyToneClass(pnl.combined_realized)}
       valueSizeClassName={PNL_VALUE_SIZE_CLASS}
-      title={unavailable ?? undefined}
       caption={unavailable ? PNL_UNAVAILABLE_CAPTION : realizedPnlRangeCaption(range)}
     />
   );
@@ -283,7 +271,6 @@ export function UnrealizedPnlCard({ pnl, range }: { pnl: DashboardPnl; range: Da
       value={unavailable ? PNL_UNAVAILABLE_VALUE : formatInr(pnl.combined_unrealized)}
       valueClassName={unavailable ? PNL_UNAVAILABLE_CLASS : moneyToneClass(pnl.combined_unrealized)}
       valueSizeClassName={PNL_VALUE_SIZE_CLASS}
-      title={unavailable ?? undefined}
       caption={unavailable ? PNL_UNAVAILABLE_CAPTION : unrealizedPnlRangeCaption(range)}
     />
   );
@@ -297,7 +284,6 @@ export function CopyFillRateCard({ fill }: { fill: CopyFillStats }) {
       halfCircleColor={null}
       label="Copy Fill Rate"
       value={fillRateLabel(fill)}
-      title="Filled child quantity as a share of target child quantity from broker-confirmed fills."
       caption={fillRateCaption(fill)}
     />
   );
@@ -312,7 +298,6 @@ export function ExecutionImpactCard({ edge }: { edge: ExecutionEdge }) {
       label="Execution Impact"
       value={formatInr(edge.total)}
       valueClassName={moneyToneClass(edge.total)}
-      title="Quantity-weighted execution impact across copied fills."
       caption={edgeCaption(edge)}
     />
   );

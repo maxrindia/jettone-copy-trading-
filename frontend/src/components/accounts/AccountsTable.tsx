@@ -6,7 +6,17 @@ import { openPositionsLabel, pnlHeadline, pnlTooltip, type AccountMetrics } from
 import { formatInr, moneyToneClass } from "@/lib/money";
 import type { AccountCardDangerAction } from "./AccountCard";
 import Tooltip from "@/components/ui/Tooltip";
-import { describeAssignedIp, formatExpiryCell } from "@/lib/static-ip";
+import { describeAssignedIp, formatExpiry, formatExpiryCell } from "@/lib/static-ip";
+
+/** A timestamp as the same "05-Nov-2026" date the Expiry Date shows, in IST; "Not set" when missing or invalid. */
+export function formatDateDmy(iso: string | null | undefined): string {
+  if (!iso) return "Not set";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "Not set";
+  // en-CA renders YYYY-MM-DD; formatExpiry then gives DD-Mon-YYYY.
+  const ymd = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
+  return formatExpiry(ymd) || "Not set";
+}
 
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return "";
@@ -35,6 +45,7 @@ export interface AccountsTableRow {
   sessionValid: boolean;
   lastAuthenticatedAt: string | null | undefined;
   pingMs?: number | null;
+  /** The role pill (Master / Child / Unassigned) and the E-Stop pill, shown in the Role column. */
   badges: ReactNode;
   metrics: AccountMetrics;
   tradingEnabled: boolean;
@@ -46,14 +57,25 @@ export interface AccountsTableRow {
   dangerAction: AccountCardDangerAction;
 }
 
-type SortKey = "name" | "ip" | "expiry" | "in_group" | "pnl" | "pos" | "orders";
+type SortKey = "name" | "role" | "session" | "trading" | "ip" | "created" | "expiry" | "pnl" | "pos" | "orders";
 type SortDir = "asc" | "desc";
+
+/** The single header text style: every column header (sortable or not) uses it. */
+const HEADER_TEXT_CLASS = "font-bold uppercase tracking-[0.06em] text-[10px] whitespace-nowrap";
 
 function sortValue(row: AccountsTableRow, key: SortKey): number | string {
   const m = row.metrics;
   switch (key) {
     case "name":
       return row.displayName.toLowerCase();
+    case "role":
+      return row.role === "MASTER" ? "0" : row.role === "CHILD" ? "1" : "2";
+    case "session":
+      return row.sessionValid ? 1 : 0;
+    case "trading":
+      return row.tradingEnabled ? 1 : 0;
+    case "created":
+      return row.createdAt ?? "";
     case "ip":
       // Accounts with a recorded public IP first, then proxies without one,
       // then shared-VPS accounts.
@@ -61,8 +83,6 @@ function sortValue(row: AccountsTableRow, key: SortKey): number | string {
     case "expiry":
       // ISO dates sort lexically; accounts with no expiry sort last.
       return row.expiresOn ? `0${row.expiresOn}` : "1";
-    case "in_group":
-      return m.in_group;
     case "pnl":
       return parseFloat(pnlHeadline(m).value ?? "0") || 0;
     case "pos":
@@ -91,7 +111,7 @@ function SortHeader({
   return (
     <button
       onClick={() => onSort(sortKey)}
-      className={`inline-flex items-center gap-1 font-bold uppercase tracking-[0.06em] text-[10px] transition-colors ${
+      className={`inline-flex items-center gap-1 ${HEADER_TEXT_CLASS} transition-colors ${
         isActive ? "text-[#111111]" : "text-[#9CA3AF] hover:text-[#4B5563]"
       } ${align === "right" ? "flex-row-reverse" : ""}`}
     >
@@ -135,12 +155,16 @@ function TradingSwitch({ row }: { row: AccountsTableRow }) {
   );
 }
 
-/** Builds and downloads a CSV of exactly what the table currently shows -
- * same filtered/sorted rows, same real values, nothing recomputed. */
-function exportCsv(rows: AccountsTableRow[]) {
+function roleLabel(role: AccountsTableRow["role"]): string {
+  return role === "MASTER" ? "Master" : role === "CHILD" ? "Child" : "Unassigned";
+}
+
+/** CSV text of exactly what the table shows - same filtered/sorted rows, same
+ * real values, columns in the table's order. */
+export function buildAccountsCsv(rows: AccountsTableRow[]): string {
   const header = [
-    "S.No", "Name", "Broker User ID", "Role", "IP Address", "Expiry Date", "Trading", "Created Date", "Session", "Last Authenticated",
-    "In Group", "P&L", "Open Positions", "Orders", "Pending", "Completed", "Rejected", "Cancelled", "Needs Review",
+    "S.No", "Name", "Broker User ID", "Role", "Session", "Last Authenticated", "Trading", "IP Address", "Created Date",
+    "Expiry Date", "P&L", "Open Positions", "Orders", "Pending", "Completed", "Rejected", "Cancelled", "Needs Review",
   ];
   const lines = rows.map((row, i) => {
     const m = row.metrics;
@@ -149,14 +173,13 @@ function exportCsv(rows: AccountsTableRow[]) {
       i + 1,
       row.displayName,
       row.aliceUserId,
-      row.role === "MASTER" ? "Master" : row.role === "CHILD" ? "Child" : "Unassigned",
-      describeAssignedIp(row.assignedIp, row.proxyHost).text,
-      formatExpiryCell(row.expiresOn),
-      row.tradingEnabled ? "On" : "Off",
-      formatDate(row.createdAt),
+      roleLabel(row.role),
       row.sessionValid ? "Live" : "Offline",
       formatDate(row.lastAuthenticatedAt),
-      m.in_group,
+      row.tradingEnabled ? "On" : "Off",
+      describeAssignedIp(row.assignedIp, row.proxyHost).text,
+      formatDateDmy(row.createdAt),
+      formatExpiryCell(row.expiresOn),
       pnl.value ?? "",
       openPositionsLabel(m),
       m.orders_count,
@@ -169,7 +192,12 @@ function exportCsv(rows: AccountsTableRow[]) {
       .map((v) => `"${String(v).replace(/"/g, '""')}"`)
       .join(",");
   });
-  const csv = [header.join(","), ...lines].join("\n");
+  return [header.join(","), ...lines].join("\n");
+}
+
+/** Builds and downloads the CSV of the rows the table currently shows. */
+function exportCsv(rows: AccountsTableRow[]) {
+  const csv = buildAccountsCsv(rows);
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -251,43 +279,49 @@ export default function AccountsTable({ rows, vpsIp }: { rows: AccountsTableRow[
       </div>
 
       <div className="overflow-x-auto rounded-b-[10px]">
-        <table className="w-full text-xs table-fixed">
+        <table className="w-full min-w-[1240px] text-xs table-fixed">
           <colgroup>
             <col className="w-[4%]" />
-            <col className="w-[16%]" />
+            <col className="w-[13%]" />
+            <col className="w-[8%]" />
             <col className="w-[10%]" />
             <col className="w-[7%]" />
-            <col className="w-[14%]" />
+            <col className="w-[12%]" />
+            <col className="w-[10%]" />
             <col className="w-[10%]" />
             <col className="w-[8%]" />
-            <col className="w-[7%]" />
-            <col className="w-[8%]" />
-            <col className="w-[6%]" />
-            <col className="w-[10%]" />
+            <col className="w-[9%]" />
+            <col className="w-[9%]" />
           </colgroup>
           <thead>
             <tr className="text-left border-b border-[#F3F4F6]">
-              <th className="px-4 py-2.5 font-bold text-[10px] text-[#9CA3AF] uppercase tracking-[0.06em]">S.No</th>
+              <th className={`px-4 py-2.5 text-[#9CA3AF] ${HEADER_TEXT_CLASS}`}>S.No</th>
               <th className="px-3 py-2.5">
                 <SortHeader label="Account" sortKey="name" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
               </th>
-              <th className="px-3 py-2.5 font-bold text-[10px] text-[#9CA3AF] uppercase tracking-[0.06em]">Session</th>
-              <th className="px-3 py-2.5 font-bold text-[10px] text-[#9CA3AF] uppercase tracking-[0.06em]">Trading</th>
+              <th className="px-3 py-2.5">
+                <SortHeader label="Role" sortKey="role" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+              </th>
+              <th className="px-3 py-2.5">
+                <SortHeader label="Session" sortKey="session" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+              </th>
+              <th className="px-3 py-2.5">
+                <SortHeader label="Trading" sortKey="trading" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+              </th>
               <th className="px-3 py-2.5">
                 <SortHeader label="IP Address" sortKey="ip" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
               </th>
               <th className="px-3 py-2.5">
-                <SortHeader label="Expiry Date" sortKey="expiry" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
+                <SortHeader label="Created Date" sortKey="created" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
               </th>
-              <th className="px-3 py-2.5 font-bold text-[10px] text-[#9CA3AF] uppercase tracking-[0.06em]">Created Date</th>
-              <th className="px-3 py-2.5 text-right">
-                <SortHeader label="In Group" sortKey="in_group" activeKey={sortKey} dir={sortDir} onSort={handleSort} align="right" />
+              <th className="px-3 py-2.5">
+                <SortHeader label="Expiry Date" sortKey="expiry" activeKey={sortKey} dir={sortDir} onSort={handleSort} />
               </th>
               <th className="px-3 py-2.5 text-right">
                 <SortHeader label="P&L" sortKey="pnl" activeKey={sortKey} dir={sortDir} onSort={handleSort} align="right" />
               </th>
               <th className="px-3 py-2.5 text-right">
-                <SortHeader label="POS" sortKey="pos" activeKey={sortKey} dir={sortDir} onSort={handleSort} align="right" />
+                <SortHeader label="Positions" sortKey="pos" activeKey={sortKey} dir={sortDir} onSort={handleSort} align="right" />
               </th>
               <th className="px-4 py-2.5 text-right">
                 <SortHeader label="Orders" sortKey="orders" activeKey={sortKey} dir={sortDir} onSort={handleSort} align="right" />
@@ -302,13 +336,15 @@ export default function AccountsTable({ rows, vpsIp }: { rows: AccountsTableRow[
                 <tr key={row.id} className="hover:bg-[#FAFAFB] transition-colors">
                   <td className="px-4 py-3 text-[#9CA3AF] font-medium">{i + 1}</td>
 
-                  <td className="px-3 py-3 max-w-[220px]">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="font-bold text-[#111111] truncate" title={row.aliceUserId}>
-                        {row.displayName}
-                      </span>
-                      <div className="flex items-center gap-1.5 shrink-0">{row.badges}</div>
+                  <td className="px-3 py-3">
+                    <div className="min-w-0">
+                      <div className="font-bold text-[#111111] truncate">{row.displayName}</div>
+                      <div className="text-[10px] text-[#9CA3AF] truncate tabular-nums">{row.aliceUserId}</div>
                     </div>
+                  </td>
+
+                  <td className="px-3 py-3">
+                    <div className="flex flex-wrap items-center gap-1">{row.badges}</div>
                   </td>
 
                   <td className="px-3 py-3 whitespace-nowrap">
@@ -336,7 +372,7 @@ export default function AccountsTable({ rows, vpsIp }: { rows: AccountsTableRow[
                       return (
                         <span className="inline-flex items-center gap-1.5">
                           {ip.kind === "assigned" ? (
-                            <span className="font-mono text-[#111111]">{ip.text}</span>
+                            <span className="font-medium text-[#4B5563] tabular-nums">{ip.text}</span>
                           ) : (
                             <Tooltip
                               content="No public IP has been entered for this account's Static IP. Edit the account to add it."
@@ -355,13 +391,21 @@ export default function AccountsTable({ rows, vpsIp }: { rows: AccountsTableRow[
                     })()}
                   </td>
 
-                  <td className="px-3 py-3 whitespace-nowrap text-[#4B5563]">
-                    {row.expiresOn ? formatExpiryCell(row.expiresOn) : <span className="text-[#9CA3AF]">Not set</span>}
+                  <td className="px-3 py-3 whitespace-nowrap tabular-nums">
+                    {row.createdAt ? (
+                      <span className="text-[#4B5563]">{formatDateDmy(row.createdAt)}</span>
+                    ) : (
+                      <span className="text-[#9CA3AF]">Not set</span>
+                    )}
                   </td>
 
-                  <td className="px-3 py-3 whitespace-nowrap text-[#4B5563]">{formatDate(row.createdAt)}</td>
-
-                  <td className="px-3 py-3 text-right font-bold text-[#111111]">{m.in_group}</td>
+                  <td className="px-3 py-3 whitespace-nowrap tabular-nums">
+                    {row.expiresOn ? (
+                      <span className="text-[#4B5563]">{formatExpiryCell(row.expiresOn)}</span>
+                    ) : (
+                      <span className="text-[#9CA3AF]">Not set</span>
+                    )}
+                  </td>
 
                   <td className="px-3 py-3 text-right whitespace-nowrap">
                     <Tooltip content={pnlTooltip(m)} focusable>

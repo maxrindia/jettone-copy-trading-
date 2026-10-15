@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useEngineData } from "@/lib/use-engine-data";
+import { staticIpCardState, type StaticIpCounts } from "@/lib/static-ip";
 import { ErrorPanel, LoadingPanel } from "@/components/ui/DataStates";
 import { Card, PageHeader } from "@/components/ui/Card";
 import {
@@ -49,6 +50,12 @@ export default function DashboardPage() {
   // for exactly what it can show for a historical range.
   const timeline = useEngineData<DashboardRealizedTimeline>(`/dashboard/realized-timeline?${rangeQuery}`, 15000);
 
+  // Owned here, not by the platform row: it starts at page load in parallel
+  // with the summary and survives range changes (the row below is unmounted
+  // while the summary reloads), so the card shows its value as soon as the
+  // summary does instead of starting a second request and a skeleton.
+  const staticIp = useEngineData<StaticIpCounts>("/system/static-ip", 60000);
+
   const anyLoading = summary.isLoading;
   const anyError = summary.error;
 
@@ -73,7 +80,11 @@ export default function DashboardPage() {
 
       {!anyLoading && !anyError && summary.data && (
         <>
-          <PlatformOverview platform={summary.data.platform} />
+          <PlatformOverview
+            platform={summary.data.platform}
+            staticIp={staticIpCardState(staticIp)}
+            onRetryStaticIp={staticIp.refresh}
+          />
 
           <div>
             <p className="text-[11px] font-bold text-[#111111] uppercase tracking-[0.08em] mb-2.5 px-0.5">
