@@ -313,26 +313,46 @@ async def get_all_account_metrics(
     # CopyTrade.follower_account_id is never a master's own id (it only ever
     # records follower-side copies), so without this a master's own order
     # activity - whether placed via Jettone's UI or externally via Alice Blue
-    # Mobile/Web - never shows on its Demat card. Scoped to MASTER accounts
+    # Mobile/Web - never shows on its Demat card. Scoped to master accounts
     # only: a follower's own orders are already fully covered by the
     # CopyTrade query above, so adding Order-table counts for followers too
     # would double-count the same activity under two different tables.
-    master_ids_q = await db.execute(
+    #
+    # A master is an account created as account_type MASTER OR the Master of a
+    # non-deleted strategy: roles are per strategy, and the account_type label
+    # is only what the account was created with.
+    legacy_master_q = await db.execute(
         select(Account.id).where(
             Account.deleted_at.is_(None),
             Account.account_type == AccountType.MASTER,
         )
     )
-    master_ids = [row[0] for row in master_ids_q.all()]
+    strategy_master_q = await db.execute(
+        select(GroupStrategy.master_account_id).where(
+            GroupStrategy.deleted_at.is_(None),
+            GroupStrategy.master_account_id.isnot(None),
+        )
+    )
+    master_ids = list(
+        {row[0] for row in legacy_master_q.all()} | {row[0] for row in strategy_master_q.all()}
+    )
 
     if master_ids:
+        # Copy orders (Order.master_broker_order_id set) are the follower-side
+        # copies already counted through CopyTrade above - an account that was
+        # a Child earlier carries some - so they are excluded here. A master's
+        # own orders never have a master_broker_order_id.
         order_q = await db.execute(
             select(
                 Order.account_id,
                 Order.status,
                 func.count().label("cnt"),
             )
-            .where(Order.account_id.in_(master_ids), Order.created_at >= today_start)
+            .where(
+                Order.account_id.in_(master_ids),
+                Order.created_at >= today_start,
+                Order.master_broker_order_id.is_(None),
+            )
             .group_by(Order.account_id, Order.status)
         )
 
