@@ -26,6 +26,7 @@ from app.services.alice_blue.types import (
     OrderType,
     ProductType,
 )
+from app.services.brokers.guards import ensure_alice_blue_account
 from app.services.copy_engine.events import MasterTradeEvent
 from app.services.copy_engine.pipeline import CopyEnginePipeline
 from app.services.copy_engine.validator import EventValidator
@@ -62,6 +63,7 @@ async def _load_client(
             status_code=status.HTTP_409_CONFLICT,
             detail="Account has no stored API credential.",
         )
+    ensure_alice_blue_account(account)
     client = AliceBlueClient(
         account_id=str(account.id),
         user_id=account.alice_user_id,

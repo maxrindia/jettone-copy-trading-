@@ -6,6 +6,10 @@ import { Check, ChevronDown } from "lucide-react";
 export interface DropdownOption<V extends string> {
   value: V;
   label: string;
+  /** Shown but not selectable (e.g. a broker that is not supported yet). */
+  disabled?: boolean;
+  /** Short secondary text at the row's right edge, e.g. "Not supported yet". */
+  hint?: string;
 }
 
 export interface DropdownGroup<V extends string> {
@@ -170,18 +174,23 @@ export default function OptionDropdown<V extends string>({
                       type="button"
                       role="option"
                       aria-selected={isSelected}
+                      aria-disabled={opt.disabled || undefined}
                       tabIndex={-1}
                       onClick={() => {
+                        if (opt.disabled) return;
                         onChange(opt.value);
                         close(true);
                       }}
-                      className={`w-full flex items-center justify-between gap-4 px-2.5 py-1.5 rounded-lg text-xs text-left whitespace-nowrap transition-colors cursor-pointer focus:outline-none focus-visible:bg-gray-100 ${
-                        isSelected
-                          ? "bg-gray-50 font-semibold text-[#111111]"
-                          : `${optionTextClass} hover:bg-gray-50 hover:text-[#111111] font-medium`
+                      className={`w-full flex items-center justify-between gap-4 px-2.5 py-1.5 rounded-lg text-xs text-left whitespace-nowrap transition-colors focus:outline-none focus-visible:bg-gray-100 ${
+                        opt.disabled
+                          ? "cursor-not-allowed text-[#9CA3AF] font-medium"
+                          : isSelected
+                            ? "cursor-pointer bg-gray-50 font-semibold text-[#111111]"
+                            : `cursor-pointer ${optionTextClass} hover:bg-gray-50 hover:text-[#111111] font-medium`
                       }`}
                     >
                       <span>{opt.label}</span>
+                      {opt.hint && <span className="text-[10px] font-semibold text-[#9CA3AF]">{opt.hint}</span>}
                       {isSelected && <Check className="w-3.5 h-3.5 text-green-600 shrink-0" aria-hidden />}
                     </button>
                   );

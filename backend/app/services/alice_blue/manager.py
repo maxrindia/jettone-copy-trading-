@@ -2,7 +2,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import redis.asyncio as aioredis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +14,14 @@ from app.core.redis import get_redis
 from app.models.accounts import Account, AccountType
 from app.services.alice_blue.client import AliceBlueClient
 from app.services.alice_blue.types import FundsData, Position
+from app.services.brokers.angel_builder import accounts_sharing_static_ip, build_angel_client
+from app.services.brokers.credential_vault import CredentialError
+from app.services.brokers.registry import (
+    UnsupportedBrokerError,
+    is_alice_blue,
+    require_alice_blue,
+    require_engine_broker,
+)
 
 logger = logging.getLogger("alice_blue_manager")
 
@@ -66,7 +74,14 @@ class AliceBlueAccountManager:
         self._registry_lock = asyncio.Lock()
 
     @staticmethod
-    def _build_client(acc: Account, redis) -> AliceBlueClient:
+    def _build_client(acc: Account, redis) -> Any:
+        # Broker-neutral routing. Fail closed before touching credentials: an
+        # unsupported broker gets no client, and an account is never handed to
+        # another broker's client (its secrets would go to that broker).
+        spec = require_engine_broker(acc.broker)
+        if spec.id == "angelone":
+            return build_angel_client(acc, redis)
+        require_alice_blue(acc.broker)
         # Parse optional proxy URL from notes field
         proxy_url: Optional[str] = None
         if acc.notes:
@@ -95,9 +110,12 @@ class AliceBlueAccountManager:
                 result = await session.execute(
                     select(Account)
                     .where(Account.deleted_at.is_(None), Account.is_active.is_(True))
-                    .options(selectinload(Account.api_credential))
+                    .options(selectinload(Account.api_credential), selectinload(Account.broker_credential))
                 )
                 accounts = result.scalars().all()
+            shared_ip_accounts = set(
+                accounts_sharing_static_ip([a for a in accounts if (a.broker or "").lower() == "angelone"])
+            )
 
             self._clients.clear()
             # Client instances are being rebuilt from scratch below, so any
@@ -106,10 +124,20 @@ class AliceBlueAccountManager:
             # now-discarded client object.
             self._last_auth_status.clear()
             for acc in accounts:
-                if acc.api_credential is None:
+                if is_alice_blue(acc.broker) and acc.api_credential is None:
                     logger.warning(f"Account {acc.display_name} ({acc.id}) has no API credential; skipping.")
                     continue
-                self._clients[str(acc.id)] = self._build_client(acc, redis)
+                if str(acc.id) in shared_ip_accounts:
+                    logger.error(
+                        f"Account {acc.display_name} ({acc.id}) skipped: its static IP is recorded on another "
+                        "Angel One account; each account needs its own registered IP."
+                    )
+                    continue
+                try:
+                    self._clients[str(acc.id)] = self._build_client(acc, redis)
+                except (UnsupportedBrokerError, CredentialError) as exc:
+                    logger.warning(f"Account {acc.display_name} ({acc.id}) skipped: {exc}")
+                    continue
                 if acc.account_type == AccountType.MASTER:
                     self._master_account_id = str(acc.id)
 
@@ -139,7 +167,9 @@ class AliceBlueAccountManager:
 
             acc = (
                 await db.execute(
-                    select(Account).where(Account.id == acc_uuid).options(selectinload(Account.api_credential))
+                    select(Account)
+                    .where(Account.id == acc_uuid)
+                    .options(selectinload(Account.api_credential), selectinload(Account.broker_credential))
                 )
             ).scalar_one_or_none()
 
@@ -160,7 +190,7 @@ class AliceBlueAccountManager:
             if acc_id in self._clients:
                 return RuntimeClientSync(acc_id, "ALREADY_REGISTERED", True)
 
-            if acc.api_credential is None:
+            if is_alice_blue(acc.broker) and acc.api_credential is None:
                 logger.error(f"Runtime client NOT registered for {acc.display_name} ({acc_id}): no API credential.")
                 return RuntimeClientSync(acc_id, "FAILED", False, "no API credential configured")
 

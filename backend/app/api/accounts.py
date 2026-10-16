@@ -4,7 +4,7 @@ import httpx
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import func, select, case
 from sqlalchemy.exc import IntegrityError
@@ -17,7 +17,10 @@ from app.core.redis import get_redis
 from app.core.trading_day import trading_day, trading_day_start_utc
 from app.services.alice_blue.client import AliceBlueClient
 from app.services.alice_blue.exceptions import AuthenticationError, IPNotWhitelistedError
-from app.models.accounts import Account, ApiCredential, CopySetting, AccountType
+from app.models.accounts import Account, ApiCredential, BrokerCredential, CopySetting, AccountType
+from app.services.angel_one.client import AngelAuthError
+from app.services.brokers.angel_builder import build_angel_client
+from app.services.brokers import credential_vault
 from app.models.trades import CopyTrade, CopyTradeStatus, Order, OrderStatus
 from app.models.strategies import GroupStrategy, StrategyAccountRole, StrategyMember
 from app.schemas.accounts import (
@@ -28,7 +31,14 @@ from app.schemas.accounts import (
     CopySettingUpdate,
 )
 
-from app.services.brokers.catalog import SUPPORTED_BROKERS
+from app.services.brokers.catalog import catalog_with_support
+from app.services.brokers.registry import (
+    UnsupportedBrokerError,
+    is_alice_blue,
+    require_engine_broker,
+    session_key_for,
+)
+from app.services.brokers.guards import ensure_alice_blue_account, ensure_broker_selectable
 from app.services.static_ip import account_static_ip_host, account_static_ip_key
 from app.services.pnl.service import PnlService
 
@@ -39,8 +49,9 @@ router = APIRouter(prefix="/accounts", tags=["Accounts & Copy Configuration"])
 
 @router.get("/supported-brokers")
 async def get_supported_brokers():
-    """Returns the catalog of all supported Indian stockbrokers and credential requirements."""
-    return {"brokers": SUPPORTED_BROKERS}
+    """Broker catalog with each broker's real support status. Only brokers
+    with `selectable: true` can be added, logged in or traded."""
+    return {"brokers": catalog_with_support()}
 
 
 # ─── Schema for per-account metrics ──────────────────────────────────────────
@@ -144,7 +155,7 @@ async def list_accounts(
             # Check if token exists in Redis
             has_redis_token = True
             if redis:
-                cached_token = await redis.get(f"alice:session:{acc.id}")
+                cached_token = await redis.get(session_key_for(acc.broker, acc.id))
                 if not cached_token:
                     has_redis_token = False
 
@@ -394,7 +405,9 @@ async def create_account(
     manager=Depends(get_runtime_client_manager),
 ):
     clean_user_id = payload.alice_user_id.strip()
-    
+    # Only brokers with an implemented, verified adapter can be added.
+    ensure_broker_selectable(payload.broker)
+
     # Check if an account with this alice_user_id already exists (including soft-deleted)
     query = select(Account).where(func.lower(Account.alice_user_id) == clean_user_id.lower())
     res = await db.execute(query)
@@ -437,17 +450,20 @@ async def create_account(
         await db.flush()
         await _sync_static_ip_expiry(db, account)
         
-        # Update or create ApiCredential
-        cred_res = await db.execute(select(ApiCredential).where(ApiCredential.account_id == account.id))
-        credential = cred_res.scalar_one_or_none()
-        if credential:
-            credential.encrypted_api_secret = encrypt_secret(payload.api_secret)
-        else:
-            credential = ApiCredential(
-                account_id=account.id,
-                encrypted_api_secret=encrypt_secret(payload.api_secret),
-            )
-            db.add(credential)
+        # Update or create ApiCredential (Alice Blue). Other brokers keep their
+        # secrets only in the encrypted credential vault (PUT .../broker-credentials);
+        # the api_secret field is deliberately not stored for them.
+        if is_alice_blue(payload.broker):
+            cred_res = await db.execute(select(ApiCredential).where(ApiCredential.account_id == account.id))
+            credential = cred_res.scalar_one_or_none()
+            if credential:
+                credential.encrypted_api_secret = encrypt_secret(payload.api_secret)
+            else:
+                credential = ApiCredential(
+                    account_id=account.id,
+                    encrypted_api_secret=encrypt_secret(payload.api_secret),
+                )
+                db.add(credential)
 
         if payload.account_type == AccountType.FOLLOWER:
             set_res = await db.execute(select(CopySetting).where(CopySetting.follower_account_id == account.id))
@@ -632,6 +648,8 @@ async def handle_demat_callback(
     # ── Instant Broker Session Verification ───────────────────────────────────
     # Perform official Alice Blue A3 OAuth session exchange (getUserDetails)
     # using the fresh authCode, decrypted API Secret, and ProxyURL (if configured).
+    # The Alice Blue OAuth callback must never authenticate a non-Alice account.
+    ensure_alice_blue_account(target_account)
     credential_res = await db.execute(select(ApiCredential).where(ApiCredential.account_id == target_account.id))
     credential = credential_res.scalar_one_or_none()
     if not credential:
@@ -731,7 +749,7 @@ async def reset_account_sessions(
         acc.session_valid = False
         acc.last_authenticated_at = None
         if redis:
-            await redis.delete(f"alice:session:{acc.id}")
+            await redis.delete(session_key_for(acc.broker, acc.id))
 
     await db.commit()
     return {"status": "success", "message": "All account sessions reset to offline"}
@@ -772,12 +790,105 @@ async def sign_out_account(
     account.ping_ms = None
 
     if redis:
-        await redis.delete(f"alice:session:{account.id}")
+        await redis.delete(session_key_for(account.broker, account.id))
         await redis.delete(f"alice:reconnect_intent:{account.alice_user_id.strip().upper()}")
 
     await db.commit()
     await db.refresh(account)
     logger.info(f"[{account.id}] Signed out of Alice Blue session on Jettone's side (manual).")
+    return account
+
+
+async def _load_vault_account(account_id: uuid.UUID, db: AsyncSession) -> Account:
+    """An active-broker account that stores its credentials in the vault.
+    404 if missing; 409 when its broker is not enabled for trading or has no vault."""
+    account = (
+        await db.execute(
+            select(Account)
+            .where(Account.id == account_id, Account.deleted_at.is_(None))
+            .options(selectinload(Account.broker_credential), selectinload(Account.copy_settings))
+        )
+    ).scalar_one_or_none()
+    if not account:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+    try:
+        spec = require_engine_broker(account.broker)
+    except UnsupportedBrokerError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    if not spec.uses_vault:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This account's broker does not use stored broker credentials.",
+        )
+    return account
+
+
+@router.put("/{account_id}/broker-credentials")
+async def set_broker_credentials(
+    account_id: uuid.UUID,
+    # Parsed by hand: a pydantic validation error would echo the submitted
+    # secrets back in its `input` field.
+    payload: Dict[str, Any] = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Stores (replaces) the account's Angel One credentials, encrypted at rest.
+    Write-only: the response states which fields are configured, never their values."""
+    account = await _load_vault_account(account_id, db)
+    unknown = sorted(set(payload) - set(credential_vault.ANGEL_FIELDS))
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unexpected field(s): {', '.join(unknown)}.")
+    try:
+        creds = credential_vault.validate_angel_payload(payload)
+    except credential_vault.CredentialError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    ciphertext = credential_vault.encrypt_angel(creds)
+    row = account.broker_credential
+    if row is None:
+        row = BrokerCredential(account_id=account.id, broker="angelone", encrypted_payload=ciphertext)
+        db.add(row)
+    else:
+        row.encrypted_payload = ciphertext
+    # New credentials invalidate any session made with the old ones.
+    account.session_valid = False
+    account.last_authenticated_at = None
+    await db.commit()
+    return credential_vault.describe(row)
+
+
+@router.get("/{account_id}/broker-credentials")
+async def get_broker_credentials_status(account_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    account = await _load_vault_account(account_id, db)
+    return credential_vault.describe(account.broker_credential)
+
+
+@router.post("/{account_id}/angel-login", response_model=AccountResponse)
+async def angel_login(
+    account_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    redis: Any = Depends(get_redis),
+    manager=Depends(get_runtime_client_manager),
+):
+    """Server-side Angel One login (client code + PIN + TOTP) for an account whose
+    credentials are in the vault. Contacts Angel One only when called explicitly."""
+    account = await _load_vault_account(account_id, db)
+    try:
+        client = build_angel_client(account, redis)
+    except credential_vault.CredentialError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    try:
+        await client.login()
+    except AngelAuthError as exc:
+        account.session_valid = False
+        await db.commit()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Angel One login failed: {exc}") from exc
+    finally:
+        await client.aclose()
+    account.session_valid = True
+    account.last_authenticated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(account)
+    account.runtime_client_status = await _sync_runtime_client(manager, account, db, redis, report_failure=True)
+    await db.refresh(account)
     return account
 
 
@@ -840,12 +951,14 @@ async def update_account(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
 
     update_data = payload.model_dump(exclude_unset=True)
-    
+    if update_data.get("broker") is not None:
+        ensure_broker_selectable(update_data["broker"])
+
     # Security: Do not allow premature session_valid=True without valid Redis session
     if update_data.get("session_valid") is True:
         has_token = False
         if redis:
-            cached = await redis.get(f"alice:session:{account.id}")
+            cached = await redis.get(session_key_for(account.broker, account.id))
             if cached:
                 has_token = True
         if not has_token:
@@ -929,7 +1042,7 @@ async def renew_account_session(
 
     has_token = False
     if redis:
-        token = await redis.get(f"alice:session:{account.id}")
+        token = await redis.get(session_key_for(account.broker, account.id))
         if token:
             has_token = True
 

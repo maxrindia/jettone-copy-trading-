@@ -13,6 +13,8 @@ import { isValidAssignedIp, isValidExpiryInput } from "@/lib/static-ip";
 import { buildAccountUpdateBody, createSubmitGuard, runSubmit, type SubmitMode } from "@/lib/account-update";
 import { confirmAliceBlueLogin, recordReconnectIntent, setReconnectTarget } from "@/lib/alice-blue-login";
 import Tooltip from "@/components/ui/Tooltip";
+import { isBrokerSelectable, withBrokerSupport, type CatalogEntry } from "@/lib/broker-support";
+import { angelCredentialProblem, buildAngelCredentialBody, hasAnyAngelCredential } from "@/lib/angel-credentials";
 
 export interface AddDematPayload {
   account_type: "MASTER" | "FOLLOWER";
@@ -90,6 +92,9 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
   const [apiSecret, setApiSecret] = useState("");
   const [password, setPassword] = useState("");
   const [totpKey, setTotpKey] = useState("");
+  // The engine's live broker catalog; until it loads only Alice Blue is selectable.
+  const [catalog, setCatalog] = useState<CatalogEntry[] | null>(null);
+  const editingAngel = Boolean(accountToEdit?.id) && broker === "angelone";
   const [accountType, setAccountType] = useState<"MASTER" | "FOLLOWER">("FOLLOWER");
   const [staticIpEnabled, setStaticIpEnabled] = useState(false);
   const [proxyHost, setProxyHost] = useState("");
@@ -117,6 +122,21 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
 
     // VPS server IP is fixed — all API/WebSocket calls originate from VPS, not browser
   }, []);
+
+  // Which brokers the engine will actually accept (it re-checks on save).
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    fetch("/api/v1/accounts/supported-brokers")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (live && Array.isArray(d?.brokers)) setCatalog(d.brokers as CatalogEntry[]);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [open]);
 
   // Lock background body scroll when drawer is open
   useEffect(() => {
@@ -297,20 +317,35 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
       return;
     }
     const assignedIpToStore = staticIpEnabled && assignedIp.trim() ? assignedIp.trim() : null;
+    if (!isBrokerSelectable(broker, catalog)) {
+      setError("This broker is not supported yet. Choose Alice Blue.");
+      return;
+    }
+    const isAngel = broker === "angelone";
+    const angelFields = { apiKey, pin: apiSecret, totpSecret: totpKey };
+    const editing = Boolean(accountToEdit && accountToEdit.id);
+    if (isAngel) {
+      const problem = angelCredentialProblem(angelFields, !editing);
+      if (problem) {
+        setError(problem);
+        return;
+      }
+    }
 
     if (!submitGuard.current.tryEnter()) return;
     setSubmitting(true);
     setSubmitMode(mode);
 
+    // Angel One's key, PIN and TOTP secret are never put in `notes` (the account
+    // list returns notes); they go to the write-only credential vault below.
     const notesString = [
       broker ? `Broker: ${broker}` : null,
       mobile ? `Mobile: ${mobile}` : null,
       email ? `Email: ${email}` : null,
-      apiKey ? `APIKey: ${apiKey}` : null,
-      apiSecret ? `APISecret: ${apiSecret}` : null,
+      !isAngel && apiKey ? `APIKey: ${apiKey}` : null,
+      !isAngel && apiSecret ? `APISecret: ${apiSecret}` : null,
       proxyUrlToStore ? `ProxyURL: ${proxyUrlToStore}` : null,
     ].filter(Boolean).join(", ");
-    const editing = Boolean(accountToEdit && accountToEdit.id);
 
     try {
       const outcome = await runSubmit(
@@ -340,7 +375,8 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
                 account_type: accountType,
                 display_name: nickname.trim(),
                 alice_user_id: brokerUserId.trim() || `ACC${Math.floor(100000 + Math.random() * 900000)}`,
-                api_secret: apiSecret.trim() || "placeholder_secret",
+                // Angel One: the engine does not store this field (credentials go to the vault).
+                api_secret: isAngel ? "stored-in-vault" : apiSecret.trim() || "placeholder_secret",
                 broker: broker,
                 notes: notesString,
                 proxy_expires_on: expiryToStore,
@@ -355,13 +391,36 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
           }
 
           const resData = await resp.json().catch(() => null);
-          return {
+          const savedAccount = {
             id: (resData?.id as string | undefined) ?? accountToEdit?.id,
             userId: (resData?.alice_user_id as string | undefined) ?? (brokerUserId.trim() || accountToEdit?.alice_user_id),
           };
+
+          if (isAngel && savedAccount.id && hasAnyAngelCredential(angelFields)) {
+            const vaultResp = await fetch(`/api/v1/accounts/${savedAccount.id}/broker-credentials`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(buildAngelCredentialBody(angelFields)),
+            });
+            if (!vaultResp.ok) {
+              const body = (await vaultResp.json().catch(() => null)) as unknown;
+              throw new Error(extractError(body) ?? `Credentials could not be stored (${vaultResp.status})`);
+            }
+          }
+          return savedAccount;
         },
-        // Step 2 - only reached after the save succeeded: the Alice Blue login redirect.
+        // Step 2 - only reached after the save succeeded: the broker login.
         async (saved) => {
+          if (isAngel) {
+            // Angel One logs in server-side (client code + PIN + TOTP); no redirect.
+            if (!saved.id) return;
+            const loginResp = await fetch(`/api/v1/accounts/${saved.id}/angel-login`, { method: "POST" });
+            if (!loginResp.ok) {
+              const body = (await loginResp.json().catch(() => null)) as unknown;
+              throw new Error(extractError(body) ?? `Angel One login failed (${loginResp.status})`);
+            }
+            return;
+          }
           // Open Alice Blue ANT Web Login in new tab (bypasses popup blockers) if broker is Alice Blue
           const appCodeToUse = apiKey.trim() || "uCKZ00C9th";
           const uIdToUse = (saved.userId || brokerUserId).trim();
@@ -501,7 +560,7 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
                 ariaLabel="Broker"
                 value={broker}
                 onChange={setBroker}
-                groups={BROKER_GROUPS}
+                groups={BROKER_GROUPS.map((g) => ({ ...g, options: withBrokerSupport(g.options, catalog) }))}
                 placeholder="Select Broker"
                 fullWidth
                 align="left"
@@ -510,8 +569,14 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
               />
             </div>
 
-            {/* Dynamic Broker Specific Credentials Section */}
-            {broker && (
+            {broker && !isBrokerSelectable(broker, catalog) && (
+              <div role="status" className="p-3 rounded-[10px] bg-amber-50 border border-amber-200 text-xs font-semibold text-amber-800">
+                This broker is not supported yet. Jettone can only log in and trade Alice Blue accounts right now, so no credentials are collected here.
+              </div>
+            )}
+
+            {/* Dynamic Broker Specific Credentials Section (supported brokers only) */}
+            {broker && isBrokerSelectable(broker, catalog) && (
               <div className="pt-2 space-y-3 animate-in fade-in duration-200">
                 <div className="flex items-center justify-between">
                   <h3 className="text-xs font-bold text-[#111111] tracking-tight flex items-center gap-1.5">
@@ -657,14 +722,15 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
                     />
                     <input
                       type="password"
-                      placeholder="MPIN / Password"
+                      placeholder={editingAngel ? "PIN (leave blank to keep the stored one)" : "PIN"}
                       value={apiSecret}
                       onChange={(e) => setApiSecret(e.target.value)}
                       className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] font-mono focus:outline-none focus:ring-2 focus:ring-[#111111]"
                     />
                     <input
-                      type="text"
-                      placeholder="TOTP Secret Key"
+                      type="password"
+                      autoComplete="off"
+                      placeholder={editingAngel ? "TOTP secret (leave blank to keep the stored one)" : "TOTP secret (stored encrypted, never shown again)"}
                       value={totpKey}
                       onChange={(e) => setTotpKey(e.target.value)}
                       className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#111111]"

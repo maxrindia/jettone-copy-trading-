@@ -1,33 +1,28 @@
 """
 Broker Client Factory
 =====================
-Instantiates the corresponding broker client adapter based on the account's broker identifier.
+Builds the broker client for an account's broker id via the registry.
+An unsupported or unknown broker raises UnsupportedBrokerError - there is no
+fallback to another broker's client.
 """
 
-import logging
 from typing import Any, Optional
-from app.services.brokers.base import BaseBrokerClient
-from app.services.alice_blue.client import AliceBlueClient
 
-logger = logging.getLogger("broker_factory")
+from app.services.alice_blue.client import AliceBlueClient
+from app.services.brokers.registry import require_engine_broker
 
 
 def create_broker_client(
-    broker_id: str,
+    broker_id: Optional[str],
     account_id: str,
     user_id: str,
     api_secret: str,
     redis: Any,
     http_client: Optional[Any] = None,
     proxy_url: Optional[str] = None,
-) -> BaseBrokerClient:
-    """
-    Creates and returns the appropriate broker client adapter for the given broker ID.
-    Supports: alicebluenew, flattrade, zerodha, angelone, dhan, fyers, shoonya, upstox, etc.
-    """
-    b_id = (broker_id or "alicebluenew").lower().strip()
-
-    if b_id in ("alicebluenew", "aliceblue", "alice_blue", "alice"):
+) -> AliceBlueClient:
+    spec = require_engine_broker(broker_id)
+    if spec.id == "alicebluenew":
         return AliceBlueClient(
             account_id=account_id,
             user_id=user_id,
@@ -36,14 +31,6 @@ def create_broker_client(
             http_client=http_client,
             proxy_url=proxy_url,
         )
-
-    # For other brokers, return the initialized AliceBlue / Standard Adapter
-    logger.info(f"Instantiating broker client for '{b_id}' on account {account_id}")
-    return AliceBlueClient(
-        account_id=account_id,
-        user_id=user_id,
-        api_secret=api_secret,
-        redis=redis,
-        http_client=http_client,
-        proxy_url=proxy_url,
-    )
+    # require_engine_broker only passes brokers with an implemented client;
+    # reaching here means the registry and this factory are out of sync.
+    raise AssertionError(f"registry allows broker '{spec.id}' but no client is wired for it")

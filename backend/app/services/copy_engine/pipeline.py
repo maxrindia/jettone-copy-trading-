@@ -28,6 +28,7 @@ from app.services.alice_blue.types import (
 from app.services.copy_engine.calculator import QuantityCalculator
 from app.services.copy_engine.events import MasterTradeEvent, derive_copy_event_id
 from app.services.alice_blue.instruments import InstrumentResolutionError
+from app.services.brokers.registry import can_be_child, persisted_order_label
 from app.services.copy_engine.risk import RiskCheckResult, RiskEngine
 from app.services.copy_engine.risk_inputs import (
     PositionSafetyError,
@@ -135,12 +136,17 @@ class CopyEnginePipeline:
             pending_quantity = max(0, quantity - filled_quantity)
 
         async with AsyncSessionLocal() as session:
+            # The account's own broker label (Alice Blue accounts, and any account
+            # that cannot be resolved, keep the historical "ALICE_BLUE").
+            owner = await session.get(Account, account_id)
+            broker_label = persisted_order_label(owner.broker if owner is not None else None)
+
             stmt = select(Order).where(Order.internal_order_id == internal_order_id)
             existing = (await session.execute(stmt)).scalar_one_or_none()
 
             if not existing and broker_order_id:
                 stmt_broker = select(Order).where(
-                    Order.broker == "ALICE_BLUE",
+                    Order.broker == broker_label,
                     Order.account_id == account_id,
                     Order.broker_order_id == broker_order_id,
                 )
@@ -219,7 +225,7 @@ class CopyEnginePipeline:
                     parent_order_id=parent_order_id,
                     master_broker_order_id=master_broker_order_id,
                     source=source,
-                    broker="ALICE_BLUE",
+                    broker=broker_label,
                     exchange=exchange,
                     symbol=symbol,
                     side=side,
@@ -3636,6 +3642,21 @@ class CopyEnginePipeline:
                 if m.account_id == strategy.master_account_id:
                     continue
                 if m.trading_enabled and m.account and m.account.is_active and not m.account.is_emergency_stopped and m.account.deleted_at is None:
+                    if not can_be_child(m.account.broker):
+                        # Broker not cleared to receive copies (unsupported, flag
+                        # off, or its response contract unverified): never copy.
+                        await self._record_routing_skip(
+                            session,
+                            master_account_id=master_uuid,
+                            master_order_id=master_order_id,
+                            reason_code="CHILD_BROKER_NOT_READY",
+                            message=(
+                                f"Order {master_order_id or '?'} was not copied to {m.account.display_name}: "
+                                f"broker '{m.account.broker}' is not cleared to receive copied orders."
+                            ),
+                            strategy_id=strategy.id,
+                        )
+                        continue
                     eligible.append((m.account, m.multiplier))
             return eligible, strategy.id
 

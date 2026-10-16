@@ -79,6 +79,12 @@ class Account(Base, TimestampMixin):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    broker_credential: Mapped[Optional["BrokerCredential"]] = relationship(
+        "BrokerCredential",
+        back_populates="account",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
 
 class ApiCredential(Base, TimestampMixin):
@@ -103,6 +109,33 @@ class ApiCredential(Base, TimestampMixin):
     key_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     account: Mapped["Account"] = relationship("Account", back_populates="api_credential")
+
+
+class BrokerCredential(Base, TimestampMixin):
+    """
+    Multi-field broker credentials (Angel One: API key, PIN, TOTP secret) as ONE
+    Fernet-encrypted JSON blob. Write-only: no API ever returns the contents, and
+    plaintext is held in memory only while a client is being constructed.
+    Added by migration 0012; Alice Blue keeps using api_credentials.
+    """
+    __tablename__ = "broker_credentials"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+    )
+    broker: Mapped[str] = mapped_column(String(50), nullable=False)
+    encrypted_payload: Mapped[str] = mapped_column(Text, nullable=False)
+    key_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+    account: Mapped["Account"] = relationship("Account", back_populates="broker_credential")
 
 
 class CopySetting(Base, TimestampMixin):

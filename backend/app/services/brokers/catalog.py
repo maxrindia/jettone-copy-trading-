@@ -6,6 +6,8 @@ Provides standard registry metadata for all supported Indian stockbrokers.
 
 from typing import Dict, List, Any
 
+from app.services.brokers.registry import BrokerSupport, get_broker_spec
+
 
 SUPPORTED_BROKERS: List[Dict[str, Any]] = [
     {
@@ -194,3 +196,25 @@ SUPPORTED_BROKERS: List[Dict[str, Any]] = [
         ],
     },
 ]
+
+
+def catalog_with_support() -> List[Dict[str, Any]]:
+    """The catalog annotated with each broker's real status from the
+    registry. A broker absent from the registry is reported NOT_SUPPORTED."""
+    out: List[Dict[str, Any]] = []
+    for entry in SUPPORTED_BROKERS:
+        spec = get_broker_spec(entry["id"])
+        support = spec.support if spec else BrokerSupport.NOT_SUPPORTED
+        caps = spec.capabilities if spec else None
+        out.append({
+            **entry,
+            "support": support.value,
+            "selectable": support != BrokerSupport.NOT_SUPPORTED,
+            "capabilities": {
+                "login": bool(caps and caps.login),
+                "as_master": bool(caps and caps.as_master),
+                "as_child": bool(caps and caps.as_child),
+            },
+            "support_note": (spec.reason if spec else "No adapter is implemented for this broker yet."),
+        })
+    return out

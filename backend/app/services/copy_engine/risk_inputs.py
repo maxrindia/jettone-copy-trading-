@@ -259,9 +259,18 @@ async def get_available_long(
     # Raises InstrumentResolutionError when the instrument cannot be
     # identified at all - propagated deliberately; the caller maps it to
     # INSTRUMENT_RESOLUTION_FAILED and rejects.
-    _token, canonical_symbol = await resolve_instrument_info(
-        client.redis, exchange, symbol, provided_token=provided_token,
-    )
+    #
+    # A client class that maps instruments itself (Angel One) resolves them with
+    # its own broker's instrument master and never sees provided_token - that id
+    # belongs to the MASTER's broker and means nothing to this one. Looked up on
+    # the class so a mock client can never masquerade as one; Alice Blue's client
+    # has no such method, so its resolution is exactly as before.
+    if getattr(type(client), "resolve_instrument", None) is not None:
+        _token, canonical_symbol = await client.resolve_instrument(exchange, symbol)
+    else:
+        _token, canonical_symbol = await resolve_instrument_info(
+            client.redis, exchange, symbol, provided_token=provided_token,
+        )
 
     clean_exchange = str(exchange or "NSE").upper().strip()
     target_product = normalize_product_for_exchange(product_type, clean_exchange)

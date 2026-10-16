@@ -44,6 +44,9 @@ Thumbs.db
 .idea/
 *.log
 
+# Supervised broker capture output (redacted shapes of a real account's responses; never committed)
+angel_capture*.json
+
 # Local-only tooling and artifacts (never committed)
 .agents/
 opencode.json

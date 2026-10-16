@@ -44,6 +44,15 @@ class Settings(BaseSettings):
     # active. Remove once testing is done.
     SELL_POSITION_SAFETY_BYPASS: bool = False
 
+    # Angel One (SmartAPI) Child support. Default false = Angel One accounts can
+    # not be added, logged in or traded and no Angel One request is ever made.
+    # Even when true, trading stays closed until the response contract
+    # (app/services/angel_one/contract.py) is verified from a supervised capture.
+    ANGEL_ONE_ENABLED: bool = False
+    # Official Angel One instrument master (scrip master) download URL. Empty =
+    # no download is ever attempted; set it only to the URL Angel One documents.
+    ANGEL_ONE_SCRIP_MASTER_URL: str = ""
+
     # VPS public IP — must be whitelisted on Alice Blue Developer Portal for each account's App.
     # All API/WebSocket calls to Alice Blue originate from this IP.
     STATIC_VPS_IP: str = ""

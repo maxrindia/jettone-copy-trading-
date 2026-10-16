@@ -22,6 +22,7 @@ from app.services import strategy_switch
 from app.services.runtime import hooks as runtime_hooks
 from app.services.alice_blue.client import AliceBlueClient
 from app.services.alice_blue.types import OrderResultCategory, OrderSide
+from app.services.brokers.guards import ensure_alice_blue_account
 from app.schemas.strategies import (
     MasterSwitchRequest,
     MemberAdd,
@@ -541,6 +542,7 @@ async def _load_member_client(
             detail=f"Account '{account.display_name}' ({account.alice_user_id}) has no API credentials.",
         )
 
+    ensure_alice_blue_account(account)
     client = AliceBlueClient(
         account_id=str(account.id),
         user_id=account.alice_user_id,
