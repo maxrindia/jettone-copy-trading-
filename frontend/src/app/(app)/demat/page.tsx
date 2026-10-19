@@ -10,6 +10,8 @@ import RenewStaticIpDialog from "@/components/demat/RenewStaticIpDialog";
 import AccountCard from "@/components/accounts/AccountCard";
 import AccountsTable, { type AccountsTableRow } from "@/components/accounts/AccountsTable";
 import { confirmAliceBlueLogin, recordReconnectIntent, setReconnectTarget } from "@/lib/alice-blue-login";
+import { reloginRoute, serverBrokerLogin, serverLoginPrompt, UNSUPPORTED_RELOGIN } from "@/lib/relogin";
+import { useInFlight } from "@/lib/use-in-flight";
 import { accountHistoryPath } from "@/lib/account-history";
 import { emptyMetrics, type AccountMetrics, type AllMetrics } from "@/lib/account-metrics";
 import { accountProxyHost } from "@/lib/account-proxy";
@@ -24,6 +26,7 @@ interface CopySettingResponse {
 interface DematCardItem {
   id: string;
   display_name: string;
+  broker?: string | null;
   alice_user_id: string;
   account_type: "MASTER" | "FOLLOWER";
   /** Current role from the strategy membership; null = in no strategy. `account_type` is only the creation-time label. */
@@ -84,6 +87,8 @@ export default function DematPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<DematCardItem | null>(null);
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
+  const [reloginError, setReloginError] = useState<string | null>(null);
+  const reloginGuard = useInFlight();
   const [renewingAccount, setRenewingAccount] = useState<DematCardItem | null>(null);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
 
@@ -198,6 +203,27 @@ export default function DematPage() {
 
   // ─── Reconnect: Open Alice Blue Login in new tab (bypasses popup blockers) ──
   const handleReconnect = async (card: DematCardItem) => {
+    // The account's OWN broker picks the flow; only Alice Blue accounts go to the Alice Blue OAuth page.
+    const route = reloginRoute(card.broker);
+    if (route === "unsupported") {
+      setReloginError(UNSUPPORTED_RELOGIN);
+      return;
+    }
+    if (route === "server-login") {
+      // One login per account at a time: a repeated click while it runs does nothing (not even a second prompt).
+      if (reloginGuard.isBusy(card.id)) return;
+      if (typeof window !== "undefined" && !window.confirm(serverLoginPrompt(card.display_name, card.broker ?? ""))) return;
+      setReloginError(null);
+      await reloginGuard.run(card.id, async () => {
+        const result = await serverBrokerLogin(card.id);
+        if (result.ok) setSavedNotice(`${card.display_name} is logged in.`);
+        else setReloginError(`${card.display_name}: ${result.message}`);
+        refresh();
+        refreshMetrics();
+      });
+      return;
+    }
+    // Alice Blue (unchanged below).
     // Extract API Key from notes if available, or default to uCKZ00C9th
     let appCode = "uCKZ00C9th";
     if (card.notes && card.notes.includes("APIKey:")) {
@@ -238,6 +264,12 @@ export default function DematPage() {
       {savedNotice && (
         <div role="status" className="p-3 rounded-[10px] bg-green-50 border border-green-200 text-xs font-semibold text-green-700">
           {savedNotice}
+        </div>
+      )}
+      {reloginError && (
+        <div role="alert" data-testid="relogin-error" className="flex items-start justify-between gap-3 p-3 rounded-[10px] bg-red-50 border border-red-200 text-xs font-semibold text-red-700">
+          <span>{reloginError}</span>
+          <button type="button" onClick={() => setReloginError(null)} className="shrink-0 underline">Dismiss</button>
         </div>
       )}
 
@@ -325,6 +357,7 @@ export default function DematPage() {
                 onToggleTrading={() => handleToggleTrading(card)}
                 onViewHistory={() => router.push(accountHistoryPath(card.id))}
                 onRelogin={() => handleReconnect(card)}
+                reloginBusy={reloginGuard.isBusy(card.id)}
                 onEditCredentials={() => {
                   setEditingAccount(card);
                   setModalOpen(true);

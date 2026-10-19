@@ -22,6 +22,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -127,6 +128,75 @@ def _parse_dt(raw: Any, assume: timezone) -> Optional[datetime]:
     except (ValueError, TypeError):
         return None
     return dt if dt.tzinfo else dt.replace(tzinfo=assume)
+
+
+_SAFE_KEY = re.compile(r"[A-Za-z0-9_]{1,32}")
+_SAFE_CONTENT_TYPE_CHARS = re.compile(r"[^A-Za-z0-9/+.;=_ -]")
+# Punctuation kept as-is in the expiry mask (digits become 9 and letters a); any other character becomes "?".
+_EXPIRY_MASK_SEPARATORS = frozenset("-:+./ ,()")
+
+
+def _safe_key(key: Any, redacted: List[str]) -> str:
+    """A response key name, only when it is a short identifier that cannot plausibly be a secret: letters, digits
+    and underscores, at most 32 characters, at most 4 digits and not JWT-shaped. Anything else (a token used as a
+    key, a long hex id, text with punctuation) is replaced by a fixed, numbered placeholder."""
+    k = key if isinstance(key, str) else None
+    if (
+        k is not None
+        and _SAFE_KEY.fullmatch(k)
+        and sum(c.isdigit() for c in k) <= 4
+        and not k.lower().startswith("eyj")
+    ):
+        return k
+    redacted.append("x")
+    return f"<redacted-key-{len(redacted)}>"
+
+
+def _shape_of(value: Any, depth: int = 0, redacted: Optional[List[str]] = None) -> Any:
+    """Key names (when safe) and value TYPES of a response - never values - for diagnosing contract mismatches.
+    The one value shown is `expiry`, as a digit/letter mask (e.g. "9999-99-99a99:99:99")."""
+    redacted = redacted if redacted is not None else []
+    if isinstance(value, dict) and depth < 3:
+        out = {}
+        for k, v in list(value.items())[:40]:
+            key = _safe_key(k, redacted)
+            if key.lower() == "expiry" and isinstance(v, str):
+                masked = "".join(
+                    "9" if c.isdigit() else ("a" if c.isalpha() else (c if c in _EXPIRY_MASK_SEPARATORS else "?"))
+                    for c in v[:40]
+                )
+                out[key] = f"str[{masked}]"
+            else:
+                out[key] = _shape_of(v, depth + 1, redacted)
+        return out
+    if isinstance(value, list):
+        return f"list[{len(value)}]"
+    if value is None:
+        return "null"
+    return type(value).__name__
+
+
+def _body_kind(resp: httpx.Response) -> str:
+    """What the HTTP body was, without exposing any of it: json-object | json-list | json-other (a JSON
+    scalar/null) | empty-or-non-json (nothing, HTML, text, malformed JSON)."""
+    try:
+        raw = resp.content
+        if not raw or not raw.strip():
+            return "empty-or-non-json"
+        parsed = resp.json()
+    except Exception:
+        return "empty-or-non-json"
+    if isinstance(parsed, dict):
+        return "json-object"
+    if isinstance(parsed, list):
+        return "json-list"
+    return "json-other"
+
+
+def _safe_content_type(resp: httpx.Response) -> str:
+    """The Content-Type header, restricted to ordinary media-type characters and at most 64 of them."""
+    raw = str(resp.headers.get("content-type", "") or "")
+    return _SAFE_CONTENT_TYPE_CHARS.sub("?", raw.strip())[:64] or "(none)"
 
 
 def normalize_status(raw: Any, quantity: int, filled: int) -> str:
@@ -310,13 +380,30 @@ class GrowwClient:
         body = data.get("payload") if isinstance(data.get("payload"), dict) else data
         token = body.get("token")
         if not isinstance(token, str) or not token:
+            self._log_unusable_token_response("no token", data, resp)
             raise GrowwAuthError("token response contained no token")
         if body.get("isActive") is not True:
+            self._log_unusable_token_response("isActive is not true", data, resp)
             raise GrowwAuthError("Groww reports the session is not active")
-        ttl = self._session_ttl(body.get("expiry"))
+        try:
+            ttl = self._session_ttl(body.get("expiry"))
+        except GrowwAuthError as exc:
+            self._log_unusable_token_response(str(exc), data, resp)
+            raise
         blob = json.dumps({"token": token, "at": self._clock().isoformat()})
         await self.redis.set(self.session_key, encrypt_secret(blob), ex=ttl)
         logger.info(f"[{self.account_id}] Groww session established.")
+
+    def _log_unusable_token_response(self, reason: str, data: Dict[str, Any], resp: httpx.Response) -> None:
+        """Groww answered 200 but the token response failed a check. Record WHY, what kind of body it was, its
+        Content-Type and its SHAPE, so a mismatch with the documented contract can be fixed from evidence.
+        Logged: the fixed `reason`, the HTTP status, a sanitized Content-Type, the body kind, safe key names with
+        value types, and a digit/letter mask of `expiry`. Never logged: any value (token, expiry, ids), the body,
+        headers, credentials, or a key name that could be a secret."""
+        logger.warning(
+            f"[{self.account_id}] Groww token response not usable ({reason}); http={resp.status_code} "
+            f"content_type={_safe_content_type(resp)!r} body={_body_kind(resp)} shape={_shape_of(data)}"
+        )
 
     async def get_session(self, force_refresh: bool = False) -> str:
         if force_refresh:

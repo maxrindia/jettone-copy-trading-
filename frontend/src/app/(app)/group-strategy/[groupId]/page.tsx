@@ -6,6 +6,8 @@ import { createPortal } from "react-dom";
 import { Plus, Search, RotateCw, X, Play, ArrowLeft, Trash2, Check, ChevronDown, UserPlus } from "lucide-react";
 import { useEngineData, extractError } from "@/lib/use-engine-data";
 import { confirmAliceBlueLogin, recordReconnectIntent, setReconnectTarget } from "@/lib/alice-blue-login";
+import { reloginRoute, serverBrokerLogin, serverLoginPrompt, UNSUPPORTED_RELOGIN } from "@/lib/relogin";
+import { useInFlight } from "@/lib/use-in-flight";
 import { accountHistoryPath } from "@/lib/account-history";
 import { emptyMetrics, type AccountMetrics, type AllMetrics } from "@/lib/account-metrics";
 import { LoadingPanel } from "@/components/ui/DataStates";
@@ -234,6 +236,7 @@ export default function GroupStrategyDetailPage() {
   // Add Child Picker State
   const [addingChildId, setAddingChildId] = useState<string | null>(null);
   const [childError, setChildError] = useState<string | null>(null);
+  const reloginGuard = useInFlight();
 
   // Master switch: the account picked in MasterCardPicker, awaiting the
   // verified switch dialog; and the outcome note shown after a switch.
@@ -286,6 +289,26 @@ export default function GroupStrategyDetailPage() {
 
   // Reconnect Alice Blue
   const handleReconnect = async (acc: DematCardItem) => {
+    // The account's OWN broker picks the flow; only Alice Blue accounts go to the Alice Blue OAuth page.
+    const route = reloginRoute(acc.broker);
+    if (route === "unsupported") {
+      setMemberError(UNSUPPORTED_RELOGIN);
+      return;
+    }
+    if (route === "server-login") {
+      // One login per account at a time: a repeated click while it runs does nothing (not even a second prompt).
+      if (reloginGuard.isBusy(acc.id)) return;
+      if (typeof window !== "undefined" && !window.confirm(serverLoginPrompt(acc.display_name, acc.broker ?? ""))) return;
+      setMemberError(null);
+      await reloginGuard.run(acc.id, async () => {
+        const result = await serverBrokerLogin(acc.id);
+        if (result.ok) setMasterNotice(`${acc.display_name} is logged in.`);
+        else setMemberError(`${acc.display_name}: ${result.message}`);
+        refreshAccounts();
+      });
+      return;
+    }
+    // Alice Blue (unchanged below).
     let appCode = "uCKZ00C9th";
     if (acc.notes && acc.notes.includes("APIKey:")) {
       const match = acc.notes.match(/APIKey:\s*([^\s,]+)/);
@@ -841,6 +864,7 @@ export default function GroupStrategyDetailPage() {
                 onToggleTrading={() => toggleChildTrading(member)}
                 onViewHistory={() => router.push(accountHistoryPath(member.account_id))}
                 onRelogin={acc ? () => handleReconnect(acc) : null}
+                reloginBusy={acc ? reloginGuard.isBusy(acc.id) : false}
                 onSignOut={acc ? () => handleSignOut(acc) : null}
                 dangerAction={{
                   label: "Remove from Strategy",

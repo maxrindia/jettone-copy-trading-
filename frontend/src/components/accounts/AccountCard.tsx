@@ -1,5 +1,6 @@
 "use client";
 
+import ReloginButton from "@/components/accounts/ReloginButton";
 import { ReactNode, useEffect, useRef, useState } from "react";
 import {
   CalendarDays,
@@ -8,7 +9,6 @@ import {
   MoreVertical,
   RefreshCw,
   LogOut,
-  ExternalLink,
   Eye,
   Users,
   Wallet,
@@ -62,6 +62,7 @@ export default function AccountCard({
   onToggleTrading,
   onViewHistory,
   onRelogin,
+  reloginBusy = false,
   onEditCredentials,
   onSignOut,
   dangerAction,
@@ -80,6 +81,8 @@ export default function AccountCard({
   /** Footer "Re-login" button - the actual Alice Blue OAuth flow. Null when
    * reconnecting isn't possible yet (e.g. account data still loading). */
   onRelogin: (() => void | Promise<void>) | null;
+  /** True while a server-side login for this account is running: the Re-login button is disabled. */
+  reloginBusy?: boolean;
   /** Menu item "Reconnect Demat Account" - opens the credentials edit modal.
    * A different action from onRelogin. Omitted entirely on surfaces that
    * don't own credential editing (e.g. Group Strategy's child cards). */
@@ -366,15 +369,7 @@ export default function AccountCard({
 
       {/* ── Bottom Action Footer: Re-login ── */}
       <div className="p-4 bg-white border-t border-[#F3F4F6] flex items-center justify-end">
-        {onRelogin && (
-          <button
-            onClick={() => onRelogin()}
-            className="inline-flex items-center justify-center gap-1.5 h-8 px-3.5 rounded-lg border text-xs font-semibold shadow-sm transition-all active:scale-[0.98] bg-[#2563EB] hover:bg-[#1D4ED8] text-white border-[#2563EB] hover:border-[#1D4ED8]"
-          >
-            <ExternalLink className="w-3.5 h-3.5" />
-            Re-login
-          </button>
-        )}
+        {onRelogin && <ReloginButton onRelogin={onRelogin} busy={reloginBusy} />}
       </div>
         </div>
 
