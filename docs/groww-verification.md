@@ -111,6 +111,10 @@ Python SDK pages), read 2026-10-16. The same table lives in `backend/app/service
 | true | false | Setup/login only: selectable, credentials stored encrypted, explicit login; **not** a Child |
 | true | true | Child-capable (equity), subject to the response contract, static-IP and SELL-position safety checks |
 
+`GROWW_MASTER_ENABLED` (default false) is a further, separate gate for Master eligibility. It has no effect even when true
+until `GrowwContract.master_verified` is set in code after the captured order-list paging, stable order ids and
+part-fill status values have been reviewed.
+
 Both default to false. Angel One is unaffected by the Groww flags (its Child capability stays off while its
 contract is unverified).
 
