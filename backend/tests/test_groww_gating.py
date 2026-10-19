@@ -165,6 +165,7 @@ def test_angel_one_never_becomes_a_child_while_its_contract_is_unverified(monkey
     from app.services.angel_one.contract import ANGEL_CONTRACT
     assert ANGEL_CONTRACT.verified is False
     monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
+    monkeypatch.setattr(settings, "ANGEL_ONE_CHILD_TRADING_ENABLED", True)
     monkeypatch.setattr(settings, "GROWW_ENABLED", True)
     monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", child)           # irrelevant to Angel One
     spec = get_broker_spec("angelone")

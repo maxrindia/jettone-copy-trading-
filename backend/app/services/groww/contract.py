@@ -84,6 +84,10 @@ ORDER_REFERENCE_MIN, ORDER_REFERENCE_MAX = 8, 20   # alphanumeric, at most two h
 class GrowwContract:
     docs_verified: bool = True        # every field above is from the official documentation
     live_verified: bool = False       # confirmed against a real account's responses
+    # Master order detection needs facts nobody has confirmed: the order-list page base, stable
+    # groww_order_id across polls and the order_status values of a part-filled order. Set True only
+    # after the owner's capture has been reviewed.
+    master_verified: bool = False
     notes: Dict[str, str] = field(default_factory=dict)
 
 

@@ -27,6 +27,7 @@ from app.models.strategies import (
     GroupStrategy,
     StrategyAccountRole,
 )
+from app.services.brokers.registry import get_broker_spec
 
 
 class MembershipConflict(Exception):
@@ -37,6 +38,33 @@ class MembershipConflict(Exception):
         self.code = code
         self.message = message
         self.details = details or {}
+
+
+def assert_broker_can_be_child(broker: Optional[str]) -> None:
+    """Raises MembershipConflict unless the engine's CURRENT broker capabilities say this broker may be a
+    strategy Child (`as_child`). Backend-authoritative, in the same spirit as the Master check
+    (strategy_switch NEW_MASTER_BROKER_UNSUPPORTED): the UI's disabled button is only a convenience.
+
+    Fails closed. An unknown broker id, a broker the registry does not know, or any capability that is
+    missing, is refused - never assumed. Legacy/blank broker values mean Alice Blue (the registry's alias
+    rule), whose Child membership is unchanged. The message names the broker and the engine's own reason and
+    carries no secret.
+    """
+    spec = get_broker_spec(broker)
+    capabilities = getattr(spec, "capabilities", None) if spec is not None else None
+    if spec is not None and getattr(capabilities, "as_child", None) is True:
+        return
+    if spec is None:
+        raise MembershipConflict(
+            "CHILD_BROKER_UNSUPPORTED",
+            f"Broker '{broker}' is not recognised, so its account cannot be added as a strategy Child.",
+        )
+    reason = (getattr(spec, "reason", "") or "").strip()
+    raise MembershipConflict(
+        "CHILD_BROKER_UNSUPPORTED",
+        f"Broker '{spec.id}' cannot be added as a strategy Child right now." + (f" {reason}" if reason else ""),
+        {"broker": spec.id},
+    )
 
 
 async def get_assignment(db: AsyncSession, account_id: uuid.UUID) -> Optional[StrategyAccountRole]:

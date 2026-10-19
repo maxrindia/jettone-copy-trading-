@@ -525,7 +525,7 @@ async def test_order_book_lifecycle(mock_redis):
     book = await c.get_order_book()
     assert [(r.broker_order_id, r.status, r.filled_quantity) for r in book] == [
         ("1", "COMPLETE", 10), ("2", "PARTIAL", 3), ("3", "REJECTED", 0), ("4", "CANCELLED", 0), ("5", "TRIGGER_PENDING", 0)]
-    assert book[4].order_type == "SL-M" and book[4].side == OrderSide.SELL and book[0].average_price == Decimal("800")
+    assert book[4].order_type == "SLM" and book[4].side == OrderSide.SELL and book[0].average_price == Decimal("800")
     q = fake.calls("/v1/order/list")[0].url.params
     assert q["segment"] == "CASH" and q["page_size"] == "100"
 

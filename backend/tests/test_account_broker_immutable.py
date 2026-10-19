@@ -34,6 +34,7 @@ async def snapshot(account_id):
 @pytest.mark.parametrize("target", ["groww", "angelone", "zerodha", "dhan", "unknown-broker"])
 async def test_changing_an_alice_account_to_another_broker_is_rejected_and_changes_nothing(client, db_session, flag_on, monkeypatch, target):
     monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
+    monkeypatch.setattr(settings, "ANGEL_ONE_CHILD_TRADING_ENABLED", True)
     created = (await client.post("/api/v1/accounts", json=alice_payload("ALC-IMM"), headers=TOKEN)).json()
     before = await snapshot(created["id"])
     resp = await client.put(f"/api/v1/accounts/{created['id']}", json={"broker": target, "display_name": "renamed"}, headers=TOKEN)
@@ -45,6 +46,7 @@ async def test_changing_an_alice_account_to_another_broker_is_rejected_and_chang
 @pytest.mark.parametrize("target", ["alicebluenew", "angelone", "zerodha"])
 async def test_changing_a_groww_account_is_rejected_and_keeps_its_vault_credentials(client, db_session, flag_on, monkeypatch, target):
     monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
+    monkeypatch.setattr(settings, "ANGEL_ONE_CHILD_TRADING_ENABLED", True)
     acc = await _groww_account(db_session)
     before = await snapshot(acc.id)
     resp = await client.put(f"/api/v1/accounts/{acc.id}", json={"broker": target}, headers=TOKEN)

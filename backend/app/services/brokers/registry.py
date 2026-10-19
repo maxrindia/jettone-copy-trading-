@@ -88,6 +88,10 @@ _ANGEL_OFF = (
     "Angel One SmartAPI support is in development and disabled (ANGEL_ONE_ENABLED=false). "
     "Master order detection is not implemented."
 )
+_ANGEL_SETUP_ONLY = (
+    "Credential setup and login only: Angel One cannot be a strategy Child or Master "
+    "(ANGEL_ONE_CHILD_TRADING_ENABLED / ANGEL_ONE_MASTER_ENABLED are false)."
+)
 _ANGEL_NO_CONTRACT = (
     "Angel One login is enabled, but its order status, position and funds responses are not "
     "verified yet, so it cannot be used as a Child. Master order detection is not implemented."
@@ -101,12 +105,22 @@ def _angel_spec() -> BrokerSpec:
             order_label="ANGEL_ONE", aliases=_ANGEL_ALIASES, reason=_ANGEL_OFF,
             session_prefix="angel:session:", uses_vault=True,
         )
-    child_ready = contract_is_usable(ANGEL_CONTRACT)
+    contract_ok = contract_is_usable(ANGEL_CONTRACT)
+    child_ready = bool(settings.ANGEL_ONE_CHILD_TRADING_ENABLED) and contract_ok
+    master_ready = bool(settings.ANGEL_ONE_MASTER_ENABLED) and contract_ok and ANGEL_CONTRACT.master_verified
+    if master_ready:
+        reason = "Master" + (" and Child." if child_ready else " only.")
+    elif child_ready:
+        reason = "Child only. Master order detection is not enabled."
+    elif not (settings.ANGEL_ONE_CHILD_TRADING_ENABLED or settings.ANGEL_ONE_MASTER_ENABLED):
+        reason = _ANGEL_SETUP_ONLY
+    else:
+        reason = _ANGEL_NO_CONTRACT
     return BrokerSpec(
         id=_ANGEL_ID, support=BrokerSupport.PARTIAL,
-        capabilities=BrokerCapabilities(login=True, as_master=False, as_child=child_ready),
+        capabilities=BrokerCapabilities(login=True, as_master=master_ready, as_child=child_ready),
         order_label="ANGEL_ONE", aliases=_ANGEL_ALIASES,
-        reason=("Child only. Master order detection is not implemented." if child_ready else _ANGEL_NO_CONTRACT),
+        reason=reason,
         session_prefix="angel:session:", uses_vault=True,
     )
 
@@ -136,16 +150,21 @@ def _groww_spec() -> BrokerSpec:
     # Setup/login need only GROWW_ENABLED. Child (copy) capability additionally needs the explicit
     # GROWW_CHILD_TRADING_ENABLED opt-in AND a usable response contract.
     child_enabled = bool(settings.GROWW_CHILD_TRADING_ENABLED)
-    child_ready = child_enabled and groww_contract_is_usable(GROWW_CONTRACT)
-    if child_ready:
-        reason = "Child only (equity, NSE/BSE). Master order detection is not implemented."
+    contract_ok = groww_contract_is_usable(GROWW_CONTRACT)
+    child_ready = child_enabled and contract_ok
+    # Master is a separate gate: its own flag AND the contract's master_verified (False until reviewed).
+    master_ready = bool(settings.GROWW_MASTER_ENABLED) and contract_ok and GROWW_CONTRACT.master_verified
+    if master_ready:
+        reason = "Master" + (" and Child" if child_ready else " only") + " (equity, NSE/BSE)."
+    elif child_ready:
+        reason = "Child only (equity, NSE/BSE). Master order detection is not enabled."
     elif not child_enabled:
         reason = _GROWW_SETUP_ONLY
     else:
         reason = _GROWW_NO_CONTRACT
     return BrokerSpec(
         id=_GROWW_ID, support=BrokerSupport.PARTIAL,
-        capabilities=BrokerCapabilities(login=True, as_master=False, as_child=child_ready),
+        capabilities=BrokerCapabilities(login=True, as_master=master_ready, as_child=child_ready),
         order_label="GROWW", aliases=_GROWW_ALIASES,
         reason=reason,
         session_prefix="groww:session:", uses_vault=True,

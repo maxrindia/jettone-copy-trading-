@@ -45,6 +45,7 @@ from app.services.alice_blue.types import (
 )
 from app.services.brokers.login_guard import run_guarded_login
 from app.services.brokers.strict_numbers import StrictNumberError, need, optional_decimal, strict_decimal, strict_int
+from app.services.brokers.position_checks import duplicate_position_key
 from app.services.brokers.transport import SendState, is_provably_not_sent
 from app.services.groww import contract as C
 from app.services.groww.contract import GROWW_CONTRACT, GrowwContract, contract_is_usable
@@ -419,6 +420,8 @@ class GrowwClient:
             raise GrowwError("quantity must be positive")
         if inst.freeze_quantity and quantity > inst.freeze_quantity:
             raise GrowwError(f"quantity exceeds the exchange freeze quantity ({inst.freeze_quantity}); not split")
+        if inst.lot_size > 1 and quantity % inst.lot_size:
+            raise GrowwError(f"quantity is not a multiple of the lot size ({inst.lot_size}); not rounded")
         product = PRODUCT_MAP.get(ProductType(product_type))
         if product is None:
             raise GrowwError(f"product {product_type} is not supported for Groww equity orders")
@@ -642,7 +645,7 @@ class GrowwClient:
             average_price=average,
             status=status,
             order_timestamp=created,
-            order_type="SL-M" if otype == "SL_M" else otype,
+            order_type="SLM" if otype == "SL_M" else otype,      # the common vocabulary: MARKET / LIMIT / SL / SLM
             product_type=str(row.get("product") or ""),
             price=price,
             trigger_price=trigger,
@@ -717,6 +720,9 @@ class GrowwClient:
                 raise GrowwCapabilityUnavailable("position row is not an object")
             if str(r.get("segment") or C.SUPPORTED_SEGMENT).upper() == C.SUPPORTED_SEGMENT:
                 positions.append(self.parse_position_row(r))
+        if duplicate_position_key(positions) is not None:
+            # One row per instrument and product is expected; two cannot be told apart, so the book is unknown.
+            raise GrowwCapabilityUnavailable("position book lists an instrument and product more than once")
         return positions
 
     async def get_positions_or_none(self) -> Optional[List[Position]]:

@@ -74,3 +74,48 @@ def test_script_only_ever_issues_read_requests():
     # every data request goes through the read-only helper with GET
     assert src.count('client._call("read", "GET"') == 1
     assert '"POST"' not in src and "place_order" not in src and "cancel_order" not in src and "modify_order" not in src
+
+
+# ── Groww nests its data under `payload`; the capture must still learn the shapes it exists to learn ──
+
+def _page(n, statuses=("OPEN", "EXECUTED", "REJECTED")):
+    return [order_row(f"GRW-SECRET-{i}", statuses[i % len(statuses)], 10, 10 if statuses[i % len(statuses)] == "EXECUTED" else (4 if i % 5 == 0 else 0))
+            for i in range(n)]
+
+
+def test_a_payload_order_list_reports_its_true_row_count_and_status_vocabulary():
+    out = redact_response(200, {"status": "SUCCESS", "payload": {"order_list": _page(100)}})
+    lst = out["lists"]["order_list"]
+    assert out["data_source"] == "payload"
+    assert lst["row_count"] == 100 and len(lst["rows"]) == 50            # a full page is visible even though only 50 rows are described
+    assert set(lst["observed_vocabulary"]["order_status"]) == {"OPEN", "EXECUTED", "REJECTED"}
+    assert lst["rows"][0]["filled_quantity"] == {"type": "number"}       # field NAMES and types are learned
+    assert "GRW-SECRET" not in json.dumps(out) and "SBIN" not in json.dumps(out)
+
+
+def test_an_empty_list_is_distinguishable_from_a_missing_list():
+    empty = redact_response(200, {"status": "SUCCESS", "payload": {"order_list": []}})
+    missing = redact_response(200, {"status": "SUCCESS", "payload": {}})
+    assert empty["lists"]["order_list"]["row_count"] == 0
+    assert "lists" not in missing                                        # the undocumented 'no orders' shape is observable either way
+
+
+def test_paging_counters_are_kept_but_nothing_else_numeric():
+    out = redact_response(200, {"status": "SUCCESS", "payload": {"order_list": [], "page": 0, "page_size": 100, "total": 3,
+                                                                   "balance": 12345, "has_next": False, "page_token": "abc"}})
+    assert out["paging_values"] == {"page": 0, "page_size": 100, "total": 3, "has_next": False}
+    assert "12345" not in json.dumps(out) and "abc" not in json.dumps(out)
+    odd = redact_response(200, {"status": "SUCCESS", "payload": {"page": "1", "total": 1.5, "count": 10 ** 9}})
+    assert "paging_values" not in odd                                    # strings, floats and huge numbers are not kept
+
+
+def test_payload_positions_and_margin_are_described_without_values():
+    pos = redact_response(200, {"status": "SUCCESS", "payload": {"positions": [position_row(), position_row("TCS", qty=-4)]}})
+    assert pos["lists"]["positions"]["row_count"] == 2 and SBIN_ISIN not in json.dumps(pos)
+    margin = redact_response(200, {"status": "SUCCESS", "payload": {"clear_cash": 1000000.0, "net_margin_used": 5.0, "collateral_available": 0}})
+    assert margin["fields"]["clear_cash"] == {"type": "number"} and "1000000" not in json.dumps(margin)
+
+
+def test_the_existing_data_shapes_are_unchanged():
+    out = redact_response(200, {"status": True, "data": [{"status": "open", "orderid": "X1", "quantity": "5"}]})
+    assert out["row_count"] == 1 and "lists" not in out and "data_source" not in out

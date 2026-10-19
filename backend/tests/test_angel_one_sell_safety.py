@@ -35,6 +35,7 @@ CHILD_IP = "151.245.182.59"
 @pytest.fixture
 def angel_enabled(monkeypatch):
     monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
+    monkeypatch.setattr(settings, "ANGEL_ONE_CHILD_TRADING_ENABLED", True)
     monkeypatch.setattr(settings, "SELL_POSITION_SAFETY_BYPASS", False)
     from angel_helpers import SYNTHETIC_CONTRACT
     monkeypatch.setattr("app.services.brokers.registry.ANGEL_CONTRACT", SYNTHETIC_CONTRACT)
@@ -214,6 +215,7 @@ async def test_unverified_contract_makes_the_child_ineligible(db_session, mock_r
     """The production default: the flag may be on, but with no verified contract the
     Angel One account is never copied to - no position or order request at all."""
     monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
+    monkeypatch.setattr(settings, "ANGEL_ONE_CHILD_TRADING_ENABLED", True)
     monkeypatch.setattr(settings, "SELL_POSITION_SAFETY_BYPASS", False)
     assert ANGEL_CONTRACT.verified is False
     master, child = await _angel_child(db_session)

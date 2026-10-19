@@ -88,6 +88,7 @@ def test_angel_and_alice_are_unaffected_by_the_groww_flag(flag_on):
 
 def test_neither_groww_nor_angel_can_ever_be_a_master(flag_on, monkeypatch):
     monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
+    monkeypatch.setattr(settings, "ANGEL_ONE_CHILD_TRADING_ENABLED", True)
     assert not can_be_master("groww") and not can_be_master("angelone") and can_be_master("alicebluenew")
 
 
@@ -242,6 +243,7 @@ async def test_a_child_only_broker_cannot_become_a_strategy_master(db_session, m
     monkeypatch.setattr(settings, "GROWW_ENABLED", True)
     monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", True)
     monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
+    monkeypatch.setattr(settings, "ANGEL_ONE_CHILD_TRADING_ENABLED", True)
     from test_strategy_master_switching import _account
     old_master = await _account(db_session, "oldmaster")
     child = await _account(db_session, "child")
@@ -335,6 +337,7 @@ async def test_creating_a_groww_account_stores_no_api_credential(client, db_sess
 @pytest.mark.parametrize("broker", ["groww", "angelone"])
 async def test_a_master_account_cannot_be_created_on_a_child_only_broker(client, flag_on, monkeypatch, broker):
     monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
+    monkeypatch.setattr(settings, "ANGEL_ONE_CHILD_TRADING_ENABLED", True)
     resp = await client.post("/api/v1/accounts", headers=TOKEN, json={
         "account_type": "MASTER", "display_name": "M", "alice_user_id": f"M-{broker}", "api_secret": "x", "broker": broker})
     assert resp.status_code == 400 and "Child" in resp.text
@@ -435,6 +438,7 @@ async def test_the_angel_login_route_still_works_for_angel(client, db_session, m
     """The generalised login route keeps /angel-login for Angel One accounts."""
     from angel_helpers import FakeAngel, make_client as angel_client
     monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
+    monkeypatch.setattr(settings, "ANGEL_ONE_CHILD_TRADING_ENABLED", True)
     acc = Account(id=uuid.uuid4(), account_type=AccountType.FOLLOWER, display_name="ang", alice_user_id="ANG-X",
                   broker="angelone", is_active=True, static_ip_address="10.0.0.9")
     db_session.add(acc)

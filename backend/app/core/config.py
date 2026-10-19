@@ -49,6 +49,16 @@ class Settings(BaseSettings):
     # Even when true, trading stays closed until the response contract
     # (app/services/angel_one/contract.py) is verified from a supervised capture.
     ANGEL_ONE_ENABLED: bool = False
+    # Separate, independent gates (all default false). ANGEL_ONE_ENABLED alone only allows account setup
+    # and an explicit login. Child / Master capability each additionally needs its own flag AND a
+    # verified response contract in code (angel_one/contract.py).
+    ANGEL_ONE_CHILD_TRADING_ENABLED: bool = False
+    ANGEL_ONE_MASTER_ENABLED: bool = False
+    # Client-side rate limits, "requests/seconds" pairs separated by commas, e.g. "10/1,200/60".
+    # Empty (the default) = no client-side limiting. NO limit is assumed: set them only from Angel One's
+    # documented figures. A malformed value disables ordering (fail closed), it is never ignored.
+    ANGEL_ONE_ORDER_RATE_LIMITS: str = ""
+    ANGEL_ONE_READ_RATE_LIMITS: str = ""
     # Official Angel One instrument master (scrip master) download URL. Empty =
     # no download is ever attempted; set it only to the URL Angel One documents.
     ANGEL_ONE_SCRIP_MASTER_URL: str = ""
@@ -62,6 +72,10 @@ class Settings(BaseSettings):
     # added, its credentials stored and an explicit login; a Groww account can be a
     # strategy Child (and so receive copied orders) only when this is ALSO true.
     GROWW_CHILD_TRADING_ENABLED: bool = False
+    # Third gate: may a Groww account be a strategy MASTER (its orders detected and copied)?
+    # Even when true it has no effect until GrowwContract.master_verified is set in code, which
+    # needs the owner's captures (order-list paging, stable order ids, part-fill vocabulary).
+    GROWW_MASTER_ENABLED: bool = False
     # Groww's instrument master (CSV). Empty = never downloaded; set it to the URL
     # in Groww's instruments documentation, or load a downloaded file instead.
     GROWW_INSTRUMENT_MASTER_URL: str = ""

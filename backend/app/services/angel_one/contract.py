@@ -42,6 +42,9 @@ class AngelContract:
     status_map: Dict[str, str] = field(default_factory=dict)
     positions: Optional[PositionKeys] = None
     rms: Optional[RmsKeys] = None
+    # Master order detection additionally needs confirmed paging, stable order ids across polls and the
+    # part-fill status vocabulary. Never set from memory; only after a reviewed capture.
+    master_verified: bool = False
 
     @property
     def verified(self) -> bool:

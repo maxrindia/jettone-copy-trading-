@@ -37,6 +37,7 @@ SECRETS = {"api_key": "AK-SECRET-111", "pin": "9876", "totp_secret": "JBSWY3DPEH
 @pytest.fixture
 def flag_on(monkeypatch):
     monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
+    monkeypatch.setattr(settings, "ANGEL_ONE_CHILD_TRADING_ENABLED", True)
 
 
 @pytest.fixture
@@ -206,6 +207,7 @@ async def test_manager_initialize_registers_angel_only_when_enabled_and_credenti
     assert mgr.get_all_account_ids() == []                                   # flag off: no Angel client at all
 
     monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
+    monkeypatch.setattr(settings, "ANGEL_ONE_CHILD_TRADING_ENABLED", True)
     mgr = AliceBlueAccountManager()
     await mgr.initialize()
     assert mgr.get_all_account_ids() == [str(ok.id)]                         # no credentials / shared IP: skipped

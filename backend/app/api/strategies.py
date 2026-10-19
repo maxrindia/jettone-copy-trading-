@@ -293,8 +293,16 @@ async def add_member(
     acc_result = await db.execute(
         select(Account).where(Account.id == payload.account_id, Account.deleted_at.is_(None))
     )
-    if not acc_result.scalar_one_or_none():
+    account = acc_result.scalar_one_or_none()
+    if not account:
         raise HTTPException(status_code=404, detail="Account not found")
+
+    # The broker must be allowed to receive copied orders (registry as_child). The backend decides; the
+    # UI's disabled "Add" button only mirrors this.
+    try:
+        membership.assert_broker_can_be_child(account.broker)
+    except membership.MembershipConflict as exc:
+        raise _conflict(exc)
 
     # One strategy per account, in either role (also covers adding the
     # strategy's own Master as its Child).

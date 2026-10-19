@@ -54,7 +54,10 @@ from app.services.alice_blue.types import (
     ProductType,
 )
 from app.services.angel_one.contract import ANGEL_CONTRACT, AngelContract, contract_is_usable
+from app.core.config import settings
 from app.services.brokers.login_guard import run_guarded_login
+from app.services.brokers.position_checks import duplicate_position_key
+from app.services.brokers.rate_limit import RateLimitConfigError, RateLimitExceeded, SlidingWindowLimiter, parse_rate_limits
 from app.services.brokers.strict_numbers import StrictNumberError, need, optional_decimal, strict_decimal, strict_int
 from app.services.brokers.transport import SendState, is_provably_not_sent
 from app.services.angel_one.instruments import AngelInstrumentStore, store as default_store
@@ -94,12 +97,21 @@ ORDER_TYPE_MAP = {
 }
 
 
+# SmartAPI ordertype -> Jettone's common vocabulary (MARKET / LIMIT / SL / SLM), the reverse of the
+# verified ORDER_TYPE_MAP above. An unlisted value is passed through unchanged, as before.
+_COMMON_ORDER_TYPE = {"MARKET": "MARKET", "LIMIT": "LIMIT", "STOPLOSS_LIMIT": "SL", "STOPLOSS_MARKET": "SLM"}
+
+
 class AngelOneError(Exception):
     pass
 
 
 class AngelAuthError(AngelOneError):
     pass
+
+
+class AngelRateLimited(AngelOneError):
+    """The request was NOT sent: a configured client-side rate limit (or its invalid configuration) refused it."""
 
 
 class AngelCapabilityUnavailable(AngelOneError):
@@ -170,6 +182,10 @@ class AngelOneClient:
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         contract: AngelContract = ANGEL_CONTRACT,
         instruments: Optional[AngelInstrumentStore] = None,
+        order_rate_limits: Optional[str] = None,
+        read_rate_limits: Optional[str] = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Any] = asyncio.sleep,
     ):
         self.account_id = str(account_id)
         self.user_id = client_code.strip()
@@ -186,10 +202,35 @@ class AngelOneClient:
         self._instruments = instruments if instruments is not None else default_store
         self._login_lock = asyncio.Lock()
         self._login_generation = 0
+        # Client-side limits come from configuration only (no figure is assumed). A malformed value does not
+        # silently disable limiting: every non-login request is then refused before it is sent.
+        self._rate_config_invalid = False
+        self._order_limiter = self._build_limiter(
+            settings.ANGEL_ONE_ORDER_RATE_LIMITS if order_rate_limits is None else order_rate_limits, monotonic, sleep)
+        self._read_limiter = self._build_limiter(
+            settings.ANGEL_ONE_READ_RATE_LIMITS if read_rate_limits is None else read_rate_limits, monotonic, sleep)
         if http_client is not None:
             self._http = http_client
         else:
             self._http = httpx.AsyncClient(timeout=10.0, proxy=proxy_url) if proxy_url else httpx.AsyncClient(timeout=10.0)
+
+    def _build_limiter(self, text: Optional[str], monotonic, sleep) -> SlidingWindowLimiter:
+        try:
+            return SlidingWindowLimiter(parse_rate_limits(text), now=monotonic, sleep=sleep)
+        except RateLimitConfigError:
+            self._rate_config_invalid = True
+            return SlidingWindowLimiter(())
+
+    async def _acquire_rate_slot(self, route: str) -> None:
+        """Waits briefly for a slot or refuses - always BEFORE anything is sent, so it can neither duplicate
+        nor mask an order. Callers must never answer a refusal by re-sending."""
+        if self._rate_config_invalid:
+            raise AngelRateLimited("Angel One rate-limit configuration is invalid; request not sent")
+        limiter = self._order_limiter if route in ("place", "modify", "cancel") else self._read_limiter
+        try:
+            await limiter.acquire()
+        except RateLimitExceeded as exc:
+            raise AngelRateLimited(str(exc)) from None
 
     def __repr__(self) -> str:  # never expose credentials
         return f"AngelOneClient(account_id={self.account_id!r}, client_code={self.user_id!r})"
@@ -331,6 +372,7 @@ class AngelOneClient:
     ) -> Dict[str, Any]:
         """Authenticated call. A token failure clears the session and raises -
         it is never retried silently, so an order is sent at most once."""
+        await self._acquire_rate_slot(route)
         jwt = await self.get_session()
         if state is not None:
             state.sent = True      # from here on a failure may follow a request the broker already accepted
@@ -438,7 +480,7 @@ class AngelOneClient:
                                 f"Not sent: {self._safe_reason(exc)}", {})
         try:
             data = await self._call("place", body, state=state)
-        except AngelAuthError as exc:
+        except (AngelAuthError, AngelRateLimited) as exc:
             return self._result(OrderResultCategory.REJECTED, req.client_order_id, None, str(exc), {})
         except httpx.RequestError as exc:
             if is_provably_not_sent(exc):
@@ -543,7 +585,7 @@ class AngelOneClient:
             average_price=average,
             status=status_map[raw_status],
             order_timestamp=datetime.now(timezone.utc),
-            order_type=str(row.get("ordertype", "")),
+            order_type=_COMMON_ORDER_TYPE.get(otype, str(row.get("ordertype", ""))),
             product_type=str(row.get("producttype", "")),
             price=price,
             trigger_price=trigger,
@@ -591,7 +633,10 @@ class AngelOneClient:
             return []  # a successful response with no positions
         if not isinstance(rows, list):
             raise AngelCapabilityUnavailable("positions response is not a list")
-        return [self.parse_position_row(r, contract.positions) for r in rows]
+        positions = [self.parse_position_row(r, contract.positions) for r in rows]
+        if duplicate_position_key(positions) is not None:
+            raise AngelCapabilityUnavailable("position book lists an instrument and product more than once")
+        return positions
 
     async def get_positions_or_none(self) -> Optional[List[Position]]:
         """None = the position book could not be established (unverified
