@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
@@ -11,6 +11,8 @@ from app.services.monitoring.notifier import emit_system_event
 from app.services.alice_blue.types import OrderRecord
 
 logger = logging.getLogger(__name__)
+
+UNRESOLVED_REASON = "TIMEOUT not found in broker order book"
 
 TERMINAL_BROKER_STATUSES = {"COMPLETE", "REJECTED", "CANCELLED"}
 
@@ -148,17 +150,27 @@ class StaleOrderSweeper:
         """
         Attempts to resolve TIMEOUT copy trades using the broker order book.
         Requires an order_book_provider; otherwise leaves them for manual review.
+
+        Selection uses the moment the order may have reached the broker:
+        submitted_at, falling back to completed_at then updated_at for rows
+        written before submitted_at was populated (it was never set before).
+
+        Never resubmits. Each outcome is applied with a compare-and-set on
+        status == TIMEOUT, so two sweeper runs (or a run racing another
+        writer) cannot overwrite each other's result.
         """
         if self.order_book_provider is None:
             return 0
 
         grace_cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.timeout_grace_seconds)
+        submitted_marker = func.coalesce(CopyTrade.submitted_at, CopyTrade.completed_at, CopyTrade.updated_at)
         stmt = (
             select(CopyTrade)
             .where(
                 CopyTrade.status == CopyTradeStatus.TIMEOUT,
-                CopyTrade.submitted_at < grace_cutoff,
+                submitted_marker < grace_cutoff,
             )
+            .order_by(submitted_marker)
             .limit(50)
         )
         result = await db.execute(stmt)
@@ -183,7 +195,15 @@ class StaleOrderSweeper:
 
             match = self._find_by_client_order_id(book, trade.client_order_id)
             if match is None:
+                if (trade.failure_reason or "").startswith(UNRESOLVED_REASON):
+                    continue  # already flagged once; stays TIMEOUT for manual review, no repeat alert
                 flagged_unresolved += 1
+                await db.execute(
+                    update(CopyTrade)
+                    .where(CopyTrade.id == trade.id, CopyTrade.status == CopyTradeStatus.TIMEOUT)
+                    .values(failure_reason=f"{UNRESOLVED_REASON} ({trade.failure_reason or 'timeout'})"[:500])
+                    .execution_options(synchronize_session=False)
+                )
                 await emit_system_event(
                     db,
                     event_type="TIMEOUT_UNRESOLVED",
@@ -202,20 +222,33 @@ class StaleOrderSweeper:
                 continue
 
             status_upper = (match.status or "").upper()
+            values: dict = {"broker_order_id": match.broker_order_id or trade.broker_order_id}
             if status_upper in ("COMPLETE", "PARTIAL"):
-                trade.status = CopyTradeStatus.SUCCESS
-                trade.broker_order_id = match.broker_order_id or trade.broker_order_id
-                trade.failure_reason = None
+                values.update(status=CopyTradeStatus.SUCCESS, failure_reason=None)
             elif status_upper == "REJECTED":
-                trade.status = CopyTradeStatus.REJECTED
-                trade.failure_reason = f"Broker rejected after timeout: {status_upper}"
+                values.update(
+                    status=CopyTradeStatus.REJECTED,
+                    failure_reason=f"Broker rejected after timeout: {status_upper}",
+                )
             elif status_upper == "CANCELLED":
-                trade.status = CopyTradeStatus.FAILED
-                trade.failure_reason = "Order cancelled at broker"
+                values.update(status=CopyTradeStatus.FAILED, failure_reason="Order cancelled at broker")
             else:
-                trade.status = CopyTradeStatus.RECONCILIATION_REQUIRED
-                trade.failure_reason = f"Order still open at broker: {status_upper}"
+                values.update(
+                    status=CopyTradeStatus.RECONCILIATION_REQUIRED,
+                    failure_reason=f"Order still open at broker: {status_upper}",
+                )
 
+            if values["status"] != CopyTradeStatus.RECONCILIATION_REQUIRED:
+                values["completed_at"] = datetime.now(timezone.utc)      # a terminal outcome is now established
+            cas = await db.execute(
+                update(CopyTrade)
+                .where(CopyTrade.id == trade.id, CopyTrade.status == CopyTradeStatus.TIMEOUT)
+                .values(**values)
+                .execution_options(synchronize_session=False)
+            )
+            if cas.rowcount != 1:
+                continue  # another run resolved it first
+            await self._reconcile_child_order(db, trade, match, status_upper)
             resolved += 1
 
         if resolved > 0 or flagged_unresolved > 0:
@@ -225,6 +258,57 @@ class StaleOrderSweeper:
             )
 
         return resolved
+
+    async def _reconcile_child_order(self, db: AsyncSession, trade: CopyTrade, match: OrderRecord, status_upper: str) -> None:
+        """
+        Moves the unresolved child Order row (left with no broker id and
+        broker_status TIMEOUT by the copy pipeline) to what the broker reports.
+        Only when exactly one such row matches the trade - never guesses between
+        several (e.g. multiple MARKET fills of one master order).
+        """
+        candidates = (
+            await db.execute(
+                select(Order).where(
+                    Order.account_id == trade.follower_account_id,
+                    Order.master_broker_order_id == trade.master_order_id,
+                    Order.broker_order_id.is_(None),
+                    Order.broker_status == "TIMEOUT",
+                    Order.quantity == trade.quantity,
+                    Order.status.in_([OrderStatus.PENDING, OrderStatus.FAILED]),
+                )
+            )
+        ).scalars().all()
+        if len(candidates) != 1:
+            if candidates:
+                logger.warning(
+                    f"Sweeper: {len(candidates)} unresolved child Orders match trade {trade.id}; Order rows left unchanged."
+                )
+            return
+        target = {
+            "COMPLETE": OrderStatus.COMPLETE,
+            "PARTIAL": OrderStatus.PARTIAL,
+            "REJECTED": OrderStatus.REJECTED,
+            "CANCELLED": OrderStatus.CANCELLED,
+        }.get(status_upper, OrderStatus.OPEN)
+        order = candidates[0]
+        filled = match.filled_quantity or 0
+        values = {
+            "broker_order_id": match.broker_order_id,
+            "status": target,
+            "broker_status": status_upper or "UNKNOWN",
+            "filled_quantity": filled,
+            "pending_quantity": max(order.quantity - filled, 0)
+            if target in (OrderStatus.OPEN, OrderStatus.PARTIAL)
+            else 0,
+        }
+        if target == OrderStatus.REJECTED:
+            values["rejection_reason"] = match.rejection_reason or "Broker rejected after timeout"
+        await db.execute(
+            update(Order)
+            .where(Order.id == order.id, Order.broker_order_id.is_(None))
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
 
     @staticmethod
     def _find_by_client_order_id(book, client_order_id: Optional[str]) -> Optional[OrderRecord]:

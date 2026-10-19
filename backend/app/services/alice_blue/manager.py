@@ -14,10 +14,14 @@ from app.core.redis import get_redis
 from app.models.accounts import Account, AccountType
 from app.services.alice_blue.client import AliceBlueClient
 from app.services.alice_blue.types import FundsData, Position
-from app.services.brokers.angel_builder import accounts_sharing_static_ip, build_angel_client
-from app.services.brokers.credential_vault import CredentialError
+# NOTE: the Angel One / Groww builders and credential_vault are imported inside the
+# functions that use them. They import their broker clients, which import
+# alice_blue.types, which runs this package's __init__ and therefore this module;
+# a module-level import here made `import app.services.angel_one.client` (or the
+# Groww one) fail with a circular import whenever it was the first thing imported.
 from app.services.brokers.registry import (
     UnsupportedBrokerError,
+    can_be_master,
     is_alice_blue,
     require_alice_blue,
     require_engine_broker,
@@ -80,7 +84,11 @@ class AliceBlueAccountManager:
         # another broker's client (its secrets would go to that broker).
         spec = require_engine_broker(acc.broker)
         if spec.id == "angelone":
+            from app.services.brokers.angel_builder import build_angel_client
             return build_angel_client(acc, redis)
+        if spec.id == "groww":
+            from app.services.brokers.groww_builder import build_groww_client
+            return build_groww_client(acc, redis)
         require_alice_blue(acc.broker)
         # Parse optional proxy URL from notes field
         proxy_url: Optional[str] = None
@@ -113,6 +121,8 @@ class AliceBlueAccountManager:
                     .options(selectinload(Account.api_credential), selectinload(Account.broker_credential))
                 )
                 accounts = result.scalars().all()
+            from app.services.brokers.angel_builder import accounts_sharing_static_ip
+            from app.services.brokers.credential_vault import CredentialError
             shared_ip_accounts = set(
                 accounts_sharing_static_ip([a for a in accounts if (a.broker or "").lower() == "angelone"])
             )
@@ -138,7 +148,9 @@ class AliceBlueAccountManager:
                 except (UnsupportedBrokerError, CredentialError) as exc:
                     logger.warning(f"Account {acc.display_name} ({acc.id}) skipped: {exc}")
                     continue
-                if acc.account_type == AccountType.MASTER:
+                # Only a broker whose orders can be detected may be the legacy Master;
+                # Child-only brokers (Angel One, Groww) never are, whatever their label.
+                if acc.account_type == AccountType.MASTER and can_be_master(acc.broker):
                     self._master_account_id = str(acc.id)
 
             logger.info(f"Initialized {len(self._clients)} Alice Blue clients. Master ID: {self._master_account_id}")
@@ -215,6 +227,13 @@ class AliceBlueAccountManager:
             logger.info(f"Account {acc.display_name} ({acc_id}) registered in the runtime follower client registry.")
             return RuntimeClientSync(acc_id, "REGISTERED", True)
 
+    @staticmethod
+    def _auto_login_ok(client: Any) -> bool:
+        """False for clients (Angel One, Groww) whose login contacts the broker and
+        must only ever happen on an explicit request, never at engine start. Looked
+        up on the class so a mock client cannot masquerade as one."""
+        return getattr(type(client), "AUTO_LOGIN_ON_STARTUP", True) is not False
+
     def get_client(self, account_id: str) -> Optional[AliceBlueClient]:
         return self._clients.get(str(account_id))
 
@@ -271,7 +290,7 @@ class AliceBlueAccountManager:
                 results[acc_id] = False
                 self._last_auth_status[acc_id] = False
 
-        tasks = [_auth(acc_id, client) for acc_id, client in self._clients.items()]
+        tasks = [_auth(acc_id, client) for acc_id, client in self._clients.items() if self._auto_login_ok(client)]
         await asyncio.gather(*tasks, return_exceptions=True)
         return results
 
@@ -295,8 +314,8 @@ class AliceBlueAccountManager:
         in this pass (empty dict if nothing currently needs retrying).
         """
         targets = [
-            acc_id for acc_id in self._clients
-            if self._last_auth_status.get(acc_id) is not True
+            acc_id for acc_id, client in self._clients.items()
+            if self._last_auth_status.get(acc_id) is not True and self._auto_login_ok(client)
         ]
         if not targets:
             return {}

@@ -14,7 +14,7 @@ import { buildAccountUpdateBody, createSubmitGuard, runSubmit, type SubmitMode }
 import { confirmAliceBlueLogin, recordReconnectIntent, setReconnectTarget } from "@/lib/alice-blue-login";
 import Tooltip from "@/components/ui/Tooltip";
 import { isBrokerSelectable, withBrokerSupport, type CatalogEntry } from "@/lib/broker-support";
-import { angelCredentialProblem, buildAngelCredentialBody, hasAnyAngelCredential } from "@/lib/angel-credentials";
+import { brokerLoginPath, hasAnyVaultCredential, usesVault, vaultCredentialBody, vaultCredentialProblem } from "@/lib/vault-credentials";
 
 export interface AddDematPayload {
   account_type: "MASTER" | "FOLLOWER";
@@ -94,7 +94,7 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
   const [totpKey, setTotpKey] = useState("");
   // The engine's live broker catalog; until it loads only Alice Blue is selectable.
   const [catalog, setCatalog] = useState<CatalogEntry[] | null>(null);
-  const editingAngel = Boolean(accountToEdit?.id) && broker === "angelone";
+  const editingVault = Boolean(accountToEdit?.id) && usesVault(broker);
   const [accountType, setAccountType] = useState<"MASTER" | "FOLLOWER">("FOLLOWER");
   const [staticIpEnabled, setStaticIpEnabled] = useState(false);
   const [proxyHost, setProxyHost] = useState("");
@@ -321,11 +321,12 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
       setError("This broker is not supported yet. Choose Alice Blue.");
       return;
     }
-    const isAngel = broker === "angelone";
-    const angelFields = { apiKey, pin: apiSecret, totpSecret: totpKey };
+    const vaultBroker = usesVault(broker) ? broker : null;
+    const isVault = vaultBroker !== null;
+    const vaultFields = { apiKey, secret: apiSecret, totpSecret: totpKey };
     const editing = Boolean(accountToEdit && accountToEdit.id);
-    if (isAngel) {
-      const problem = angelCredentialProblem(angelFields, !editing);
+    if (vaultBroker) {
+      const problem = vaultCredentialProblem(vaultBroker, vaultFields, !editing);
       if (problem) {
         setError(problem);
         return;
@@ -336,14 +337,14 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
     setSubmitting(true);
     setSubmitMode(mode);
 
-    // Angel One's key, PIN and TOTP secret are never put in `notes` (the account
+    // Vault brokers' (Angel One, Groww) secrets are never put in `notes` (the account
     // list returns notes); they go to the write-only credential vault below.
     const notesString = [
       broker ? `Broker: ${broker}` : null,
       mobile ? `Mobile: ${mobile}` : null,
       email ? `Email: ${email}` : null,
-      !isAngel && apiKey ? `APIKey: ${apiKey}` : null,
-      !isAngel && apiSecret ? `APISecret: ${apiSecret}` : null,
+      !isVault && apiKey ? `APIKey: ${apiKey}` : null,
+      !isVault && apiSecret ? `APISecret: ${apiSecret}` : null,
       proxyUrlToStore ? `ProxyURL: ${proxyUrlToStore}` : null,
     ].filter(Boolean).join(", ");
 
@@ -375,8 +376,8 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
                 account_type: accountType,
                 display_name: nickname.trim(),
                 alice_user_id: brokerUserId.trim() || `ACC${Math.floor(100000 + Math.random() * 900000)}`,
-                // Angel One: the engine does not store this field (credentials go to the vault).
-                api_secret: isAngel ? "stored-in-vault" : apiSecret.trim() || "placeholder_secret",
+                // Vault brokers: the engine does not store this field (credentials go to the vault).
+                api_secret: isVault ? "stored-in-vault" : apiSecret.trim() || "placeholder_secret",
                 broker: broker,
                 notes: notesString,
                 proxy_expires_on: expiryToStore,
@@ -396,11 +397,11 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
             userId: (resData?.alice_user_id as string | undefined) ?? (brokerUserId.trim() || accountToEdit?.alice_user_id),
           };
 
-          if (isAngel && savedAccount.id && hasAnyAngelCredential(angelFields)) {
+          if (vaultBroker && savedAccount.id && hasAnyVaultCredential(vaultBroker, vaultFields)) {
             const vaultResp = await fetch(`/api/v1/accounts/${savedAccount.id}/broker-credentials`, {
               method: "PUT",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(buildAngelCredentialBody(angelFields)),
+              body: JSON.stringify(vaultCredentialBody(vaultBroker, vaultFields)),
             });
             if (!vaultResp.ok) {
               const body = (await vaultResp.json().catch(() => null)) as unknown;
@@ -411,13 +412,14 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
         },
         // Step 2 - only reached after the save succeeded: the broker login.
         async (saved) => {
-          if (isAngel) {
-            // Angel One logs in server-side (client code + PIN + TOTP); no redirect.
+          if (isVault) {
+            // Angel One and Groww log in server-side with the stored credentials; no redirect.
+            // (Groww also needs today's approval of the API key on Groww Cloud first.)
             if (!saved.id) return;
-            const loginResp = await fetch(`/api/v1/accounts/${saved.id}/angel-login`, { method: "POST" });
+            const loginResp = await fetch(brokerLoginPath(saved.id), { method: "POST" });
             if (!loginResp.ok) {
               const body = (await loginResp.json().catch(() => null)) as unknown;
-              throw new Error(extractError(body) ?? `Angel One login failed (${loginResp.status})`);
+              throw new Error(extractError(body) ?? `Broker login failed (${loginResp.status})`);
             }
             return;
           }
@@ -722,7 +724,7 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
                     />
                     <input
                       type="password"
-                      placeholder={editingAngel ? "PIN (leave blank to keep the stored one)" : "PIN"}
+                      placeholder={editingVault ? "PIN (leave blank to keep the stored one)" : "PIN"}
                       value={apiSecret}
                       onChange={(e) => setApiSecret(e.target.value)}
                       className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] font-mono focus:outline-none focus:ring-2 focus:ring-[#111111]"
@@ -730,7 +732,7 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
                     <input
                       type="password"
                       autoComplete="off"
-                      placeholder={editingAngel ? "TOTP secret (leave blank to keep the stored one)" : "TOTP secret (stored encrypted, never shown again)"}
+                      placeholder={editingVault ? "TOTP secret (leave blank to keep the stored one)" : "TOTP secret (stored encrypted, never shown again)"}
                       value={totpKey}
                       onChange={(e) => setTotpKey(e.target.value)}
                       className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#111111]"
@@ -878,25 +880,31 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
                   <div className="space-y-2.5">
                     <input
                       type="text"
-                      placeholder="Groww User ID"
+                      placeholder="Account label (your Groww user ID or email)"
                       value={brokerUserId}
                       onChange={(e) => setBrokerUserId(e.target.value)}
                       className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#111111]"
                     />
                     <input
-                      type="text"
-                      placeholder="API Key"
+                      type="password"
+                      autoComplete="off"
+                      placeholder={editingVault ? "API key (leave blank to keep the stored one)" : "API key (stored encrypted, never shown again)"}
                       value={apiKey}
                       onChange={(e) => setApiKey(e.target.value)}
-                      className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#111111]"
+                      className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] font-mono focus:outline-none focus:ring-2 focus:ring-[#111111]"
                     />
                     <input
                       type="password"
-                      placeholder="API Secret / Access Token"
+                      autoComplete="off"
+                      placeholder={editingVault ? "API secret (leave blank to keep the stored one)" : "API secret"}
                       value={apiSecret}
                       onChange={(e) => setApiSecret(e.target.value)}
                       className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] font-mono focus:outline-none focus:ring-2 focus:ring-[#111111]"
                     />
+                    <p className="text-[11px] leading-4 text-[#6B7280]">
+                      Each day, approve this API key on Groww Cloud (API Keys page) before connecting. Orders also need
+                      this account&apos;s own static IP, entered above.
+                    </p>
                   </div>
                 )}
 

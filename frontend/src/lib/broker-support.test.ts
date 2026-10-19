@@ -105,18 +105,18 @@ describe("Add Demat dialog gating", () => {
     expect(submit.indexOf("!isBrokerSelectable(broker, catalog)")).toBeLessThan(submit.indexOf("submitGuard.current.tryEnter()"));
   });
 
-  it("keeps Angel One secrets out of notes and sends them only to the vault endpoint", () => {
-    expect(modal).toContain("!isAngel && apiKey ?");
-    expect(modal).toContain("!isAngel && apiSecret ?");
+  it("keeps vault brokers' secrets out of notes and sends them only to the vault endpoint", () => {
+    expect(modal).toContain("!isVault && apiKey ?");
+    expect(modal).toContain("!isVault && apiSecret ?");
     expect(modal).toContain("/broker-credentials");
-    expect(modal).toContain("/angel-login");
+    expect(modal).toContain("brokerLoginPath(saved.id)");
     // the TOTP secret is a password field, never displayed
     const angelBlock = modal.slice(modal.indexOf("{/* 4. Angel One */}"), modal.indexOf("{/* 5. Dhan */}"));
     expect(angelBlock).toContain('type="password"');
     expect(angelBlock.match(/type="password"/g)?.length).toBe(2); // PIN and TOTP secret
     // Angel One never reaches the Alice Blue login redirect
     const reconnect = modal.slice(modal.indexOf("async (saved) =>"));
-    expect(reconnect.indexOf("if (isAngel)")).toBeLessThan(reconnect.indexOf("confirmAliceBlueLogin("));
+    expect(reconnect.indexOf("if (isVault)")).toBeLessThan(reconnect.indexOf("confirmAliceBlueLogin("));
   });
 });
 

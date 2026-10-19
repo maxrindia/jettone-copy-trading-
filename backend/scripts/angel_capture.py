@@ -29,28 +29,16 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from _capture_memory_redis import MemoryRedis  # noqa: E402  (isolated in-process store; see its docstring)
 
 REQUIRED_ENV = ("ANGEL_CLIENT_CODE", "ANGEL_API_KEY", "ANGEL_PIN", "ANGEL_TOTP_SECRET", "ANGEL_STATIC_IP")
 READ_ONLY_CALLS = (("order_book", "GET"), ("positions", "GET"), ("rms", "GET"))
 
 
-class _MemoryRedis:
-    """Throw-away session store: nothing is persisted anywhere."""
-
-    def __init__(self):
-        self._d = {}
-
-    async def get(self, key):
-        return self._d.get(key)
-
-    async def set(self, key, value, ex=None):
-        self._d[key] = value
-
-    async def delete(self, key):
-        self._d.pop(key, None)
-
-
-async def capture(out_path: str) -> int:
+async def capture(out_path: str, http_client=None) -> int:
+    """`http_client` exists only so tests can inject a mock transport; main() never passes one."""
     from app.services.angel_one.capture import redact_response
     from app.services.angel_one.client import AngelOneClient, AngelAuthError
     from app.services.angel_one.contract import AngelContract
@@ -62,7 +50,8 @@ async def capture(out_path: str) -> int:
         api_key=os.environ["ANGEL_API_KEY"],
         pin=os.environ["ANGEL_PIN"],
         totp_secret=os.environ["ANGEL_TOTP_SECRET"],
-        redis=_MemoryRedis(),
+        redis=MemoryRedis(),
+        http_client=http_client,
         static_ip=os.environ["ANGEL_STATIC_IP"],
         proxy_url=os.environ.get("ANGEL_PROXY_URL") or None,
         contract=AngelContract(),

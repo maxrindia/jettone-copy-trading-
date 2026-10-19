@@ -80,7 +80,7 @@ async def test_login_sends_verified_fields_and_stores_encrypted_session(mock_red
     assert "JWT1" not in stored and "1234" not in stored          # encrypted at rest
     assert json.loads(decrypt_secret(stored))["jwt"] == "JWT1"
     assert await c.get_session() == "JWT1"
-    assert mock_redis.set.await_args.kwargs["ex"] == seconds_until_ist_midnight(datetime(2026, 10, 16, 4, 0, tzinfo=timezone.utc))
+    assert mock_redis._expiry["angel:session:acc-angel"] == seconds_until_ist_midnight(datetime(2026, 10, 16, 4, 0, tzinfo=timezone.utc))
 
 
 @pytest.mark.asyncio
@@ -121,6 +121,7 @@ async def test_token_rejection_clears_session_and_is_not_retried(mock_redis):
     assert res.category == OrderResultCategory.REJECTED
     assert len(fake.calls("placeOrder")) == 1
     assert "angel:session:acc-angel" not in mock_redis._storage
+    mock_redis._advance(11)                                         # (the login guard spaces attempts 10 s apart)
     await c.get_session(force_refresh=True)                         # daily/forced re-login restores it
     assert "angel:session:acc-angel" in mock_redis._storage
 
@@ -390,6 +391,9 @@ def test_order_row_parser_uses_sdk_keys_and_refuses_unknown_status():
     assert rec.average_price == Decimal("799.5")
     with pytest.raises(AngelCapabilityUnavailable):
         AngelOneClient.parse_order_row({**row, "status": "never-seen"}, SYNTHETIC_CONTRACT.status_map)
+    # a row without filledshares is unknown, not "nothing filled"
+    with pytest.raises(AngelCapabilityUnavailable):
+        AngelOneClient.parse_order_row({k: v for k, v in row.items() if k != "filledshares"}, SYNTHETIC_CONTRACT.status_map)
 
 
 @pytest.mark.asyncio
@@ -397,7 +401,7 @@ async def test_order_book_lifecycle_with_a_verified_contract(mock_redis):
     fake = FakeAngel()
     rows = [
         {"orderid": "1", "tradingsymbol": "SBIN-EQ", "transactiontype": "BUY", "quantity": "10", "filledshares": "10", "status": "syn_done", "averageprice": "800"},
-        {"orderid": "2", "tradingsymbol": "SBIN-EQ", "transactiontype": "BUY", "quantity": "10", "filledshares": "3", "status": "syn_part"},
+        {"orderid": "2", "tradingsymbol": "SBIN-EQ", "transactiontype": "BUY", "quantity": "10", "filledshares": "3", "status": "syn_part", "averageprice": "799"},
         {"orderid": "3", "tradingsymbol": "SBIN-EQ", "transactiontype": "BUY", "quantity": "10", "filledshares": "0", "status": "syn_rej", "text": "RMS:Margin"},
         {"orderid": "4", "tradingsymbol": "SBIN-EQ", "transactiontype": "BUY", "quantity": "10", "filledshares": "0", "status": "syn_can"},
     ]

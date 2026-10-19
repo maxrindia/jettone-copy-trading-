@@ -42,6 +42,26 @@ from app.services.monitoring.notifier import emit_system_event
 
 logger = logging.getLogger("copy_engine_pipeline")
 
+# A send whose outcome the broker never confirmed either way. TIMEOUT: the adapter reached the point of
+# sending and got no usable answer. UNKNOWN: produced only by RetryPolicy after place_order RAISED on every
+# attempt - an exception can follow a request the broker already accepted. Neither proves the order was not
+# placed, so neither may be recorded as a rejection or failure; both wait for the sweeper's order-book
+# reconciliation. NETWORK_ERROR is deliberately not here: adapters return it only for failures that prove
+# the request never left (and it is the one category the retry policy re-sends).
+AMBIGUOUS_SEND_CATEGORIES = frozenset({OrderResultCategory.TIMEOUT, OrderResultCategory.UNKNOWN})
+UNKNOWN_OUTCOME_REASON = "Order submission outcome unknown after an unexpected error; verify at the broker"
+
+
+def is_ambiguous_send(order_res) -> bool:
+    return order_res.category in AMBIGUOUS_SEND_CATEGORIES
+
+
+def unresolved_reason(order_res) -> str:
+    """Sanitized reason stored for an ambiguous send (raw exception text from UNKNOWN is never persisted)."""
+    if order_res.category == OrderResultCategory.UNKNOWN:
+        return UNKNOWN_OUTCOME_REASON
+    return (order_res.message or "Order submission timed out without confirmation")[:300]
+
 
 def compute_marketable_limit_price(side: str, reference_price: Optional[Decimal]) -> Optional[Decimal]:
     """
@@ -898,11 +918,23 @@ class CopyEnginePipeline:
             instrument_token=event.instrument_id,
         )
 
+        await self._stamp_submitted(client_order_id)
         order_res = await self.retry_policy.execute(client.place_order, order_req)
 
         # Step 3: Update Child Order record with Broker result
-        final_status = OrderStatus.OPEN if order_res.category == OrderResultCategory.SUCCESS else OrderStatus.REJECTED
+        unresolved = is_ambiguous_send(order_res)
+        if order_res.category == OrderResultCategory.SUCCESS:
+            final_status = OrderStatus.OPEN
+        elif unresolved:
+            # Ambiguous: the broker may hold this order. Not REJECTED - stays
+            # PENDING (no broker id) with broker_status TIMEOUT until the sweeper
+            # establishes the real outcome from the broker order book.
+            final_status = OrderStatus.PENDING
+        else:
+            final_status = OrderStatus.REJECTED
         try:
+            if unresolved:
+                await self._record_unresolved_send(client_order_id, order_res)
             await self.save_or_update_order(
                 internal_order_id=internal_child_ord_id,
                 broker_order_id=order_res.broker_order_id,
@@ -919,7 +951,9 @@ class CopyEnginePipeline:
                 pending_quantity=target_qty,
                 price=limit_price,
                 status=final_status,
-                broker_status="SUCCESS" if final_status == OrderStatus.OPEN else "REJECTED",
+                broker_status=(
+                    "SUCCESS" if final_status == OrderStatus.OPEN else "TIMEOUT" if unresolved else "REJECTED"
+                ),
                 rejection_reason=order_res.message if final_status == OrderStatus.REJECTED else None,
                 master_broker_order_id=event.master_order_id,
             )
@@ -996,17 +1030,61 @@ class CopyEnginePipeline:
                     side=event.side,
                     quantity=target_qty,
                     price=limit_price,
-                    reason_code=order_res.message if order_res.category != OrderResultCategory.SUCCESS else None,
+                    reason_code=(
+                        unresolved_reason(order_res) if unresolved
+                        else order_res.message if order_res.category != OrderResultCategory.SUCCESS else None
+                    ),
                 )
             )
             await session.commit()
 
         return {
-            "status": "SUCCESS" if final_status == OrderStatus.OPEN else "REJECTED",
+            "status": "SUCCESS" if final_status == OrderStatus.OPEN else "TIMEOUT" if unresolved else "REJECTED",
             "broker_order_id": order_res.broker_order_id,
             "quantity": target_qty,
             "price": str(limit_price),
         }
+
+    async def _stamp_submitted(self, client_order_id: str) -> None:
+        """
+        Persist CopyTrade.submitted_at immediately BEFORE the broker call, in its
+        own short transaction, so a crash or timeout mid-send still leaves the
+        moment the order may have reached the broker (the stale-order sweeper's
+        TIMEOUT reconciliation selects on it). Only ever fills a NULL, so a
+        repeat can never move it. A failure here must not block or repeat the
+        send - the sweeper falls back to completed_at / updated_at.
+        """
+        try:
+            async with AsyncSessionLocal() as session:
+                await session.execute(
+                    update(CopyTrade)
+                    .where(CopyTrade.client_order_id == client_order_id, CopyTrade.submitted_at.is_(None))
+                    .values(submitted_at=datetime.now(timezone.utc))
+                )
+                await session.commit()
+        except Exception as exc:
+            logger.error(f"[Pipeline] Could not stamp submitted_at for {client_order_id}: {exc}")
+
+    async def _record_unresolved_send(self, client_order_id: str, order_res) -> None:
+        """
+        An ambiguous (TIMEOUT) LIMIT/SL send: the broker may or may not hold the
+        order. Record CopyTrade TIMEOUT (the state the sweeper reconciles against
+        the broker order book); never REJECTED/FAILED, never resent.
+        """
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(CopyTrade)
+                .where(
+                    CopyTrade.client_order_id == client_order_id,
+                    CopyTrade.status.in_([CopyTradeStatus.PENDING, CopyTradeStatus.SUBMITTED]),
+                )
+                .values(
+                    status=CopyTradeStatus.TIMEOUT,
+                    failure_reason=unresolved_reason(order_res),
+                    broker_response=order_res.raw_response if order_res.category == OrderResultCategory.TIMEOUT else None,
+                )
+            )
+            await session.commit()
 
     async def replicate_sl_order(
         self,
@@ -1314,6 +1392,7 @@ class CopyEnginePipeline:
             instrument_token=event.instrument_id,
         )
 
+        await self._stamp_submitted(client_order_id)
         order_res = await self.retry_policy.execute(client.place_order, order_req)
 
         # Step 3: Update Child Order record with Broker result. PENDING
@@ -1321,8 +1400,15 @@ class CopyEnginePipeline:
         # TRIGGER_PENDING at the broker too, tracked independently from
         # here (FollowerFillSyncer observes its own eventual trigger/fill;
         # nothing here waits on it or the master's own trigger).
-        final_status = OrderStatus.PENDING if order_res.category == OrderResultCategory.SUCCESS else OrderStatus.REJECTED
+        unresolved = is_ambiguous_send(order_res)
+        final_status = (
+            OrderStatus.PENDING
+            if order_res.category == OrderResultCategory.SUCCESS or unresolved
+            else OrderStatus.REJECTED
+        )
         try:
+            if unresolved:
+                await self._record_unresolved_send(client_order_id, order_res)
             await self.save_or_update_order(
                 internal_order_id=internal_child_ord_id,
                 broker_order_id=order_res.broker_order_id,
@@ -1340,7 +1426,9 @@ class CopyEnginePipeline:
                 price=sl_price,
                 trigger_price=trigger_price,
                 status=final_status,
-                broker_status="SUCCESS" if final_status == OrderStatus.PENDING else "REJECTED",
+                broker_status=(
+                    "TIMEOUT" if unresolved else "SUCCESS" if final_status == OrderStatus.PENDING else "REJECTED"
+                ),
                 rejection_reason=order_res.message if final_status == OrderStatus.REJECTED else None,
                 master_broker_order_id=event.master_order_id,
             )
@@ -1393,7 +1481,7 @@ class CopyEnginePipeline:
             f"₹{sl_price} trigger ₹{trigger_price} -> Status: {final_status.value} (Broker ID: {order_res.broker_order_id})"
         )
         return {
-            "status": "SUCCESS" if final_status == OrderStatus.PENDING else "REJECTED",
+            "status": "TIMEOUT" if unresolved else "SUCCESS" if final_status == OrderStatus.PENDING else "REJECTED",
             "broker_order_id": order_res.broker_order_id,
             "quantity": target_qty,
             "price": str(sl_price),
@@ -3415,6 +3503,7 @@ class CopyEnginePipeline:
             instrument_token=event.instrument_id,
         )
 
+        await self._stamp_submitted(client_order_id)
         order_res = await self.retry_policy.execute(client.place_order, order_req)
 
         # Update CopyTrade & Order Status.
@@ -3435,14 +3524,17 @@ class CopyEnginePipeline:
         # and let FollowerFillSyncer's existing broker-order-book polling
         # (already running every 60s, already the only thing that confirms a
         # LIMIT child's true fill state) resolve the real terminal status.
+        unresolved = is_ambiguous_send(order_res)
         if order_res.category == OrderResultCategory.SUCCESS:
             ct_status, ord_status = CopyTradeStatus.SUBMITTED, OrderStatus.OPEN
+        elif unresolved:
+            # Ambiguous: the broker may hold this order. CopyTrade TIMEOUT (what the sweeper reconciles) and the
+            # child Order stays PENDING with broker_status TIMEOUT and no broker id - never FAILED/REJECTED.
+            ct_status, ord_status = CopyTradeStatus.TIMEOUT, OrderStatus.PENDING
         else:
             status_map = {
                 OrderResultCategory.REJECTED: (CopyTradeStatus.REJECTED, OrderStatus.REJECTED),
-                OrderResultCategory.TIMEOUT: (CopyTradeStatus.TIMEOUT, OrderStatus.FAILED),
                 OrderResultCategory.NETWORK_ERROR: (CopyTradeStatus.FAILED, OrderStatus.FAILED),
-                OrderResultCategory.UNKNOWN: (CopyTradeStatus.FAILED, OrderStatus.FAILED),
             }
             ct_status, ord_status = status_map.get(order_res.category, (CopyTradeStatus.FAILED, OrderStatus.FAILED))
 
@@ -3453,9 +3545,14 @@ class CopyEnginePipeline:
                 saved_trade.status = ct_status
                 saved_trade.broker_order_id = order_res.broker_order_id
                 saved_trade.broker_response = order_res.raw_response
-                if order_res.category != OrderResultCategory.SUCCESS:
+                if unresolved:
+                    saved_trade.failure_reason = unresolved_reason(order_res)
+                    if order_res.category != OrderResultCategory.TIMEOUT:
+                        saved_trade.broker_response = None
+                elif order_res.category != OrderResultCategory.SUCCESS:
                     saved_trade.failure_reason = order_res.message
-                saved_trade.completed_at = datetime.now(timezone.utc)
+                if not unresolved:
+                    saved_trade.completed_at = datetime.now(timezone.utc)   # an unresolved send is not complete
 
                 audit = AuditLog(
                     # Keyed off order_res.category (the broker's actual
@@ -3470,7 +3567,10 @@ class CopyEnginePipeline:
                     side=event.side,
                     quantity=target_qty,
                     price=event.price,
-                    reason_code=order_res.message if order_res.category != OrderResultCategory.SUCCESS else None,
+                    reason_code=(
+                        unresolved_reason(order_res) if unresolved
+                        else order_res.message if order_res.category != OrderResultCategory.SUCCESS else None
+                    ),
                 )
                 session.add(audit)
                 await session.commit()
@@ -3488,12 +3588,15 @@ class CopyEnginePipeline:
                 product_type=event.product_type,
                 quantity=target_qty,
                 filled_quantity=0,
-                pending_quantity=target_qty if ord_status == OrderStatus.OPEN else 0,
+                pending_quantity=target_qty if ord_status in (OrderStatus.OPEN, OrderStatus.PENDING) else 0,
                 price=execution_price,
                 average_price=Decimal("0"),
                 status=ord_status,
-                broker_status=order_res.category.value,
-                rejection_reason=order_res.message if order_res.category != OrderResultCategory.SUCCESS else None,
+                broker_status="TIMEOUT" if unresolved else order_res.category.value,
+                rejection_reason=(
+                    None if unresolved
+                    else order_res.message if order_res.category != OrderResultCategory.SUCCESS else None
+                ),
                 master_broker_order_id=event.master_order_id,
             )
         except Exception as db_exc:
@@ -3545,7 +3648,7 @@ class CopyEnginePipeline:
             }
 
         return {
-            "status": order_res.category.value,
+            "status": "TIMEOUT" if unresolved else order_res.category.value,
             "broker_order_id": order_res.broker_order_id,
             "quantity": target_qty,
         }

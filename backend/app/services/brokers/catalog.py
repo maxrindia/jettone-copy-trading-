@@ -146,11 +146,11 @@ SUPPORTED_BROKERS: List[Dict[str, Any]] = [
         "api_name": "Groww API",
         "category": "Discount Broker",
         "zero_brokerage": False,
-        "auth_type": "BEARER_TOKEN",
+        "auth_type": "API_KEY_SECRET_DAILY_APPROVAL",
         "fields": [
-            {"key": "brokerUserId", "label": "Groww User ID", "type": "text", "required": True},
-            {"key": "apiKey", "label": "API Key", "type": "text", "required": True},
-            {"key": "apiSecret", "label": "API Secret / Access Token", "type": "password", "required": True},
+            {"key": "brokerUserId", "label": "Account label (your Groww user ID or email)", "type": "text", "required": True},
+            {"key": "apiKey", "label": "API Key", "type": "password", "required": True},
+            {"key": "apiSecret", "label": "API Secret", "type": "password", "required": True},
         ],
     },
     {

@@ -58,6 +58,7 @@ class FakeAngel:
         self.positions_response: Optional[Any] = None      # override the whole position response
         self.rms = rms if rms is not None else {"syn_avail": "1000000", "syn_used": "0", "syn_coll": "0"}
         self.place_response = (200, {"status": True, "message": "SUCCESS", "data": {"orderid": "ANG-1"}})
+        self.place_exception = None
         self.routes: Dict[str, Any] = {"loginByPassword": LOGIN_OK}
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -70,7 +71,12 @@ class FakeAngel:
                 raise r
             return httpx.Response(r[0], json=r[1])
         if name == "placeOrder":
-            return httpx.Response(self.place_response[0], json=self.place_response[1])
+            if self.place_exception:
+                raise self.place_exception
+            s, b = self.place_response
+            if isinstance(b, (bytes, str)):             # a deliberately malformed (non-JSON) body
+                return httpx.Response(s, content=b)
+            return httpx.Response(s, json=b)
         if name == "getPosition":
             if self.positions_response is not None:
                 s, b = self.positions_response

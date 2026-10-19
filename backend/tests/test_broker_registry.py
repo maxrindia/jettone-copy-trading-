@@ -18,7 +18,6 @@ from app.models.accounts import Account, AccountType, ApiCredential
 from app.services.alice_blue.client import AliceBlueClient
 from app.services.alice_blue.manager import AliceBlueAccountManager
 from app.services.brokers.catalog import SUPPORTED_BROKERS, catalog_with_support
-from app.services.brokers.factory import create_broker_client
 from app.services.brokers.registry import (
     BrokerSupport,
     UnsupportedBrokerError,
@@ -84,17 +83,46 @@ def test_catalog_annotation_marks_only_alice_selectable():
             assert r["support_note"]
 
 
-# ── factory: no fallback to Alice Blue ──────────────────────────────────────
+# ── dispatch: the registry + manager are the only path, and there is no Alice Blue fallback ──
 
-def test_factory_builds_alice_for_alice(mock_redis):
-    c = create_broker_client("alicebluenew", "a1", "U1", "s", mock_redis, http_client=AsyncMock())
-    assert isinstance(c, AliceBlueClient)
+def test_the_dead_factory_and_base_class_are_gone():
+    import importlib.util
+    assert importlib.util.find_spec("app.services.brokers.factory") is None
+    assert importlib.util.find_spec("app.services.brokers.base") is None
+    import app.services.brokers as pkg
+    assert not hasattr(pkg, "create_broker_client") and not hasattr(pkg, "BaseBrokerClient")
 
 
 @pytest.mark.parametrize("bid", ["angelone", "zerodha", "groww", "unknown-broker"])
-def test_factory_never_falls_back_to_alice(mock_redis, bid):
+def test_dispatch_never_falls_back_to_alice(mock_redis, monkeypatch, bid):
+    """With the broker flags off every non-Alice broker is refused before ANY client - least of all an
+    Alice Blue one - is constructed."""
+    def must_not_be_built(*a, **k):
+        raise AssertionError("an AliceBlueClient was constructed for a non-Alice account")
+    monkeypatch.setattr(AliceBlueClient, "__init__", must_not_be_built)
     with pytest.raises(UnsupportedBrokerError):
-        create_broker_client(bid, "a1", "U1", "s", mock_redis, http_client=AsyncMock())
+        AliceBlueAccountManager._build_client(_acc(bid), mock_redis)
+
+
+def test_dispatch_builds_each_enabled_broker_its_own_client_and_never_alice(mock_redis, monkeypatch):
+    from app.core.config import settings
+    from app.services.angel_one.client import AngelOneClient
+    from app.services.groww.client import GrowwClient
+    from app.services.brokers import credential_vault as vault
+    monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
+    monkeypatch.setattr(settings, "GROWW_ENABLED", True)
+
+    def acc(broker, payload_broker, creds):
+        a = _acc(broker)
+        a.broker_credential = SimpleNamespace(encrypted_payload=vault.encrypt_payload(payload_broker, vault.validate_payload(payload_broker, creds)))
+        a.static_ip_address = "10.0.0.1"
+        a.proxy_expires_on = None
+        return a
+    assert isinstance(AliceBlueAccountManager._build_client(acc("groww", "groww", {"api_key": "k", "api_secret": "s"}), mock_redis), GrowwClient)
+    assert isinstance(AliceBlueAccountManager._build_client(
+        acc("angelone", "angelone", {"api_key": "k", "pin": "1", "totp_secret": "JBSWY3DPEHPK3PXP"}), mock_redis), AngelOneClient)
+    assert isinstance(AliceBlueAccountManager._build_client(_acc("alicebluenew"), mock_redis), AliceBlueClient)
+    assert isinstance(AliceBlueAccountManager._build_client(_acc(None), mock_redis), AliceBlueClient)
 
 
 # ── manager: unsupported accounts never get a client ────────────────────────
@@ -207,7 +235,7 @@ async def test_create_alice_account_still_works(client):
 async def test_update_cannot_switch_account_to_unsupported_broker(client):
     created = (await client.post("/api/v1/accounts", json=_payload("ALC8", "alicebluenew"), headers=TOKEN)).json()
     resp = await client.put(f"/api/v1/accounts/{created['id']}", json={"broker": "angelone"}, headers=TOKEN)
-    assert resp.status_code == 400
+    assert resp.status_code == 409          # a broker can never be changed after creation (see test_account_broker_immutable)
     ok = await client.put(f"/api/v1/accounts/{created['id']}", json={"broker": "alicebluenew", "display_name": "n"}, headers=TOKEN)
     assert ok.status_code == 200
 

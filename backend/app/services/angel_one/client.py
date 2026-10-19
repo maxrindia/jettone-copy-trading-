@@ -40,7 +40,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
-from app.core.crypto import decrypt_secret, encrypt_secret
+from app.core.crypto import EncryptionKeyError, decrypt_secret, encrypt_secret, validate_encryption_key
+from app.services.alice_blue.instruments import InstrumentResolutionError
 from app.services.alice_blue.types import (
     FundsData,
     OrderRecord,
@@ -53,6 +54,9 @@ from app.services.alice_blue.types import (
     ProductType,
 )
 from app.services.angel_one.contract import ANGEL_CONTRACT, AngelContract, contract_is_usable
+from app.services.brokers.login_guard import run_guarded_login
+from app.services.brokers.strict_numbers import StrictNumberError, need, optional_decimal, strict_decimal, strict_int
+from app.services.brokers.transport import SendState, is_provably_not_sent
 from app.services.angel_one.instruments import AngelInstrumentStore, store as default_store
 
 logger = logging.getLogger("angel_one_client")
@@ -119,16 +123,35 @@ def seconds_until_ist_midnight(now: Optional[datetime] = None) -> int:
     return max(1, int((midnight - now).total_seconds()))
 
 
-def _dec(value: Any) -> Decimal:
+def _strict(fn, *args, **kwargs):
+    """Run a strict-number helper, turning its (value-free) error into the adapter's typed failure."""
     try:
-        return Decimal(str(value if value not in (None, "") else "0"))
-    except InvalidOperation as exc:
-        raise AngelCapabilityUnavailable(f"non-numeric value in broker response: {value!r}") from exc
+        return fn(*args, **kwargs)
+    except StrictNumberError as exc:
+        raise AngelCapabilityUnavailable(f"Angel One response {exc}") from None
+    except (ArithmeticError, TypeError, ValueError) as exc:
+        raise AngelCapabilityUnavailable(f"Angel One response has an unreadable number ({type(exc).__name__})") from None
+
+
+def _dec(row: Any, key: str, **kw) -> Decimal:
+    return _strict(lambda: strict_decimal(need(row, key), key, **kw))
+
+
+def _int(row: Any, key: str, **kw) -> int:
+    return _strict(lambda: strict_int(need(row, key), key, **kw))
+
+
+def _opt(row: Any, key: str, **kw) -> Decimal:
+    return _strict(lambda: optional_decimal(row, key, **kw))
 
 
 class AngelOneClient:
     """One instance per Angel One account. Credentials arrive already
     decrypted from the credential vault and are held in memory only."""
+
+    # Logging in contacts Angel One, so it happens only on an explicit request
+    # (POST /accounts/{id}/broker-login), never from the engine's startup auth.
+    AUTO_LOGIN_ON_STARTUP = False
 
     def __init__(
         self,
@@ -201,39 +224,74 @@ class AngelOneClient:
             raise AngelOneError(f"static IP expired on {self.static_ip_valid_until.isoformat()}")
 
     async def login(self) -> None:
-        """clientcode + PIN + server-generated TOTP. Stores the JWT encrypted in
-        Redis until IST midnight (SmartAPI sessions end daily). Single-flight:
-        concurrent callers share one login (a TOTP code cannot be reused)."""
+        """clientcode + PIN + server-generated TOTP, through the cross-instance Redis guard: one login per
+        account per spacing window across ALL client instances and API requests (a TOTP code cannot be
+        reused and repeated attempts can lock the account), fail-closed if Redis is unavailable. Stores the
+        JWT encrypted in Redis until IST midnight. Raises LoginThrottled when the guard refuses."""
         generation = self._login_generation
         async with self._login_lock:
             if self._login_generation != generation:
-                return  # another caller completed a login while this one waited
-            body = {"clientcode": self.user_id, "password": self._pin, "totp": totp_now(self._totp_secret)}
-            try:
-                resp = await self._http.post(f"{BASE_URL}{ROUTES['login']}", json=body, headers=self._headers())
-            except httpx.RequestError as exc:
-                raise AngelAuthError(f"network error during login: {type(exc).__name__}") from exc
-            data = self._json(resp)
-            if resp.status_code != 200 or data.get("status") is not True:
-                raise AngelAuthError(f"login rejected: {data.get('message') or resp.status_code} ({data.get('errorcode') or '-'})")
-            tokens = data.get("data") or {}
-            jwt = tokens.get("jwtToken")
-            if not jwt:
-                raise AngelAuthError("login returned no jwtToken")
-            payload = json.dumps({"jwt": jwt, "refresh": tokens.get("refreshToken"), "at": self._clock().isoformat()})
-            await self.redis.set(self.session_key, encrypt_secret(payload), ex=seconds_until_ist_midnight(self._clock()))
+                return  # another caller on this instance completed a login while this one waited
+            await run_guarded_login(
+                redis=self.redis, broker="angelone", account_id=self.account_id, clock=self._clock,
+                do_login=self._login_once, session_key=self.session_key,
+            )
             self._login_generation += 1
-            logger.info(f"[{self.account_id}] Angel One session established.")
+
+    async def _login_once(self) -> None:
+        body = {"clientcode": self.user_id, "password": self._pin, "totp": totp_now(self._totp_secret)}
+        try:
+            resp = await self._http.post(f"{BASE_URL}{ROUTES['login']}", json=body, headers=self._headers())
+        except httpx.RequestError as exc:
+            raise AngelAuthError(f"network error during login: {type(exc).__name__}") from None
+        data = self._json(resp)
+        if resp.status_code != 200 or data.get("status") is not True:
+            raise AngelAuthError(f"login rejected: {data.get('message') or resp.status_code} ({data.get('errorcode') or '-'})")
+        tokens = data.get("data") or {}
+        jwt = tokens.get("jwtToken")
+        if not jwt:
+            raise AngelAuthError("login returned no jwtToken")
+        payload = json.dumps({"jwt": jwt, "refresh": tokens.get("refreshToken"), "at": self._clock().isoformat()})
+        await self.redis.set(self.session_key, encrypt_secret(payload), ex=seconds_until_ist_midnight(self._clock()))
+        logger.info(f"[{self.account_id}] Angel One session established.")
 
     async def get_session(self, force_refresh: bool = False) -> str:
         if force_refresh:
             await self.login()
-        raw = await self.redis.get(self.session_key)
+        try:
+            raw = await self.redis.get(self.session_key)
+        except Exception:
+            raise AngelAuthError("Angel One session store unavailable; request not sent") from None
         if not raw:
             raise AngelAuthError("no active Angel One session; log in again")
-        if isinstance(raw, bytes):
-            raw = raw.decode()
-        return json.loads(decrypt_secret(raw))["jwt"]
+        return await self._decode_session(raw)
+
+    async def _decode_session(self, raw: Any) -> str:
+        """See GrowwClient._decode_session: a sanitized AngelAuthError, discarding only this account's
+        exact unreadable session key (never on a missing/invalid encryption key)."""
+        try:
+            validate_encryption_key()
+        except EncryptionKeyError:
+            raise AngelAuthError("Angel One session cannot be read: the encryption key is not configured") from None
+        try:
+            text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+            data = json.loads(decrypt_secret(text))
+            jwt = data["jwt"]
+            if not isinstance(jwt, str) or not jwt.strip():
+                raise ValueError("no usable token")
+            return jwt
+        except (EncryptionKeyError, ValueError, KeyError, TypeError, AttributeError):
+            await self._discard_unreadable_session(raw)
+            raise AngelAuthError("stored Angel One session is unreadable; log in again") from None
+
+    async def _discard_unreadable_session(self, raw: Any) -> None:
+        try:
+            current = await self.redis.get(self.session_key)
+            if current == raw:
+                await self.redis.delete(self.session_key)
+                logger.warning(f"[{self.account_id}] Angel One stored session was unreadable and has been discarded.")
+        except Exception:
+            pass
 
     async def logout(self) -> None:
         try:
@@ -256,19 +314,32 @@ class AngelOneClient:
             return {}
 
     @staticmethod
+    def _well_formed(resp: httpx.Response) -> bool:
+        """True when the body is a JSON object (a malformed body is an ambiguous outcome for an order)."""
+        try:
+            return isinstance(resp.json(), dict)
+        except Exception:
+            return False
+
+    @staticmethod
     def _is_token_failure(resp: httpx.Response, data: Dict[str, Any]) -> bool:
         return resp.status_code in (401, 403) or data.get("error_type") == "TokenException"
 
-    async def _call(self, route: str, body: Optional[Dict[str, Any]] = None, method: str = "POST") -> Dict[str, Any]:
+    async def _call(
+        self, route: str, body: Optional[Dict[str, Any]] = None, method: str = "POST",
+        state: Optional[SendState] = None,
+    ) -> Dict[str, Any]:
         """Authenticated call. A token failure clears the session and raises -
         it is never retried silently, so an order is sent at most once."""
         jwt = await self.get_session()
+        if state is not None:
+            state.sent = True      # from here on a failure may follow a request the broker already accepted
         resp = await self._http.request(method, f"{BASE_URL}{ROUTES[route]}", json=body, headers=self._headers(jwt))
         data = self._json(resp)
         if self._is_token_failure(resp, data):
             await self.redis.delete(self.session_key)
             raise AngelAuthError("Angel One session rejected; log in again")
-        return {"_http_status": resp.status_code, **data}
+        return {"_http_status": resp.status_code, "_well_formed": self._well_formed(resp), **data}
 
     # ── instruments ──────────────────────────────────────────────────────
     async def resolve_instrument(self, exchange: str, symbol: str) -> Tuple[str, str]:
@@ -324,8 +395,37 @@ class AngelOneClient:
     def _result(self, category: OrderResultCategory, req_id: Optional[str], order_id: Optional[str], msg: str, raw: Dict[str, Any]) -> OrderResult:
         return OrderResult(category=category, client_order_id=req_id, broker_order_id=order_id, message=msg, raw_response=raw, timestamp=self._clock())
 
+    @staticmethod
+    def _safe_reason(exc: BaseException) -> str:
+        """Our own validation messages carry no secrets and are shown; anything else is reduced to its type."""
+        if isinstance(exc, (AngelOneError, InstrumentResolutionError)):
+            return str(exc)
+        return f"invalid order ({type(exc).__name__})"
+
+    def _ambiguous(self, req: OrderRequest, why: str) -> OrderResult:
+        """The order may or may not exist at Angel One. SmartAPI's placeOrder carries no client
+        reference, so there is nothing to look it up or auto-match by: TIMEOUT routes it to the
+        stale-order sweeper, which cannot match it and raises TIMEOUT_UNRESOLVED for manual review.
+        It is never resent."""
+        return self._result(
+            OrderResultCategory.TIMEOUT, req.client_order_id, None,
+            f"Angel One placeOrder outcome unknown ({why}); not resent - verify at the broker", {},
+        )
+
     async def place_order(self, req: OrderRequest) -> OrderResult:
-        """req.instrument_token (another broker's id) is deliberately ignored."""
+        """Total: never raises (see GrowwClient.place_order).
+        req.instrument_token (another broker's id) is deliberately ignored."""
+        state = SendState()
+        try:
+            return await self._place_order(req, state)
+        except Exception as exc:
+            logger.error(f"[{self.account_id}] Angel One place_order internal error ({type(exc).__name__}); sent={state.sent}")
+            if state.sent:
+                return self._ambiguous(req, "unexpected error after send")
+            return self._result(OrderResultCategory.REJECTED, req.client_order_id, None,
+                                f"Not sent: internal error ({type(exc).__name__})", {})
+
+    async def _place_order(self, req: OrderRequest, state: SendState) -> OrderResult:
         try:
             self._require_static_ip()
             body = self.build_order_body(
@@ -334,21 +434,31 @@ class AngelOneClient:
                 trigger_price=req.trigger_price,
             )
         except Exception as exc:
-            return self._result(OrderResultCategory.REJECTED, req.client_order_id, None, f"Not sent: {exc}", {})
+            return self._result(OrderResultCategory.REJECTED, req.client_order_id, None,
+                                f"Not sent: {self._safe_reason(exc)}", {})
         try:
-            data = await self._call("place", body)
+            data = await self._call("place", body, state=state)
         except AngelAuthError as exc:
             return self._result(OrderResultCategory.REJECTED, req.client_order_id, None, str(exc), {})
-        except httpx.TimeoutException:
-            # Ambiguous: the broker may have accepted it. Never resend.
-            return self._result(OrderResultCategory.TIMEOUT, req.client_order_id, None, "placeOrder timed out; reconcile before retrying", {})
         except httpx.RequestError as exc:
-            return self._result(OrderResultCategory.NETWORK_ERROR, req.client_order_id, None, type(exc).__name__, {})
+            if is_provably_not_sent(exc):
+                return self._result(OrderResultCategory.NETWORK_ERROR, req.client_order_id, None,
+                                    f"Angel One unreachable ({type(exc).__name__}); order not sent", {})
+            return self._ambiguous(req, f"{type(exc).__name__} after send")
+
+        http_status = data.get("_http_status", 0)
         payload = data.get("data")
         order_id = payload.get("orderid") if isinstance(payload, dict) else None
-        if data.get("status") is True and order_id:
-            return self._result(OrderResultCategory.SUCCESS, req.client_order_id, str(order_id), data.get("message") or "SUCCESS", data)
-        return self._result(OrderResultCategory.REJECTED, req.client_order_id, None, f"{data.get('message') or 'rejected'} ({data.get('errorcode') or data.get('_http_status')})", data)
+        if (data.get("status") is True and isinstance(order_id, (str, int)) and not isinstance(order_id, bool)
+                and str(order_id).strip()):
+            return self._result(OrderResultCategory.SUCCESS, req.client_order_id, str(order_id).strip(),
+                                str(data.get("message") or "SUCCESS")[:200], data)
+        # Definitive: a 4xx, or a well-formed body that says status false below 500.
+        if http_status < 500 and data.get("_well_formed") and (400 <= http_status < 500 or data.get("status") is False):
+            msg = f"{data.get('message') or 'rejected'} ({data.get('errorcode') or http_status})"
+            return self._result(OrderResultCategory.REJECTED, req.client_order_id, None, str(msg)[:240], data)
+        # 5xx, an unreadable body, status true without an order id, anything unexpected: the order may exist.
+        return self._ambiguous(req, f"HTTP {http_status}, unusable response")
 
     async def cancel_order(self, broker_order_id: str, symbol: str = "", exchange: str = "NSE", variety: str = "NORMAL") -> OrderResult:
         try:
@@ -401,33 +511,42 @@ class AngelOneClient:
 
     @staticmethod
     def parse_order_row(row: Dict[str, Any], status_map: Dict[str, str]) -> OrderRecord:
-        """Maps one order-book row using the SDK-verified keys. Raises for a
-        status value not in `status_map` (never guesses a lifecycle state)."""
+        """Maps one order-book row using the SDK-verified keys. Raises for a status value not in
+        `status_map` (never guesses a lifecycle state) and for any number that is missing, null, blank,
+        boolean, NaN, Infinity, negative or inconsistent (never reads one as zero)."""
+        if not isinstance(row, dict):
+            raise AngelCapabilityUnavailable("order row is not an object")
         raw_status = str(row.get("status", "")).strip().lower()
         if raw_status not in status_map:
             raise AngelCapabilityUnavailable(f"unverified Angel One order status '{raw_status}'")
+        raw_id = row.get("orderid")
+        if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)) or not str(raw_id).strip():
+            raise AngelCapabilityUnavailable("order row has no usable orderid")
         try:
             side = OrderSide(str(row["transactiontype"]).upper())
-            qty = int(row["quantity"])
-            filled = int(row.get("filledshares") or 0)
-            order_id = str(row["orderid"])
-        except (KeyError, ValueError) as exc:
-            raise AngelCapabilityUnavailable(f"order row missing/invalid field: {exc}") from exc
+        except (KeyError, ValueError):
+            raise AngelCapabilityUnavailable("order row missing/invalid transactiontype") from None
+        qty = _int(row, "quantity", positive=True)
+        filled = _int(row, "filledshares", minimum=0, maximum=qty)            # a fill can never exceed the order
+        otype = str(row.get("ordertype") or "").upper()
+        price = _opt(row, "price", applicable=otype in ("LIMIT", "STOPLOSS_LIMIT"))
+        trigger = _opt(row, "triggerprice", applicable=otype in ("STOPLOSS_LIMIT", "STOPLOSS_MARKET"))
+        average = _opt(row, "averageprice", applicable=filled > 0)           # a fill must carry its price
         return OrderRecord(
-            broker_order_id=order_id,
+            broker_order_id=str(raw_id).strip(),
             client_order_id=None,
             symbol=str(row.get("tradingsymbol", "")),
             exchange=str(row.get("exchange", "")),
             side=side,
             quantity=qty,
             filled_quantity=filled,
-            average_price=_dec(row.get("averageprice")),
+            average_price=average,
             status=status_map[raw_status],
             order_timestamp=datetime.now(timezone.utc),
             order_type=str(row.get("ordertype", "")),
             product_type=str(row.get("producttype", "")),
-            price=_dec(row.get("price")),
-            trigger_price=_dec(row.get("triggerprice")),
+            price=price,
+            trigger_price=trigger,
             rejection_reason=(str(row.get("text")) if row.get("text") else None),
             instrument_id=(str(row["symboltoken"]) if row.get("symboltoken") else None),
         )
@@ -441,22 +560,24 @@ class AngelOneClient:
         return [self.parse_order_row(r, contract.status_map) for r in rows]
 
     def parse_position_row(self, row: Dict[str, Any], keys) -> Position:
-        try:
-            qty = int(Decimal(str(row[keys.net_qty])))
-            symbol = str(row[keys.symbol])
-            product = str(row[keys.product])
-            exchange = str(row[keys.exchange])
-        except (KeyError, InvalidOperation, ValueError) as exc:
-            raise AngelCapabilityUnavailable(f"position row missing/invalid field: {exc}") from exc
+        if not isinstance(row, dict):
+            raise AngelCapabilityUnavailable("position row is not an object")
+        qty = _int(row, keys.net_qty)                                         # signed: a short is legitimately negative
+        for key in (keys.symbol, keys.product, keys.exchange):
+            value = row.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise AngelCapabilityUnavailable("position row has an unusable identifying field")
+        # the price feeds the exposure check: required and positive for an open position
+        price = _dec(row, keys.avg_price, positive=True, allow_negative=False) if qty != 0 else _opt(row, keys.avg_price)
         token = row.get(keys.token)
         return Position(
-            symbol=symbol,
+            symbol=row[keys.symbol],
             quantity=qty,
             side="BUY" if qty >= 0 else "SELL",
-            average_price=_dec(row.get(keys.avg_price)),
+            average_price=price,
             account_id=self.account_id,
-            exchange=exchange,
-            product_type=product,
+            exchange=row[keys.exchange],
+            product_type=row[keys.product],
             instrument_id=(str(token) if token else None),
         )
 
@@ -489,14 +610,11 @@ class AngelOneClient:
         if data.get("status") is not True or not isinstance(row, dict):
             raise AngelOneError(f"funds fetch failed: {data.get('message')}")
         keys = contract.rms
-        missing = [k for k in (keys.available_margin, keys.used_margin, keys.collateral) if k not in row]
-        if missing:
-            raise AngelCapabilityUnavailable(f"funds response missing expected field(s): {missing}")
         return FundsData(
             account_id=self.account_id,
-            available_margin=_dec(row[keys.available_margin]),
-            collateral=_dec(row[keys.collateral]),
-            used_margin=_dec(row[keys.used_margin]),
+            available_margin=_dec(row, keys.available_margin),              # finite; a negative balance is real
+            collateral=_dec(row, keys.collateral, allow_negative=False),
+            used_margin=_dec(row, keys.used_margin, allow_negative=False),
             updated_at=self._clock(),
         )
 

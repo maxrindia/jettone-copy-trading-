@@ -19,8 +19,11 @@ from app.services.alice_blue.client import AliceBlueClient
 from app.services.alice_blue.exceptions import AuthenticationError, IPNotWhitelistedError
 from app.models.accounts import Account, ApiCredential, BrokerCredential, CopySetting, AccountType
 from app.services.angel_one.client import AngelAuthError
+from app.services.groww.client import GrowwAuthError
 from app.services.brokers.angel_builder import build_angel_client
+from app.services.brokers.groww_builder import build_groww_client
 from app.services.brokers import credential_vault
+from app.services.brokers.login_guard import LoginThrottled
 from app.models.trades import CopyTrade, CopyTradeStatus, Order, OrderStatus
 from app.models.strategies import GroupStrategy, StrategyAccountRole, StrategyMember
 from app.schemas.accounts import (
@@ -34,7 +37,9 @@ from app.schemas.accounts import (
 from app.services.brokers.catalog import catalog_with_support
 from app.services.brokers.registry import (
     UnsupportedBrokerError,
+    can_be_master,
     is_alice_blue,
+    normalize_broker_id,
     require_engine_broker,
     session_key_for,
 )
@@ -407,6 +412,11 @@ async def create_account(
     clean_user_id = payload.alice_user_id.strip()
     # Only brokers with an implemented, verified adapter can be added.
     ensure_broker_selectable(payload.broker)
+    if payload.account_type == AccountType.MASTER and not can_be_master(payload.broker):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Broker '{payload.broker}' can only be a Child account; it cannot be created as a Master.",
+        )
 
     # Check if an account with this alice_user_id already exists (including soft-deleted)
     query = select(Account).where(func.lower(Account.alice_user_id) == clean_user_id.lower())
@@ -419,7 +429,13 @@ async def create_account(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Account with this Alice Blue user ID already exists",
             )
-        # Restore soft-deleted account with new details
+        # Restore soft-deleted account with new details. It keeps the credentials of the broker it was
+        # created with, so it can only come back on that same broker.
+        if normalize_broker_id(payload.broker) != normalize_broker_id(existing_acc.broker):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This account was previously registered with a different broker and cannot be re-added with another.",
+            )
         account = existing_acc
         account.deleted_at = None
         account.account_type = payload.account_type
@@ -831,56 +847,70 @@ async def set_broker_credentials(
     payload: Dict[str, Any] = Body(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Stores (replaces) the account's Angel One credentials, encrypted at rest.
-    Write-only: the response states which fields are configured, never their values."""
+    """Stores (replaces) the account's broker credentials (Angel One / Groww),
+    encrypted at rest. Write-only: the response states which fields are
+    configured, never their values."""
     account = await _load_vault_account(account_id, db)
-    unknown = sorted(set(payload) - set(credential_vault.ANGEL_FIELDS))
+    broker = require_engine_broker(account.broker).id
+    allowed = credential_vault.VAULT_FIELDS[broker]
+    unknown = sorted(set(payload) - set(allowed))
     if unknown:
         raise HTTPException(status_code=400, detail=f"Unexpected field(s): {', '.join(unknown)}.")
     try:
-        creds = credential_vault.validate_angel_payload(payload)
+        creds = credential_vault.validate_payload(broker, payload)
     except credential_vault.CredentialError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    ciphertext = credential_vault.encrypt_angel(creds)
+    ciphertext = credential_vault.encrypt_payload(broker, creds)
     row = account.broker_credential
     if row is None:
-        row = BrokerCredential(account_id=account.id, broker="angelone", encrypted_payload=ciphertext)
+        row = BrokerCredential(account_id=account.id, broker=broker, encrypted_payload=ciphertext)
         db.add(row)
     else:
+        row.broker = broker
         row.encrypted_payload = ciphertext
     # New credentials invalidate any session made with the old ones.
     account.session_valid = False
     account.last_authenticated_at = None
     await db.commit()
-    return credential_vault.describe(row)
+    return credential_vault.describe(row, broker)
 
 
 @router.get("/{account_id}/broker-credentials")
 async def get_broker_credentials_status(account_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     account = await _load_vault_account(account_id, db)
-    return credential_vault.describe(account.broker_credential)
+    return credential_vault.describe(account.broker_credential, require_engine_broker(account.broker).id)
 
 
-@router.post("/{account_id}/angel-login", response_model=AccountResponse)
-async def angel_login(
-    account_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    redis: Any = Depends(get_redis),
-    manager=Depends(get_runtime_client_manager),
-):
-    """Server-side Angel One login (client code + PIN + TOTP) for an account whose
-    credentials are in the vault. Contacts Angel One only when called explicitly."""
+_VAULT_BUILDERS = {"angelone": (build_angel_client, "Angel One", AngelAuthError),
+                   "groww": (build_groww_client, "Groww", GrowwAuthError)}
+
+
+async def _vault_login(account_id: uuid.UUID, db: AsyncSession, redis: Any, manager) -> Account:
+    """Server-side login for an account whose credentials are in the vault. Contacts
+    the broker only when called explicitly, and never from the engine's startup."""
     account = await _load_vault_account(account_id, db)
+    broker = require_engine_broker(account.broker).id
+    # Looked up at call time so the module-level builders stay patchable in tests.
+    builder = {"angelone": build_angel_client, "groww": build_groww_client}[broker]
+    _, name, auth_error = _VAULT_BUILDERS[broker]
     try:
-        client = build_angel_client(account, redis)
+        client = builder(account, redis)
     except credential_vault.CredentialError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     try:
         await client.login()
-    except AngelAuthError as exc:
+    except LoginThrottled as exc:
+        # Nothing was sent to the broker. The session state is untouched: a throttled attempt says nothing
+        # about whether the existing session is good.
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=exc.message,
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from None
+    except auth_error as exc:
         account.session_valid = False
         await db.commit()
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Angel One login failed: {exc}") from exc
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"{name} login failed: {exc}") from exc
     finally:
         await client.aclose()
     account.session_valid = True
@@ -890,6 +920,27 @@ async def angel_login(
     account.runtime_client_status = await _sync_runtime_client(manager, account, db, redis, report_failure=True)
     await db.refresh(account)
     return account
+
+
+@router.post("/{account_id}/broker-login", response_model=AccountResponse)
+async def broker_login(
+    account_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    redis: Any = Depends(get_redis),
+    manager=Depends(get_runtime_client_manager),
+):
+    return await _vault_login(account_id, db, redis, manager)
+
+
+@router.post("/{account_id}/angel-login", response_model=AccountResponse)
+async def angel_login(
+    account_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    redis: Any = Depends(get_redis),
+    manager=Depends(get_runtime_client_manager),
+):
+    """Kept for existing callers; identical to broker-login for an Angel One account."""
+    return await _vault_login(account_id, db, redis, manager)
 
 
 @router.get("/{account_id}", response_model=AccountResponse)
@@ -951,8 +1002,16 @@ async def update_account(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
 
     update_data = payload.model_dump(exclude_unset=True)
-    if update_data.get("broker") is not None:
-        ensure_broker_selectable(update_data["broker"])
+    if "broker" in update_data:
+        # An account's broker is fixed when it is created: its credentials, session, client and order history
+        # all belong to that broker, and switching would leave them attached to the wrong one. The edit form
+        # re-sends the current value on every save, so an UNCHANGED value is accepted and simply not written.
+        requested = update_data.pop("broker")
+        if requested is not None and normalize_broker_id(requested) != normalize_broker_id(account.broker):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An account's broker cannot be changed. Remove the account and add it again with the new broker.",
+            )
 
     # Security: Do not allow premature session_valid=True without valid Redis session
     if update_data.get("session_valid") is True:

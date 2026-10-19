@@ -17,11 +17,15 @@ from typing import Any, Dict, List
 ENUM_KEYS = frozenset({
     "status", "orderstatus", "producttype", "product", "ordertype", "transactiontype",
     "exchange", "exch_seg", "variety", "duration", "instrumenttype", "optiontype", "positiontype",
+    # Groww's vocabularies (Annexures page)
+    "order_status", "order_type", "transaction_type", "segment", "amo_status", "validity", "instrument_type",
+    "trade_status", "iskeyactive",
 })
 # Keys that look enum-like but may carry free text or identifiers: never kept.
 NEVER_KEEP = frozenset({
     "text", "message", "jwttoken", "refreshtoken", "feedtoken", "orderid", "uniqueorderid", "fillid",
     "clientcode", "name", "email", "mobileno", "panno", "tradingsymbol", "symboltoken", "symbolname",
+    "remark", "token", "tokenrefid", "sessionname", "groww_order_id", "order_reference_id", "trading_symbol",
 })
 MAX_ROWS = 50
 

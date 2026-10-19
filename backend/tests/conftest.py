@@ -47,26 +47,74 @@ async def _dispose_test_engine():
 def mock_redis():
     """Mock Redis client with in-memory storage."""
     storage = {}
+    expiry = {}          # key -> virtual-clock time at which it expires
+    clock = [0.0]        # virtual seconds; only moves when a test calls mock._advance(...)
     mock = AsyncMock()
 
+    def _purge():
+        for k in [k for k, t in expiry.items() if t <= clock[0]]:
+            storage.pop(k, None)
+            expiry.pop(k, None)
+
     async def _get(key):
+        _purge()
         return storage.get(key)
 
-    async def _set(key, val, ex=None, nx=False):
+    async def _set(key, val, ex=None, nx=False, px=None):
+        _purge()
         if nx and key in storage:
             return False
         storage[key] = str(val)
+        expiry.pop(key, None)
+        # Only a positive TTL is emulated. A zero/negative one (which real Redis would reject, and which the
+        # original mock simply ignored - e.g. AliceBlueClient.get_funds(max_cache_age_sec=0)) stores the key
+        # without an expiry, exactly as before.
+        if ex is not None and ex > 0:
+            expiry[key] = clock[0] + ex
+        elif px is not None and px > 0:
+            expiry[key] = clock[0] + px / 1000.0
         return True
 
     async def _delete(key):
+        _purge()
+        existed = key in storage
         storage.pop(key, None)
-        return 1
+        expiry.pop(key, None)
+        return 1 if existed else 0
+
+    async def _incr(key):
+        _purge()
+        storage[key] = str(int(storage.get(key, "0")) + 1)
+        return int(storage[key])
+
+    async def _expire(key, seconds):
+        _purge()
+        if key not in storage:
+            return False
+        expiry[key] = clock[0] + seconds
+        return True
+
+    async def _ttl(key):
+        _purge()
+        if key not in storage:
+            return -2
+        return int(expiry[key] - clock[0]) if key in expiry else -1
+
+    async def _exists(key):
+        _purge()
+        return 1 if key in storage else 0
 
     mock.get = AsyncMock(side_effect=_get)
     mock.set = AsyncMock(side_effect=_set)
     mock.delete = AsyncMock(side_effect=_delete)
+    mock.incr = AsyncMock(side_effect=_incr)
+    mock.expire = AsyncMock(side_effect=_expire)
+    mock.ttl = AsyncMock(side_effect=_ttl)
+    mock.exists = AsyncMock(side_effect=_exists)
     mock.ping = AsyncMock(return_value=True)
     mock._storage = storage
+    mock._expiry = expiry
+    mock._advance = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
     return mock
 
 

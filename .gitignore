@@ -46,6 +46,7 @@ Thumbs.db
 
 # Supervised broker capture output (redacted shapes of a real account's responses; never committed)
 angel_capture*.json
+groww_capture*.json
 
 # Local-only tooling and artifacts (never committed)
 .agents/

@@ -54,6 +54,10 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning(f"Schema auto-migration notice: {exc}")
 
+    # Groww's instrument master (equity), only when GROWW_ENABLED and a URL are configured.
+    from app.services.groww.instruments import load_instruments_if_enabled
+    await load_instruments_if_enabled()
+
     engine_loop = EngineLoop(redis)
     await engine_loop.start()
 

@@ -72,6 +72,7 @@ from app.models.strategies import (
 from app.models.trades import CopyTrade, CopyTradeStatus, Order, OrderSide, OrderSource, OrderStatus
 from app.services import strategy_membership as membership
 from app.services.alice_blue.client import order_book_row_id
+from app.services.brokers.registry import can_be_master
 from app.services.copy_engine.risk_inputs import (
     UnknownProductTypeError,
     normalize_product_for_exchange,
@@ -212,6 +213,12 @@ async def _validate_request(
     if not new_master.is_active:
         raise SwitchValidationError(
             409, "NEW_MASTER_NOT_ELIGIBLE", "The selected Master account is inactive. Activate it first."
+        )
+    if not can_be_master(new_master.broker):
+        raise SwitchValidationError(
+            409, "NEW_MASTER_BROKER_UNSUPPORTED",
+            f"Broker '{new_master.broker}' can only be a Child account; its orders cannot be detected, "
+            "so it cannot be a strategy's Master.",
         )
     if new_master.api_credential is None:
         raise SwitchValidationError(

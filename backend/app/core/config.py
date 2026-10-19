@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     # no download is ever attempted; set it only to the URL Angel One documents.
     ANGEL_ONE_SCRIP_MASTER_URL: str = ""
 
+    # Groww Trading API Child support. Default false = Groww accounts cannot be
+    # added, logged in or traded and no request is ever sent to api.groww.in.
+    # Groww can never be a Master. Live verification (scripts/groww_capture.py)
+    # is still required before enabling this in production.
+    GROWW_ENABLED: bool = False
+    # Groww's instrument master (CSV). Empty = never downloaded; set it to the URL
+    # in Groww's instruments documentation, or load a downloaded file instead.
+    GROWW_INSTRUMENT_MASTER_URL: str = ""
+
     # VPS public IP — must be whitelisted on Alice Blue Developer Portal for each account's App.
     # All API/WebSocket calls to Alice Blue originate from this IP.
     STATIC_VPS_IP: str = ""

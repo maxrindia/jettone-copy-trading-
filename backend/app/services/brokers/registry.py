@@ -11,9 +11,10 @@ with no client, and every client-construction site must call
 for a non-Alice broker - that would send another broker's credentials to
 Alice Blue's endpoints.
 
-Angel One is gated twice: `ANGEL_ONE_ENABLED` (default false) lets an account
-log in at all, and `as_child` additionally needs the verified response
-contract (angel_one/contract.py). `as_master` is never true: Master order
+Angel One and Groww are gated twice: their flag (`ANGEL_ONE_ENABLED` /
+`GROWW_ENABLED`, default false) lets an account log in at all, and `as_child`
+additionally needs a verified response contract (angel_one/contract.py,
+groww/contract.py). `as_master` is never true for either: Master order
 detection is not implemented.
 """
 
@@ -23,6 +24,7 @@ from typing import Dict, FrozenSet, Optional
 
 from app.core.config import settings
 from app.services.angel_one.contract import ANGEL_CONTRACT, contract_is_usable
+from app.services.groww.contract import GROWW_CONTRACT, contract_is_usable as groww_contract_is_usable
 
 
 class BrokerSupport(str, Enum):
@@ -109,9 +111,38 @@ def _angel_spec() -> BrokerSpec:
     )
 
 
+_GROWW_ID = "groww"
+_GROWW_ALIASES = frozenset({"groww api", "growwapi"})
+_GROWW_OFF = (
+    "Groww Trading API support is in development and disabled (GROWW_ENABLED=false). "
+    "Groww can only be a Child; Master order detection is not implemented."
+)
+_GROWW_NO_CONTRACT = (
+    "Groww login is enabled, but its response contract is not verified, so it cannot be used as a Child."
+)
+
+
+def _groww_spec() -> BrokerSpec:
+    if not settings.GROWW_ENABLED:
+        return BrokerSpec(
+            id=_GROWW_ID, support=BrokerSupport.NOT_SUPPORTED, capabilities=BrokerCapabilities(),
+            order_label="GROWW", aliases=_GROWW_ALIASES, reason=_GROWW_OFF,
+            session_prefix="groww:session:", uses_vault=True,
+        )
+    child_ready = groww_contract_is_usable(GROWW_CONTRACT)
+    return BrokerSpec(
+        id=_GROWW_ID, support=BrokerSupport.PARTIAL,
+        capabilities=BrokerCapabilities(login=True, as_master=False, as_child=child_ready),
+        order_label="GROWW", aliases=_GROWW_ALIASES,
+        reason=("Child only (equity, NSE/BSE). Master order detection is not implemented." if child_ready
+                else _GROWW_NO_CONTRACT),
+        session_prefix="groww:session:", uses_vault=True,
+    )
+
+
 _NOT_YET = (
     "flattrade", "zerodha", "dhan", "fyers", "shoonya", "upstox",
-    "kotakneo", "groww", "5paisa", "icicidirect", "hdfcsky",
+    "kotakneo", "5paisa", "icicidirect", "hdfcsky",
 )
 
 _STATIC: Dict[str, BrokerSpec] = {_ALICE.id: _ALICE}
@@ -123,9 +154,11 @@ for _bid in _NOT_YET:
         reason="No adapter is implemented for this broker yet.",
     )
 
-_ALIASES: Dict[str, str] = {_ANGEL_ID: _ANGEL_ID}
+_ALIASES: Dict[str, str] = {_ANGEL_ID: _ANGEL_ID, _GROWW_ID: _GROWW_ID}
 for _a in _ANGEL_ALIASES:
     _ALIASES[_a] = _ANGEL_ID
+for _a in _GROWW_ALIASES:
+    _ALIASES[_a] = _GROWW_ID
 for _spec in _STATIC.values():
     _ALIASES[_spec.id] = _spec.id
     for _a in _spec.aliases:
@@ -148,12 +181,15 @@ def get_broker_spec(broker_id: Optional[str]) -> Optional[BrokerSpec]:
         return None
     if canonical == _ANGEL_ID:
         return _angel_spec()
+    if canonical == _GROWW_ID:
+        return _groww_spec()
     return _STATIC.get(canonical)
 
 
 def all_broker_specs() -> Dict[str, BrokerSpec]:
     out = dict(_STATIC)
     out[_ANGEL_ID] = _angel_spec()
+    out[_GROWW_ID] = _groww_spec()
     return out
 
 
@@ -184,6 +220,13 @@ def can_be_child(broker_id: Optional[str]) -> bool:
     """True only when the broker may receive copied orders. Unknown -> False."""
     spec = get_broker_spec(broker_id)
     return bool(spec and spec.capabilities.login and spec.capabilities.as_child)
+
+
+def can_be_master(broker_id: Optional[str]) -> bool:
+    """True only when the broker's orders can be detected and copied from. Today
+    that is Alice Blue alone; Angel One and Groww are Child-only."""
+    spec = get_broker_spec(broker_id)
+    return bool(spec and spec.capabilities.login and spec.capabilities.as_master)
 
 
 def order_label_for(broker_id: Optional[str]) -> str:
