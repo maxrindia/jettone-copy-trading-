@@ -111,6 +111,7 @@ def test_dispatch_builds_each_enabled_broker_its_own_client_and_never_alice(mock
     from app.services.brokers import credential_vault as vault
     monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
     monkeypatch.setattr(settings, "GROWW_ENABLED", True)
+    monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", True)
 
     def acc(broker, payload_broker, creds):
         a = _acc(broker)

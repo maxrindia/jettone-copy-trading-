@@ -117,6 +117,10 @@ _GROWW_OFF = (
     "Groww Trading API support is in development and disabled (GROWW_ENABLED=false). "
     "Groww can only be a Child; Master order detection is not implemented."
 )
+_GROWW_SETUP_ONLY = (
+    "Credential setup and login only: Groww cannot be a strategy Child or receive copied orders "
+    "(GROWW_CHILD_TRADING_ENABLED=false). Master order detection is not implemented."
+)
 _GROWW_NO_CONTRACT = (
     "Groww login is enabled, but its response contract is not verified, so it cannot be used as a Child."
 )
@@ -129,13 +133,21 @@ def _groww_spec() -> BrokerSpec:
             order_label="GROWW", aliases=_GROWW_ALIASES, reason=_GROWW_OFF,
             session_prefix="groww:session:", uses_vault=True,
         )
-    child_ready = groww_contract_is_usable(GROWW_CONTRACT)
+    # Setup/login need only GROWW_ENABLED. Child (copy) capability additionally needs the explicit
+    # GROWW_CHILD_TRADING_ENABLED opt-in AND a usable response contract.
+    child_enabled = bool(settings.GROWW_CHILD_TRADING_ENABLED)
+    child_ready = child_enabled and groww_contract_is_usable(GROWW_CONTRACT)
+    if child_ready:
+        reason = "Child only (equity, NSE/BSE). Master order detection is not implemented."
+    elif not child_enabled:
+        reason = _GROWW_SETUP_ONLY
+    else:
+        reason = _GROWW_NO_CONTRACT
     return BrokerSpec(
         id=_GROWW_ID, support=BrokerSupport.PARTIAL,
         capabilities=BrokerCapabilities(login=True, as_master=False, as_child=child_ready),
         order_label="GROWW", aliases=_GROWW_ALIASES,
-        reason=("Child only (equity, NSE/BSE). Master order detection is not implemented." if child_ready
-                else _GROWW_NO_CONTRACT),
+        reason=reason,
         session_prefix="groww:session:", uses_vault=True,
     )
 

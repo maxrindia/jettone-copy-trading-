@@ -33,6 +33,7 @@ CHILD_IP = "151.245.182.60"
 @pytest.fixture
 def groww_enabled(monkeypatch):
     monkeypatch.setattr(settings, "GROWW_ENABLED", True)
+    monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", True)
     monkeypatch.setattr(settings, "SELL_POSITION_SAFETY_BYPASS", False)
 
 
@@ -232,6 +233,7 @@ async def test_a_symbol_groww_does_not_allow_selling_is_not_placed(db_session, m
 @pytest.mark.asyncio
 async def test_an_unverified_contract_makes_the_child_ineligible(db_session, mock_redis, monkeypatch):
     monkeypatch.setattr(settings, "GROWW_ENABLED", True)
+    monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", True)
     monkeypatch.setattr(settings, "SELL_POSITION_SAFETY_BYPASS", False)
     monkeypatch.setattr("app.services.brokers.registry.GROWW_CONTRACT", GrowwContract(docs_verified=False))
     master, child = await _groww_child(db_session)

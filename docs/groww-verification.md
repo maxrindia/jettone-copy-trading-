@@ -94,8 +94,25 @@ Python SDK pages), read 2026-10-16. The same table lives in `backend/app/service
 3. Run it twice: once on a **flat account with no orders** (captures the empty shapes), once with a position and a
    few orders in different states placed manually in the Groww app.
 4. Review together. Anything that differs from the table above becomes a code change before enabling.
-5. Only then: set `GROWW_INSTRUMENT_MASTER_URL`, `GROWW_ENABLED=true` on a non-production stack first, add the
-   account, store credentials, log in, and verify with Live Trading OFF.
+5. Only then, in two separate steps (each needs a service restart and your explicit approval):
+   a. **Setup only.** `GROWW_ENABLED=true` (leave `GROWW_CHILD_TRADING_ENABLED=false`). Groww becomes selectable in
+      Add Demat Account: you can add the account, store its credentials and log in. It still cannot be a strategy
+      Child, receives no copied orders, and the registry reports it as "Credential setup and login only". Saving
+      credentials in the UI immediately attempts one login (a single token request; it needs that day's API-key
+      approval on Groww Cloud).
+   b. **Child trading.** `GROWW_CHILD_TRADING_ENABLED=true` as well, only after the capture has been reviewed, on a
+      non-production stack first, with `GROWW_INSTRUMENT_MASTER_URL` set and Live Trading OFF while verifying.
+
+## Feature flags
+
+| `GROWW_ENABLED` | `GROWW_CHILD_TRADING_ENABLED` | Result |
+|---|---|---|
+| false | any | Not supported: not selectable, no credentials, no login, no requests to Groww |
+| true | false | Setup/login only: selectable, credentials stored encrypted, explicit login; **not** a Child |
+| true | true | Child-capable (equity), subject to the response contract, static-IP and SELL-position safety checks |
+
+Both default to false. Angel One is unaffected by the Groww flags (its Child capability stays off while its
+contract is unverified).
 
 ## Deploying this change
 

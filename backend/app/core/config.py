@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     # Groww can never be a Master. Live verification (scripts/groww_capture.py)
     # is still required before enabling this in production.
     GROWW_ENABLED: bool = False
+    # Second, independent gate. GROWW_ENABLED=true alone only allows an account to be
+    # added, its credentials stored and an explicit login; a Groww account can be a
+    # strategy Child (and so receive copied orders) only when this is ALSO true.
+    GROWW_CHILD_TRADING_ENABLED: bool = False
     # Groww's instrument master (CSV). Empty = never downloaded; set it to the URL
     # in Groww's instruments documentation, or load a downloaded file instead.
     GROWW_INSTRUMENT_MASTER_URL: str = ""

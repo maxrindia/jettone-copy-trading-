@@ -36,6 +36,7 @@ SECRETS = {"api_key": "GRW-KEY-SECRET-111", "api_secret": "GRW-SECRET-SECRET-222
 @pytest.fixture
 def flag_on(monkeypatch):
     monkeypatch.setattr(settings, "GROWW_ENABLED", True)
+    monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", True)
 
 
 # ── feature flag / registry ─────────────────────────────────────────────────
@@ -182,6 +183,7 @@ async def test_manager_registers_groww_only_when_enabled_and_credentialed(db_ses
     await mgr.initialize()
     assert mgr.get_all_account_ids() == []                                    # flag off: no Groww client at all
     monkeypatch.setattr(settings, "GROWW_ENABLED", True)
+    monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", True)
     mgr = AliceBlueAccountManager()
     await mgr.initialize()
     assert mgr.get_all_account_ids() == [str(ok_acc.id)] and mgr.get_client(str(nocred.id)) is None
@@ -193,6 +195,7 @@ async def test_a_master_typed_groww_account_never_becomes_the_legacy_master(db_s
     monkeypatch.setattr("app.services.alice_blue.manager.AsyncSessionLocal", TestingSessionLocal)
     monkeypatch.setattr("app.services.alice_blue.manager.get_redis", AsyncMock(return_value=mock_redis))
     monkeypatch.setattr(settings, "GROWW_ENABLED", True)
+    monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", True)
     await _groww_account(db_session, "mastertyped", account_type=AccountType.MASTER)
     mgr = AliceBlueAccountManager()
     await mgr.initialize()
@@ -237,6 +240,7 @@ async def test_sync_account_needs_a_session_for_groww(db_session, mock_redis, fl
 @pytest.mark.parametrize("broker", ["groww", "angelone"])
 async def test_a_child_only_broker_cannot_become_a_strategy_master(db_session, monkeypatch, broker):
     monkeypatch.setattr(settings, "GROWW_ENABLED", True)
+    monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", True)
     monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
     from test_strategy_master_switching import _account
     old_master = await _account(db_session, "oldmaster")
@@ -297,6 +301,7 @@ async def test_supported_brokers_endpoint_reflects_the_groww_flag(client, monkey
     rows = {r["id"]: r for r in (await client.get("/api/v1/accounts/supported-brokers", headers=TOKEN)).json()["brokers"]}
     assert rows["groww"]["support"] == "NOT_SUPPORTED" and rows["groww"]["selectable"] is False
     monkeypatch.setattr(settings, "GROWW_ENABLED", True)
+    monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", True)
     rows = {r["id"]: r for r in (await client.get("/api/v1/accounts/supported-brokers", headers=TOKEN)).json()["brokers"]}
     assert rows["groww"]["support"] == "PARTIAL" and rows["groww"]["selectable"] is True
     assert rows["alicebluenew"]["support"] == "SUPPORTED"
