@@ -14,6 +14,7 @@ import { buildAccountUpdateBody, createSubmitGuard, runSubmit, type SubmitMode }
 import { confirmAliceBlueLogin, recordReconnectIntent, setReconnectTarget } from "@/lib/alice-blue-login";
 import Tooltip from "@/components/ui/Tooltip";
 import { isBrokerSelectable, withBrokerSupport, type CatalogEntry } from "@/lib/broker-support";
+import BrokerCapabilityStrip from "@/components/demat/BrokerCapabilityStrip";
 import { brokerLoginPath, hasAnyVaultCredential, usesVault, vaultCredentialBody, vaultCredentialProblem } from "@/lib/vault-credentials";
 
 export interface AddDematPayload {
@@ -576,6 +577,8 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
                 This broker is not supported yet. Jettone can only log in and trade Alice Blue accounts right now, so no credentials are collected here.
               </div>
             )}
+
+            {broker && <BrokerCapabilityStrip broker={broker} catalog={catalog} />}
 
             {/* Dynamic Broker Specific Credentials Section (supported brokers only) */}
             {broker && isBrokerSelectable(broker, catalog) && (

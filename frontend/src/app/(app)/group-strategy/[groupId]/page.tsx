@@ -18,6 +18,7 @@ import QuantityPolicyDialog, {
   type QuantityPolicy,
 } from "@/components/strategy/QuantityPolicyDialog";
 import Tooltip from "@/components/ui/Tooltip";
+import { childBlocker, masterBlocker, type CatalogEntry } from "@/lib/broker-support";
 
 interface DematCardItem {
   id: string;
@@ -86,11 +87,13 @@ interface BackendStrategyResponse {
  */
 function MasterCardPicker({
   accounts,
+  catalog,
   excludeAccountIds,
   selectedId,
   onSelect,
 }: {
   accounts: DematCardItem[];
+  catalog: CatalogEntry[] | null;
   excludeAccountIds: string[];
   selectedId: string | null;
   onSelect: (id: string) => void;
@@ -147,25 +150,36 @@ function MasterCardPicker({
             )}
             {eligible.map((m) => {
               const isSelected = m.id === selectedId;
+              // Display only: the engine itself refuses a Master whose broker cannot be one.
+              const blocker = isSelected ? null : masterBlocker(m.broker, catalog);
               return (
                 <button
                   key={m.id}
                   type="button"
                   role="option"
                   aria-selected={isSelected}
+                  aria-disabled={blocker ? true : undefined}
+                  disabled={Boolean(blocker)}
+                  title={blocker ?? undefined}
                   onClick={() => {
+                    if (blocker) return;
                     if (!isSelected) onSelect(m.id);
                     setOpen(false);
                   }}
                   className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors ${
-                    isSelected ? "bg-[#F3F4F6]" : "hover:bg-[#F9FAFB]"
+                    blocker ? "cursor-not-allowed opacity-60" : isSelected ? "bg-[#F3F4F6]" : "hover:bg-[#F9FAFB]"
                   }`}
                 >
                   <span
                     className={`h-2 w-2 shrink-0 rounded-full ${m.session_valid ? "bg-green-500" : "bg-gray-300"}`}
                   />
-                  <span className="min-w-0 flex-1 truncate text-xs font-semibold text-[#111111]">
-                    {m.display_name}
+                  <span className="min-w-0 flex-1 text-xs font-semibold text-[#111111]">
+                    <span className="block truncate">{m.display_name}</span>
+                    {blocker && (
+                      <span data-testid="master-blocker" className="block whitespace-normal text-[10px] font-normal leading-4 text-amber-700">
+                        Can&apos;t be a Master: {blocker}
+                      </span>
+                    )}
                   </span>
                   {isSelected && <Check className="h-3.5 w-3.5 shrink-0 text-jettone-orange" aria-hidden />}
                   <span className="shrink-0 text-[10px] text-[#9CA3AF]">{m.session_valid ? "Live" : "Offline"}</span>
@@ -195,6 +209,9 @@ export default function GroupStrategyDetailPage() {
   // Fetch Demat accounts (source of truth) & metrics
   const { data: accounts, refresh: refreshAccounts } = useEngineData<DematCardItem[]>("/accounts", 15000);
   const { data: metricsData, refresh: refreshMetrics } = useEngineData<AllMetrics>("/accounts/metrics", 15000);
+  // The engine's broker catalog (capabilities per broker). Until it loads, only Alice Blue is offered as Master/Child.
+  const { data: brokerCatalog } = useEngineData<{ brokers: CatalogEntry[] }>("/accounts/supported-brokers");
+  const catalog = brokerCatalog?.brokers ?? null;
   // Every strategy, to know which accounts already belong to ANOTHER one (an
   // account can be in one strategy at a time; the engine enforces it too).
   const { data: allStrategies, refresh: refreshAllStrategies } = useEngineData<BackendStrategyResponse[]>(
@@ -617,6 +634,7 @@ export default function GroupStrategyDetailPage() {
           {/* Master Account Card Picker (top-bar) */}
           <MasterCardPicker
             accounts={accounts ?? []}
+            catalog={catalog}
             excludeAccountIds={Array.from(takenByOtherStrategy.keys())}
             selectedId={strategy.master_account_id ?? null}
             onSelect={(id) => handleMasterChange(id)}
@@ -909,7 +927,10 @@ export default function GroupStrategyDetailPage() {
                 </div>
               ) : (
                 <div className="space-y-2.5">
-                  {availableDematAccounts.map((acc) => (
+                  {availableDematAccounts.map((acc) => {
+                    // Display only: a broker that cannot be a Child is skipped at copy time by the engine.
+                    const blocker = childBlocker(acc.broker, catalog);
+                    return (
                     <div
                       key={acc.id}
                       className="p-3.5 bg-white border border-[#E5E7EB] rounded-[10px] flex items-center justify-between gap-3 hover:border-[#111111] transition-colors"
@@ -931,18 +952,25 @@ export default function GroupStrategyDetailPage() {
                         <p className="text-[11px] font-mono text-[#6B7280] mt-0.5">
                           {acc.alice_user_id}
                         </p>
+                        {blocker && (
+                          <p data-testid="child-blocker" className="mt-1 text-[11px] leading-4 text-amber-700">
+                            Can&apos;t be added as a Child: {blocker}
+                          </p>
+                        )}
                       </div>
 
                       <button
                         onClick={() => handleAddChild(acc.id, 1.0)}
-                        disabled={addingChildId === acc.id}
+                        disabled={addingChildId === acc.id || Boolean(blocker)}
+                        title={blocker ?? undefined}
                         className="inline-flex items-center justify-center gap-1.5 h-8 px-3.5 rounded-lg border text-xs font-semibold shadow-sm transition-all active:scale-[0.98] bg-jettone-orange hover:bg-jettone-orange-hover text-white shrink-0 disabled:opacity-50 border-jettone-orange hover:border-jettone-orange-hover"
                       >
                         <Plus className="w-3.5 h-3.5" />
                         {addingChildId === acc.id ? "Adding..." : "Add"}
                       </button>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
