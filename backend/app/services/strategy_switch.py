@@ -445,6 +445,14 @@ async def run_preflight(
                 "cannot be verified. Log the account in and try again.")
             continue
 
+        if not callable(getattr(client, "get_order_book_raw", None)):
+            # This broker's client cannot supply the raw order book the preflight verifies against. Say so, and block:
+            # never treat "cannot read" as "nothing open".
+            add(blockers, "BROKER_VERIFICATION_UNAVAILABLE", acc,
+                "This account's broker does not support the order-book verification a Master switch needs, so its "
+                "working orders cannot be ruled out.")
+            continue
+
         try:
             book = await client.get_order_book_raw()
         except Exception as exc:  # never let a broker error read as "nothing open"

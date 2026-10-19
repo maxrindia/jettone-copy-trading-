@@ -544,13 +544,17 @@ async def _load_member_client(
     if not account or account.deleted_at is not None:
         raise HTTPException(status_code=404, detail="Child account not found")
 
+    # The broker is checked FIRST: positions and square-off here are Alice Blue operations, and a Groww / Angel One
+    # account keeps its credentials in the vault (no api_credential), which used to be reported as "no API
+    # credentials" - wrong advice. Alice Blue accounts take exactly the same path as before.
+    ensure_alice_blue_account(account)
+
     if not account.api_credential:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Account '{account.display_name}' ({account.alice_user_id}) has no API credentials.",
         )
 
-    ensure_alice_blue_account(account)
     client = AliceBlueClient(
         account_id=str(account.id),
         user_id=account.alice_user_id,

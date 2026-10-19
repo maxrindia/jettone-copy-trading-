@@ -138,6 +138,17 @@ def _open_positions_count(positions: Optional[Sequence[BrokerPosition]]) -> Opti
     return sum(1 for p in positions if p.net_quantity != 0)
 
 
+# Reported (as the account's single note) when its broker's client cannot supply the raw order/position books this
+# service computes P&L from. Only AliceBlueClient implements them; Groww and Angel One do not, so their accounts get an
+# UNAVAILABLE result (no fabricated figures) instead of an AttributeError that would fail the whole shared endpoint.
+PNL_NOT_SUPPORTED_NOTE = "PNL_NOT_SUPPORTED_FOR_BROKER"
+
+
+def _reads(client: Any, *method_names: str) -> bool:
+    """True when the client really provides every named read."""
+    return all(callable(getattr(client, name, None)) for name in method_names)
+
+
 class PnlService:
     def __init__(
         self,
@@ -166,6 +177,8 @@ class PnlService:
         client = self._client_provider(account_id)
         if client is None:
             return self._unavailable(account_id, day, now, None, "NO_BROKER_CLIENT")
+        if not _reads(client, "get_order_book_raw", "get_positions_raw"):
+            return self._unavailable(account_id, day, now, None, PNL_NOT_SUPPORTED_NOTE)
 
         order_rows, position_rows = await asyncio.gather(
             self._read_broker_rows(account_id, "orderbook", client.get_order_book_raw),
@@ -230,6 +243,8 @@ class PnlService:
         client = self._client_provider(account_id)
         if client is None:
             return AccountRealizedTimeline(account_id, day, PNL_STATUS_UNAVAILABLE, [], ["NO_BROKER_CLIENT"])
+        if not _reads(client, "get_order_book_raw"):
+            return AccountRealizedTimeline(account_id, day, PNL_STATUS_UNAVAILABLE, [], [PNL_NOT_SUPPORTED_NOTE])
 
         order_rows = await self._read_broker_rows(account_id, "orderbook", client.get_order_book_raw)
         if order_rows is None:

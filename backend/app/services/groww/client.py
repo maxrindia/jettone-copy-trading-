@@ -130,10 +130,31 @@ def _parse_dt(raw: Any, assume: timezone) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=assume)
 
 
+# The token response's "is this session usable" flag. The documented name (Groww curl docs, token endpoint) is
+# `isActive`; production responses have been observed carrying `active` instead (five identical HTTP-200 responses,
+# 2026-10-19: token, tokenRefId, sessionName, expiry, active - no `isActive`). Either name is read, in this order.
+ACTIVITY_KEYS = ("isActive", "active")
+
 _SAFE_KEY = re.compile(r"[A-Za-z0-9_]{1,32}")
 _SAFE_CONTENT_TYPE_CHARS = re.compile(r"[^A-Za-z0-9/+.;=_ -]")
 # Punctuation kept as-is in the expiry mask (digits become 9 and letters a); any other character becomes "?".
 _EXPIRY_MASK_SEPARATORS = frozenset("-:+./ ,()")
+
+
+def _session_active(body: Dict[str, Any]) -> Tuple[bool, str]:
+    """(usable, flag names read). Usable only when at least one activity flag is present AND every flag present is
+    literally the boolean True. A missing flag, False, None, 1, "true" or any other value is refused, and so is a
+    response where two flags disagree. Nothing is inferred from HTTP 200 alone."""
+    present = {k: body[k] for k in ACTIVITY_KEYS if k in body}
+    if not present:
+        return False, "none"
+    return all(v is True for v in present.values()), "+".join(present)
+
+
+def _activity_flags(body: Dict[str, Any]) -> Dict[str, Any]:
+    """The activity flags for diagnostics: a boolean's VALUE is shown (true/false is not a secret); anything else only
+    by type."""
+    return {k: (body[k] if isinstance(body[k], bool) else type(body[k]).__name__) for k in ACTIVITY_KEYS if k in body}
 
 
 def _safe_key(key: Any, redacted: List[str]) -> str:
@@ -382,8 +403,9 @@ class GrowwClient:
         if not isinstance(token, str) or not token:
             self._log_unusable_token_response("no token", data, resp)
             raise GrowwAuthError("token response contained no token")
-        if body.get("isActive") is not True:
-            self._log_unusable_token_response("isActive is not true", data, resp)
+        active, flag_names = _session_active(body)
+        if not active:
+            self._log_unusable_token_response("session activity flag is not boolean true", data, resp)
             raise GrowwAuthError("Groww reports the session is not active")
         try:
             ttl = self._session_ttl(body.get("expiry"))
@@ -392,7 +414,7 @@ class GrowwClient:
             raise
         blob = json.dumps({"token": token, "at": self._clock().isoformat()})
         await self.redis.set(self.session_key, encrypt_secret(blob), ex=ttl)
-        logger.info(f"[{self.account_id}] Groww session established.")
+        logger.info(f"[{self.account_id}] Groww session established (activity flag: {flag_names}; ttl={ttl}s).")
 
     def _log_unusable_token_response(self, reason: str, data: Dict[str, Any], resp: httpx.Response) -> None:
         """Groww answered 200 but the token response failed a check. Record WHY, what kind of body it was, its
@@ -400,9 +422,11 @@ class GrowwClient:
         Logged: the fixed `reason`, the HTTP status, a sanitized Content-Type, the body kind, safe key names with
         value types, and a digit/letter mask of `expiry`. Never logged: any value (token, expiry, ids), the body,
         headers, credentials, or a key name that could be a secret."""
+        body = data.get("payload") if isinstance(data.get("payload"), dict) else data
         logger.warning(
             f"[{self.account_id}] Groww token response not usable ({reason}); http={resp.status_code} "
-            f"content_type={_safe_content_type(resp)!r} body={_body_kind(resp)} shape={_shape_of(data)}"
+            f"content_type={_safe_content_type(resp)!r} body={_body_kind(resp)} flags={_activity_flags(body)} "
+            f"shape={_shape_of(data)}"
         )
 
     async def get_session(self, force_refresh: bool = False) -> str:

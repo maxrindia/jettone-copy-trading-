@@ -111,12 +111,12 @@ async def test_an_unsupported_broker_fails_closed(client, db_session, mock_redis
 
 UNUSABLE = [
     ("no_token", {"isActive": True, "expiry": "2026-10-20T06:00:00"}, "no token"),
-    ("inactive", {"token": SECRET_TOKEN, "isActive": False, "expiry": "2026-10-20T06:00:00"}, "isActive is not true"),
-    ("isActive_as_string", {"token": SECRET_TOKEN, "isActive": "true", "expiry": "2026-10-20T06:00:00"}, "isActive is not true"),
+    ("inactive", {"token": SECRET_TOKEN, "isActive": False, "expiry": "2026-10-20T06:00:00"}, "session activity flag is not boolean true"),
+    ("isActive_as_string", {"token": SECRET_TOKEN, "isActive": "true", "expiry": "2026-10-20T06:00:00"}, "session activity flag is not boolean true"),
     ("expiry_as_epoch_number", {"token": SECRET_TOKEN, "isActive": True, "expiry": 1792476000}, "no readable expiry"),
     ("expiry_other_format", {"token": SECRET_TOKEN, "isActive": True, "expiry": "20/10/2026 06:00"}, "no readable expiry"),
     ("already_expired", {"token": SECRET_TOKEN, "isActive": True, "expiry": "2026-10-15T06:00:00"}, "already expired"),
-    ("nested_payload", {"status": "SUCCESS", "payload": {"token": SECRET_TOKEN, "isActive": False}}, "isActive is not true"),
+    ("nested_payload", {"status": "SUCCESS", "payload": {"token": SECRET_TOKEN, "isActive": False}}, "session activity flag is not boolean true"),
 ]
 
 
@@ -528,3 +528,157 @@ async def test_the_snapshot_helper_would_notice_a_change(db_session):
         await s.commit()
     changed, added, removed = changes_between(before, await dump_state())
     assert any(table == "strategy_members" for table, _ in changed) and added == [] and removed == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+# Token response contract: documented (`isActive`) vs observed in production (`active`)
+#
+# Evidence (see docs/groww-verification.md):
+#   documented  Groww curl docs, token endpoint: token, tokenRefId, sessionName, expiry (ISO, example without a
+#               timezone), isActive (Boolean, "Token status"); no status/payload wrapper.
+#   observed    five identical HTTP-200 application/json responses in production on 2026-10-19: the same keys but
+#               `active` (bool) instead of `isActive`. The VALUE of `active` in those responses is not known.
+# The activity flag is accepted under either name, but only as the literal boolean True.
+# ═══════════════════════════════════════════════════════════════════════════════════════════════
+FUTURE = "2026-10-17T06:00:00"          # fixed clock in the test client is 2026-10-16 04:00Z
+
+
+def token_body(**over):
+    base = {"token": SECRET_TOKEN, "tokenRefId": "ref-123", "sessionName": "jettone", "expiry": FUTURE}
+    base.update(over)
+    return {k: v for k, v in base.items() if v is not ...}
+
+
+@pytest.mark.asyncio
+async def test_the_documented_shape_with_isActive_true_logs_in(mock_redis):
+    c = client_returning(mock_redis, json_body=token_body(isActive=True), headers=JSON_CT)
+    await c.login()
+    assert c.session_key in mock_redis._storage
+
+
+@pytest.mark.asyncio
+async def test_the_observed_shape_with_active_true_logs_in(mock_redis, caplog):
+    c = client_returning(mock_redis, json_body=token_body(active=True), headers=JSON_CT)
+    with caplog.at_level(logging.INFO, logger="groww_client"):
+        await c.login()
+    assert c.session_key in mock_redis._storage
+    info = "\n".join(r.getMessage() for r in caplog.records if "session established" in r.getMessage())
+    assert "activity flag: active" in info and "ttl=" in info
+    assert SECRET_TOKEN not in info and FUTURE not in info                        # the TTL is logged, never the expiry or token
+
+
+@pytest.mark.asyncio
+async def test_the_observed_shape_inside_a_payload_wrapper_also_works(mock_redis):
+    c = client_returning(mock_redis, json_body={"status": "SUCCESS", "payload": token_body(active=True)}, headers=JSON_CT)
+    await c.login()
+    assert c.session_key in mock_redis._storage
+
+
+ACTIVITY_CASES = [
+    # (name, extra keys, should_log_in)
+    ("isActive_true", dict(isActive=True), True),
+    ("active_true", dict(active=True), True),
+    ("both_true", dict(isActive=True, active=True), True),
+    ("isActive_false", dict(isActive=False), False),
+    ("active_false", dict(active=False), False),
+    ("both_false", dict(isActive=False, active=False), False),
+    ("documented_true_observed_false", dict(isActive=True, active=False), False),    # disagreement is refused
+    ("documented_false_observed_true", dict(isActive=False, active=True), False),
+    ("neither_flag", dict(), False),
+    ("active_null", dict(active=None), False),
+    ("active_string_true", dict(active="true"), False),
+    ("active_one", dict(active=1), False),
+    ("active_zero", dict(active=0), False),
+    ("active_list", dict(active=[True]), False),
+    ("isActive_string", dict(isActive="true"), False),
+    ("isActive_one", dict(isActive=1), False),
+    ("isActive_true_but_active_string", dict(isActive=True, active="yes"), False),
+    ("an_unrelated_is_active_key", {"is_active": True, "Active": True, "ACTIVE": True}, False),   # exact names only
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,extra,ok", ACTIVITY_CASES, ids=[c[0] for c in ACTIVITY_CASES])
+async def test_only_a_literal_boolean_true_activity_flag_is_accepted(mock_redis, caplog, name, extra, ok):
+    c = client_returning(mock_redis, json_body=token_body(**extra), headers=JSON_CT)
+    if ok:
+        await c.login()
+        assert c.session_key in mock_redis._storage
+    else:
+        text, err = await login_and_capture(c, caplog)
+        assert err == "Groww reports the session is not active"                    # the existing message, unchanged
+        assert c.session_key not in mock_redis._storage                           # a refused response never creates a session
+        assert_clean(text, err, extra=(FUTURE,))
+
+
+@pytest.mark.asyncio
+async def test_a_false_flag_is_visible_in_the_diagnostic_so_the_unknown_value_can_be_established(mock_redis, caplog):
+    c = client_returning(mock_redis, json_body=token_body(active=False), headers=JSON_CT)
+    text, _ = await login_and_capture(c, caplog)
+    assert "flags={'active': False}" in text
+    assert "'active': 'bool'" in text                                             # shape still shows the type
+
+
+@pytest.mark.asyncio
+async def test_a_non_boolean_flag_is_shown_by_type_only(mock_redis, caplog):
+    c = client_returning(mock_redis, json_body=token_body(active="SENTINEL-FLAG-VALUE"), headers=JSON_CT)
+    text, err = await login_and_capture(c, caplog)
+    assert "flags={'active': 'str'}" in text
+    assert_clean(text, err, extra=("SENTINEL-FLAG-VALUE",))
+
+
+@pytest.mark.asyncio
+async def test_a_missing_flag_is_reported_as_no_flags(mock_redis, caplog):
+    c = client_returning(mock_redis, json_body=token_body(), headers=JSON_CT)
+    text, _ = await login_and_capture(c, caplog)
+    assert "flags={}" in text
+
+
+# ── the other token checks are untouched ─────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body,error", [
+    (token_body(active=True, token=...), "token response contained no token"),
+    (token_body(active=True, token=""), "token response contained no token"),
+    (token_body(active=True, token=12345), "token response contained no token"),
+    (token_body(active=True, expiry=...), "token response has no readable expiry"),
+    (token_body(active=True, expiry=None), "token response has no readable expiry"),
+    (token_body(active=True, expiry="17/10/2026 06:00"), "token response has no readable expiry"),
+    (token_body(active=True, expiry=1792476000), "token response has no readable expiry"),
+    (token_body(active=True, expiry="1792476000"), "token response has no readable expiry"),
+    (token_body(active=True, expiry="2026-10-15T06:00:00"), "token response is already expired"),
+], ids=["no_token", "empty_token", "numeric_token", "no_expiry", "null_expiry", "dmy_expiry", "epoch_int", "epoch_str", "expired"])
+async def test_token_and_expiry_validation_is_unchanged_when_the_flag_is_true(mock_redis, caplog, body, error):
+    c = client_returning(mock_redis, json_body=body, headers=JSON_CT)
+    text, err = await login_and_capture(c, caplog)
+    assert err == error and c.session_key not in mock_redis._storage
+    assert_clean(text, err)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expiry,expected", [
+    ("2026-10-17T06:00:00", 73800),            # no offset: the EARLIER of the IST and UTC readings (06:00 IST = 00:30Z -> 20.5 h)
+    ("2026-10-17T06:00:00+05:30", 73800),      # explicit offset is honoured
+    ("2026-10-17T06:00:00Z", 86400),           # explicit UTC reads 26 h, capped at 24 h
+])
+async def test_the_expiry_timezone_rule_is_conservative_and_unchanged(mock_redis, expiry, expected):
+    """No timezone is stated in the documentation or observed in responses, so none is assumed: an offset-less expiry
+    is trusted only until the earlier of its two readings, and no session outlives 24 hours."""
+    c = client_returning(mock_redis, json_body=token_body(active=True, expiry=expiry), headers=JSON_CT)
+    await c.login()
+    ttl = c._session_ttl(expiry)
+    assert ttl == expected
+
+
+@pytest.mark.asyncio
+async def test_the_observed_failure_is_now_a_session_when_and_only_when_active_is_true(mock_redis):
+    """The exact observed production keys (five identical HTTP-200 responses on 2026-10-19)."""
+    observed = {"token": SECRET_TOKEN, "tokenRefId": "r", "sessionName": "s", "expiry": FUTURE}
+    ok = client_returning(mock_redis, json_body={**observed, "active": True}, headers=JSON_CT)
+    await ok.login()
+    assert ok.session_key in mock_redis._storage
+    mock_redis._storage.clear()
+    bad = client_returning(mock_redis, json_body={**observed, "active": False}, headers=JSON_CT)
+    with pytest.raises(GrowwAuthError):
+        await bad.login()
+    assert bad.session_key not in mock_redis._storage

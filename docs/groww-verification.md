@@ -11,7 +11,7 @@ Python SDK pages), read 2026-10-16. The same table lives in `backend/app/service
 | Area | Used as documented |
 |---|---|
 | Base / headers | `https://api.groww.in/v1/...`; `Accept: application/json`, `Authorization: Bearer <token>`, `X-API-VERSION: 1.0` |
-| Session | `POST /v1/token/api/access`, `key_type: "approval"`, `checksum = SHA-256(secret + timestamp)`, `timestamp` = epoch seconds; response `token`, `expiry`, `isActive`. The API key must be **approved on Groww Cloud each day** first |
+| Session | `POST /v1/token/api/access`, `key_type: "approval"`, `checksum = SHA-256(secret + timestamp)`, `timestamp` = epoch seconds; response `token`, `tokenRefId`, `sessionName`, `expiry`, `isActive` (documented) - **production returns `active` instead**, see "Token response" below. The API key must be **approved on Groww Cloud each day** first |
 | Orders | `POST /v1/order/create`, `/modify`, `/cancel`; `GET /v1/order/list`, `/detail/{id}`, `/status/reference/{ref}`; fields `trading_symbol, quantity, price, trigger_price, validity, exchange, segment, product, order_type, transaction_type, order_reference_id` |
 | Vocabularies | exchange NSE/BSE; segment CASH/FNO; product CNC/MIS/NRML; order type LIMIT/MARKET/SL/SL_M; BUY/SELL; validity DAY; the 12 order statuses |
 | Positions | `GET /v1/positions/user?segment=CASH` → `payload.positions[]` (`trading_symbol, exchange, segment, product, quantity ("Net quantity"), net_price, symbol_isin, ...`) |
@@ -74,6 +74,22 @@ Python SDK pages), read 2026-10-16. The same table lives in `backend/app/service
    via the reference map; Angel One cannot be matched and stays a manual review). Nothing is ever resent. The MARKET
    path behaves the same way, and an `UNKNOWN` result (RetryPolicy: `place_order` raised) is treated as unresolved too,
    with a fixed sanitized reason instead of the raw exception text.
+
+## Token response: documented vs observed (2026-10-19)
+
+| | Documented (Groww curl docs, token endpoint) | Observed in production |
+|---|---|---|
+| Keys | `token`, `tokenRefId`, `sessionName`, `expiry`, `isActive` | `token`, `tokenRefId`, `sessionName`, `expiry`, **`active`** - five identical HTTP-200 `application/json` responses; no `isActive`, no `status`/`payload` wrapper |
+| Activity flag | `isActive`, Boolean, "Token status" | `active`, boolean - **its value is not known**: the first diagnostics logged only its type |
+| `expiry` | "ISO format"; the example (`2024-07-01T12:34:56`) carries no timezone; no timezone is stated | a string with the same shape (`YYYY-MM-DDTHH:MM:SS`); never reached validation, so unverified |
+
+Jettone accepts the activity flag under either name, only when it is the literal boolean `True` (a missing flag, `False`,
+`None`, `1`, `"true"`, or two flags that disagree are all refused). The next diagnostic line shows the flag's boolean value, and
+a successful login logs the activity-flag name and the computed `ttl` (never the token or the expiry). Expiry handling is
+unchanged and deliberately conservative: an offset-less expiry is trusted only until the earlier of its IST and UTC readings,
+and no session outlives 24 hours. Open: the real timezone and exact lifetime (the docs mention an "expires daily at 6:00 AM"
+for the access-token approach, timezone unstated) - to be settled from the first successful login's logged `ttl`. Not
+established: whether the Groww SDK (`growwapi` 1.5.0, not installed here) reads `active` or `isActive`.
 
 ## Safe next step (needs the account owner)
 

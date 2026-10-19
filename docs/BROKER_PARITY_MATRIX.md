@@ -79,7 +79,7 @@ Legend: **Yes** implemented and tested offline; **Gated** implemented but switch
 ## 7. Features that exist only around Alice Blue (outside the adapter)
 | Feature | Where | Groww | Angel One |
 |---|---|---|---|
-| P&L service (raw order book, raw/detail positions) | `pnl/service.py`, `pnl/broker_data.py` | No | No |
+| P&L service (raw order book, raw/detail positions) | `pnl/service.py`, `pnl/broker_data.py` | No - explicit `PNL_NOT_SUPPORTED_FOR_BROKER` (UNAVAILABLE, nothing fabricated); it used to crash the shared dashboard endpoints with HTTP 500 | Same |
 | Strategy "square off" action | `api/strategies.py` | No | No |
 | Master switch preflight | `strategy_switch.py` | No | No |
 | WebSocket feed | `alice_blue/websocket.py` | N/A | N/A |
