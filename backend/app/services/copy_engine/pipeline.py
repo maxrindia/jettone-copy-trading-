@@ -845,7 +845,39 @@ class CopyEnginePipeline:
         internal_child_ord_id = f"JT_CH_{event.master_order_id[:16]}_{str(acc_id)[:8]}"
         client_order_id = f"JT_LIM_{event.master_order_id[:16]}_{str(acc_id)[:8]}"
 
-        # Step 1: Pre-write child Order in PENDING status
+        # Step 1: Claim the event with its CopyTrade uniqueness record BEFORE anything else is written or
+        # sent, exactly as the MARKET path does. The unique constraint on (master_order_id,
+        # follower_account_id, copy_event_id) is the authority on "already handled": if Redis dedupe was
+        # bypassed (flush, key expiry) a redelivered event stops HERE - it must not overwrite the existing
+        # child Order (save_or_update_order is an upsert) and must not reach the broker a second time.
+        copy_event_uuid = derive_copy_event_id(event.master_order_id, str(acc_id), 1)
+        async with AsyncSessionLocal() as session:
+            ct = CopyTrade(
+                id=uuid.uuid4(),
+                master_order_id=event.master_order_id,
+                follower_account_id=acc_id,
+                copy_event_id=copy_event_uuid,
+                symbol=event.symbol,
+                exchange=event.exchange,
+                side=OrderSide.BUY if event.side == "BUY" else OrderSide.SELL,
+                quantity=target_qty,
+                product_type=event.product_type,
+                estimated_price=limit_price,
+                client_order_id=client_order_id,
+                status=CopyTradeStatus.PENDING,
+            )
+            session.add(ct)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                logger.info(
+                    f"[Pipeline] Duplicate LIMIT copy detected for master_order_id={event.master_order_id}, "
+                    f"follower={acc_id}. Skipping: nothing written, nothing sent."
+                )
+                return {"status": "SKIPPED", "reason": "DUPLICATE_EVENT"}
+
+        # Step 2: Pre-write child Order in PENDING status
         child_order = await self.save_or_update_order(
             internal_order_id=internal_child_ord_id,
             broker_order_id=None,
@@ -866,31 +898,7 @@ class CopyEnginePipeline:
             correlation_id=f"{event.master_order_id}:{acc_id}",
         )
 
-        # Also write CopyTrade record for backward compatibility
-        copy_event_uuid = derive_copy_event_id(event.master_order_id, str(acc_id), 1)
-        async with AsyncSessionLocal() as session:
-            try:
-                ct = CopyTrade(
-                    id=uuid.uuid4(),
-                    master_order_id=event.master_order_id,
-                    follower_account_id=acc_id,
-                    copy_event_id=copy_event_uuid,
-                    symbol=event.symbol,
-                    exchange=event.exchange,
-                    side=OrderSide.BUY if event.side == "BUY" else OrderSide.SELL,
-                    quantity=target_qty,
-                    product_type=event.product_type,
-                    estimated_price=limit_price,
-                    client_order_id=client_order_id,
-                    status=CopyTradeStatus.PENDING,
-                )
-                session.add(ct)
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                logger.info(f"[Pipeline] CopyTrade record already exists for {event.master_order_id}:{acc_id}")
-
-        # Step 2: Submit LIMIT order to Child Broker
+        # Step 3: Submit LIMIT order to Child Broker
         if not client:
             return {"status": "REJECTED", "reason": "NO_CLIENT"}
 
@@ -922,7 +930,7 @@ class CopyEnginePipeline:
         await self._stamp_submitted(client_order_id)
         order_res = await self.retry_policy.execute(client.place_order, order_req)
 
-        # Step 3: Update Child Order record with Broker result
+        # Step 4: Update Child Order record with Broker result
         unresolved = is_ambiguous_send(order_res)
         if order_res.category == OrderResultCategory.SUCCESS:
             final_status = OrderStatus.OPEN
@@ -1320,7 +1328,38 @@ class CopyEnginePipeline:
         client_order_id = f"JT_SL_{event.master_order_id[:16]}_{str(acc_id)[:8]}"
         child_order_type = "SL" if event.order_type.upper() == "SL" else "SLM"
 
-        # Step 1: Pre-write child Order in PENDING status - the follower's
+        # Step 1: Claim the event with its CopyTrade uniqueness record BEFORE anything else is written or
+        # sent, exactly as the MARKET path does (see _process_single_limit_follower): a redelivered event
+        # whose Redis dedupe was bypassed stops HERE - it must not overwrite the existing child Order
+        # (save_or_update_order is an upsert) and must not reach the broker a second time.
+        copy_event_uuid = derive_copy_event_id(event.master_order_id, str(acc_id), 1)
+        async with AsyncSessionLocal() as session:
+            ct = CopyTrade(
+                id=uuid.uuid4(),
+                master_order_id=event.master_order_id,
+                follower_account_id=acc_id,
+                copy_event_id=copy_event_uuid,
+                symbol=event.symbol,
+                exchange=event.exchange,
+                side=OrderSide.BUY if event.side == "BUY" else OrderSide.SELL,
+                quantity=target_qty,
+                product_type=event.product_type,
+                estimated_price=trigger_price if trigger_price > 0 else sl_price,
+                client_order_id=client_order_id,
+                status=CopyTradeStatus.PENDING,
+            )
+            session.add(ct)
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                logger.info(
+                    f"[Pipeline] Duplicate SL copy detected for master_order_id={event.master_order_id}, "
+                    f"follower={acc_id}. Skipping: nothing written, nothing sent."
+                )
+                return {"status": "SKIPPED", "reason": "DUPLICATE_EVENT"}
+
+        # Step 2: Pre-write child Order in PENDING status - the follower's
         # own SL is, from this point, ALSO TRIGGER_PENDING at the broker,
         # exactly mirroring the master's own pending state.
         await self.save_or_update_order(
@@ -1344,30 +1383,7 @@ class CopyEnginePipeline:
             correlation_id=f"{event.master_order_id}:{acc_id}",
         )
 
-        copy_event_uuid = derive_copy_event_id(event.master_order_id, str(acc_id), 1)
-        async with AsyncSessionLocal() as session:
-            try:
-                ct = CopyTrade(
-                    id=uuid.uuid4(),
-                    master_order_id=event.master_order_id,
-                    follower_account_id=acc_id,
-                    copy_event_id=copy_event_uuid,
-                    symbol=event.symbol,
-                    exchange=event.exchange,
-                    side=OrderSide.BUY if event.side == "BUY" else OrderSide.SELL,
-                    quantity=target_qty,
-                    product_type=event.product_type,
-                    estimated_price=trigger_price if trigger_price > 0 else sl_price,
-                    client_order_id=client_order_id,
-                    status=CopyTradeStatus.PENDING,
-                )
-                session.add(ct)
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                logger.info(f"[Pipeline] CopyTrade record already exists for {event.master_order_id}:{acc_id}")
-
-        # Step 2: Submit SL/SL-M order to Child Broker
+        # Step 3: Submit SL/SL-M order to Child Broker
         if not client:
             return {"status": "REJECTED", "reason": "NO_CLIENT"}
 
@@ -1396,7 +1412,7 @@ class CopyEnginePipeline:
         await self._stamp_submitted(client_order_id)
         order_res = await self.retry_policy.execute(client.place_order, order_req)
 
-        # Step 3: Update Child Order record with Broker result. PENDING
+        # Step 4: Update Child Order record with Broker result. PENDING
         # (not OPEN) on success - the follower's own SL is now sitting
         # TRIGGER_PENDING at the broker too, tracked independently from
         # here (FollowerFillSyncer observes its own eventual trigger/fill;
