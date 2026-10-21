@@ -46,8 +46,9 @@ logger = logging.getLogger("copy_engine_pipeline")
 # sending and got no usable answer. UNKNOWN: produced only by RetryPolicy after place_order RAISED on every
 # attempt - an exception can follow a request the broker already accepted. Neither proves the order was not
 # placed, so neither may be recorded as a rejection or failure; both wait for the sweeper's order-book
-# reconciliation. NETWORK_ERROR is deliberately not here: adapters return it only for failures that prove
-# the request never left (and it is the one category the retry policy re-sends).
+# reconciliation. NETWORK_ERROR is deliberately not here: every adapter - Alice Blue included, since the
+# R2A fix - returns it only for failures that prove the request never left (brokers/transport.py), and it
+# is the one category the retry policy re-sends.
 AMBIGUOUS_SEND_CATEGORIES = frozenset({OrderResultCategory.TIMEOUT, OrderResultCategory.UNKNOWN})
 UNKNOWN_OUTCOME_REASON = "Order submission outcome unknown after an unexpected error; verify at the broker"
 

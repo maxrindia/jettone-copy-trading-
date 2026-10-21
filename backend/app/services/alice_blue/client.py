@@ -28,6 +28,7 @@ from app.services.alice_blue.types import (
     Position,
     ProductType,
 )
+from app.services.brokers.transport import SendState, is_provably_not_sent
 
 logger = logging.getLogger("alice_blue_client")
 
@@ -171,13 +172,25 @@ class AliceBlueClient:
         except Exception as e:
             logger.error(f"[{self.account_id}] Failed to set offline state in DB: {e}")
 
-    async def _request_with_reauth(self, method: str, path: str, **kwargs) -> httpx.Response:
+    async def _request_with_reauth(
+        self, method: str, path: str, *, state: Optional[SendState] = None, **kwargs
+    ) -> httpx.Response:
         """
         Executes a REST call; on a session-expiry response it re-authenticates
         once (force_refresh) and retries exactly once. A second auth failure
         raises SessionExpiredError instead of being swallowed as empty data.
+
+        `state` (order creation only): set to sent=True immediately before each request is
+        issued, so a caller can tell a failure BEFORE the request left (safe to retry) from
+        one AFTER it (the broker may already hold the order). It is never reset. A session
+        rejection (_is_auth_failure) surfaces as SessionExpiredError, which place_order lets
+        propagate unchanged, i.e. it is treated as "the order was not taken". The flag stays True
+        so that any OTHER error raised afterwards (for example during re-authentication) is
+        still handled as an ambiguous outcome, never as a retryable one.
         """
         headers = await self._get_headers()
+        if state is not None:
+            state.sent = True
         resp = await self._http.request(method, f"{self.A3_BASE_URL}{path}", headers=headers, **kwargs)
         if not self._is_auth_failure(resp):
             return resp
@@ -193,6 +206,8 @@ class AliceBlueClient:
             )
 
         headers = await self._get_headers()
+        if state is not None:
+            state.sent = True
         resp = await self._http.request(method, f"{self.A3_BASE_URL}{path}", headers=headers, **kwargs)
         if self._is_auth_failure(resp):
             await self._invalidate_db_session()
@@ -717,13 +732,21 @@ class AliceBlueClient:
         logger.info(f"[{self.account_id}] Alice Blue A3 Outgoing Payload (non-secret): {json.dumps(payload)}")
 
         now = datetime.now(timezone.utc)
+        # Only a failure that PROVES the request never left may be reported as NETWORK_ERROR, the one
+        # category RetryPolicy re-sends. Everything after the send is ambiguous (TIMEOUT: never resent,
+        # reconciled by the stale-order sweeper) - see brokers/transport.py.
+        state = SendState()
         try:
             resp = await self._request_with_reauth(
                 "POST",
                 "/open-api/od/v1/orders/placeorder",
                 json=payload,
                 timeout=5.0,  # Strict timeout
+                state=state,
             )
+        except AuthenticationError:
+            raise  # unchanged: an auth failure is treated as "order not taken"; it propagates, and RetryPolicy
+            #        may re-send (each attempt is answered with an auth failure - see _is_auth_failure)
         except httpx.TimeoutException:
             logger.error(f"[{self.account_id}] Timeout executing order {order.client_order_id}")
             return OrderResult(
@@ -735,16 +758,57 @@ class AliceBlueClient:
                 timestamp=now,
             )
         except httpx.RequestError as exc:
-            logger.error(f"[{self.account_id}] Network error executing order {order.client_order_id}: {exc}")
-            return OrderResult(
-                category=OrderResultCategory.NETWORK_ERROR,
-                client_order_id=order.client_order_id,
-                broker_order_id=None,
-                message=f"Network error communicating with broker: {exc}",
-                raw_response={},
-                timestamp=now,
+            if is_provably_not_sent(exc):
+                logger.error(f"[{self.account_id}] Network error executing order {order.client_order_id}: {exc}")
+                return OrderResult(
+                    category=OrderResultCategory.NETWORK_ERROR,
+                    client_order_id=order.client_order_id,
+                    broker_order_id=None,
+                    message=f"Network error communicating with broker: {exc}",
+                    raw_response={},
+                    timestamp=now,
+                )
+            logger.error(
+                f"[{self.account_id}] Transport error after sending order {order.client_order_id} "
+                f"({type(exc).__name__}); outcome unknown, not retried"
             )
+            return self._ambiguous_send(order, now, f"{type(exc).__name__} after send")
+        except Exception as exc:
+            if state.sent:
+                logger.error(
+                    f"[{self.account_id}] Unexpected {type(exc).__name__} after sending order "
+                    f"{order.client_order_id}; outcome unknown, not retried"
+                )
+                return self._ambiguous_send(order, now, f"{type(exc).__name__} after send")
+            raise  # nothing was sent: unchanged (a retry cannot duplicate an order)
 
+        # The request has gone out: from here an exception must never reach RetryPolicy, which would
+        # answer it by sending the order again.
+        try:
+            return self._interpret_place_response(order, resp, now)
+        except Exception as exc:
+            logger.error(
+                f"[{self.account_id}] Unreadable response for order {order.client_order_id} "
+                f"(HTTP {resp.status_code}, {type(exc).__name__}); outcome unknown, not retried"
+            )
+            return self._ambiguous_send(order, now, f"unreadable response, HTTP {resp.status_code}")
+
+    @staticmethod
+    def _ambiguous_send(order: OrderRequest, now: datetime, why: str) -> OrderResult:
+        """The order may or may not exist at Alice Blue. TIMEOUT is never re-sent by RetryPolicy and is
+        picked up by the pipeline's unresolved-send handling; nothing here may ever resend the create."""
+        return OrderResult(
+            category=OrderResultCategory.TIMEOUT,
+            client_order_id=order.client_order_id,
+            broker_order_id=None,
+            message=f"Order submission outcome unknown ({why}); not resent - reconcile at the broker",
+            raw_response={},
+            timestamp=now,
+        )
+
+    def _interpret_place_response(self, order: OrderRequest, resp: httpx.Response, now: datetime) -> OrderResult:
+        """Turns the placeorder HTTP response into an OrderResult. Moved unchanged out of place_order so
+        that any failure to read it can be caught by the caller as an AMBIGUOUS outcome."""
         raw_data = resp.json() if resp.status_code in (200, 400, 422) else {}
         logger.info(f"[{self.account_id}] Alice Blue A3 Response HTTP {resp.status_code}: {raw_data}")
 
