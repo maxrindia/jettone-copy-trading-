@@ -188,10 +188,10 @@ classDiagram
 
 | Candidate | Keep? | Why |
 |---|---|---|
-| `BrokerAdapter` | Yes, thin | Identity, capability profile, session status. Not a god-interface: each role is a separate interface, so a Child-only broker never has to fake Master methods. |
+| `BrokerAdapter` | Yes, thin — **deferred beyond R1** | Identity, capability profile, session status. Not a god-interface: each role is a separate interface, so a Child-only broker never has to fake Master methods. R1 delivers the capability profile (`brokers/profiles.py`) and the role interfaces; the identity/profile/session wrapper is added in a later phase, when something consumes it. |
 | `MasterOrderSource` | Yes | Wraps today's `get_order_book()` for `MasterOrderPoller` and the optional Alice WS stream. Must return **Unknown** (not empty) on a failed read. |
 | `ChildOrderExecutor` | Yes | `place/modify/cancel` with a three-valued `SubmitResult`. `UNKNOWN` is first-class so no adapter can hide an ambiguous send as a retryable error. |
-| `OrderStatusProvider` | Yes | Separate from the executor because fill sync and reconciliation need it without placing orders. `find_by_client_reference` only for brokers that send a reference (Groww today). |
+| `OrderStatusProvider` | Yes | Queries **one specific order** (by broker id or client reference); reading the whole order book is `MasterOrderSource`, a different thing. Separate from the executor because fill sync and reconciliation need it without placing orders. `find_by_client_reference` only for brokers that send a reference (Groww today). **No client exposes a public method like this yet**: Groww has a private `_lookup_by_reference` used internally for ambiguous creates, which is deliberately not treated as a public capability. |
 | `PositionProvider` | Yes | Maps to `get_positions_or_none()`; `holdings()` optional and **unverified for every broker** in the repo. |
 | `FundsProvider` | Yes | Maps to `get_funds()`; Unknown = fail closed. |
 | `InstrumentMapper` | Yes — the key new piece | Cross-broker copies need canonical instrument identity; a Master broker's token means nothing to another broker (already acknowledged in `risk_inputs.py` ~263). |
@@ -199,6 +199,35 @@ classDiagram
 Implementation note: the first step is to declare these as `typing.Protocol`s that the **existing** client classes
 already satisfy (structural typing), so Alice Blue behaviour is untouched. Wrapper adapters are added only where a
 method's semantics differ (e.g. Unknown vs empty).
+
+### R1 status: structural conformance is not eligibility
+
+R1 declares the Protocols and the capability profiles (`backend/app/services/brokers/{interfaces,capabilities,profiles}.py`)
+and wires nothing; the pipeline keeps calling the clients exactly as before until R4.
+
+- **`isinstance` proves names only.** The Protocols are `runtime_checkable`, which checks that attribute names
+  exist, not signatures. Signature conformance of the real clients, and the pipeline's real call shapes, are
+  checked separately with `inspect.signature`. Known, unavoidable client differences (`place_order`'s parameter
+  name; the `modify_order` signature default for `product_type`, `MIS` on Alice and `None` elsewhere; Angel One's
+  `variety`; Alice's `max_cache_age_sec`) are documented in `interfaces.py` and pinned by tests. The `product_type`
+  default is not a behavioural difference for Alice Blue: its `modify_order` body ignores the parameter and sends no
+  product field, and the pipeline omits it. Angel One is different: its modify requires a product (07 §7.2).
+- **A Child-only broker's client may structurally satisfy `MasterOrderSource`.** Groww and Angel One expose
+  `get_order_book`, so they satisfy it by name. That grants nothing: the role is decided by the registry gates and
+  the contracts' `master_verified` flag and is recorded in the capability profile. The design's earlier wording
+  "Child-only brokers do not claim `MasterOrderSource`" means the **profile and registry do not claim the Master
+  role**, not that the class lacks the method. The cross-check between the two is a test, not a type.
+- **Evidence and gates are separate inputs.** A profile records a `Verification` level per feature; the gates
+  mirror the registry. The design bar for a role is: every required feature `VERIFIED_LIVE` **and** the gate open
+  (Child: placement, modify, cancel, order status, positions, funds; Master: Master detection and order status).
+- **Evidence ceilings.** Each non-Alice feature has an explicit ceiling in `profiles.py`. A contract flag can
+  lower a rating but never raise it past the ceiling, so `GrowwContract.live_verified` (response shapes seen on a
+  real account) cannot by itself turn placement, modify, cancel, positions, funds, a segment or Master detection
+  into `VERIFIED_LIVE`.
+- **Capability checks use canonical values.** `supports()` takes `MIS/CNC/NRML` and `MARKET/LIMIT/SL/SLM`;
+  real values (`LONGTERM`, `INTRADAY`, `OrderType.SL_M == "SL-M"`) go through `supports_order()`, which reuses
+  `normalize_product_for_exchange`. By default an unverified or documentation-only segment is **not** supported;
+  a caller must state the weaker level it accepts.
 
 ## 2.3 Per-Child planner rules (in order, each fails closed)
 

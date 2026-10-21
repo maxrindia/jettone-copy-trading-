@@ -82,4 +82,25 @@ Master Alice; Children: Alice A, Groww B, Zerodha C, Angel D.
 | `PRODUCT_NOT_SUPPORTED` / `ORDER_TYPE_NOT_SUPPORTED` (new) | No exact equivalent | per-order skip, audit |
 | `INSTRUMENT_RESOLUTION_FAILED`, `POSITION_FETCH_FAILED`, `FUNDS_FETCH_FAILED`, `INSUFFICIENT_LONG_POSITION` (exist) | Risk stage | per-order reject, audit |
 
+## 5.5 How the profiles encode this (R1)
+
+- **Per-order lookup is its own feature.** `ORDER_STATUS` means reading the broker's order book; `ORDER_LOOKUP`
+  means querying one specific order as a public client method, and is NOT_SUPPORTED for every broker (Groww's
+  `_lookup_by_reference` is private).
+- **Design bar.** Child: placement, modify, cancel, order status, positions and funds all `VERIFIED_LIVE`.
+  Master: Master detection and order status `VERIFIED_LIVE`. In both cases the registry gate must also be open.
+  Today only Alice Blue qualifies for either role.
+- **Evidence ceilings (Groww).** Only login is live-verified (the token call, 2026-10-19). Placement, modify,
+  cancel, order book, positions, funds, the client reference and the NSE/BSE cash segments are capped at
+  `VERIFIED_DOCS`; Master detection at `UNVERIFIED`. A contract boolean cannot raise a rating past its ceiling.
+- **Angel One.** Nothing is rated above `UNVERIFIED`. `ANGEL_CONTRACT.verified` only records that the response
+  keys are filled in, not whether they came from documentation or a capture, so it is not rated `VERIFIED_DOCS`.
+- **Angel One modify limitation (blocks enabling it).** The pipeline's modify calls never pass `product_type`.
+  Alice Blue's and Groww's modify bodies do not use a product, but `AngelOneClient.modify_order` requires one and
+  raises without it, so an Angel One Child order cannot currently be modified through the pipeline. This must be
+  resolved and tested before Angel One can be enabled (see 07 §7.2); it is not an R1 change.
+- **Segments.** A segment's rating applies to all of its listed products and order types; per-cell evidence is not
+  recorded. `supports()` refuses unverified and documentation-only segments unless the caller states the weaker
+  level it accepts.
+
 When a gate is turned off after members exist, members stay in the strategy but are skipped at routing (existing behaviour), and the UI shows them as "not receiving copies" with the reason.

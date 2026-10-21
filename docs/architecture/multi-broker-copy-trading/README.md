@@ -58,7 +58,7 @@ All diagrams are Mermaid source inside the Markdown files.
 
 | Stage | Work | Depends on | Size |
 |---|---|---|---|
-| R1 | Protocols + capability profiles beside `BrokerSpec`; golden tests pinning Alice payloads | — | M |
+| R1 | Protocols + capability profiles beside `BrokerSpec` (the `BrokerAdapter` identity/profile/session wrapper is deferred); golden tests pinning Alice payloads; nothing wired | — | M |
 | R2 | Alice Blue duplicate-send fix | Separate approval | M |
 | R3 | Migration 0013 (nullable broker context on `copy_trades`) | R1 | S |
 | R3b | Fan-out ledger (0014) + supervised resume (D2); P&L `combined_status` (D3) | R3 | M |
@@ -81,6 +81,10 @@ Decisions D1–D6 above closed the earlier questions. Still open:
 1. **SELL bypass and new pairs.** Production runs `SELL_POSITION_SAFETY_BYPASS=true`, which skips the follower SELL position check. Acceptance criterion 4 proves the guard on the Child broker, but with the bypass on it would not run in production. Decide whether a new pair may be enabled while the bypass is on.
 2. **Groww automatic timeout reconciliation.** The existing Groww reference-map reconciliation already resolves automatically (it doesn't run today, because the Child gate is off). Under D6 it should be operator-confirmed until Groww is VERIFIED_LIVE. Decide before R5: gate it, or accept it.
 3. **Resume window.** D2 offers resume for the same trading day "while the Master order or fill is still relevant". The exact cut-off (minutes after the Master event, or Master order still open) is not fixed.
+4. **Groww Child: gate versus live verification.** The registry opens the Groww Child gate as soon as `GROWW_CHILD_TRADING_ENABLED` is on and the contract is documentation-verified (`registry.py`, pinned by `test_capability_gates.py`). This design requires a role to be `VERIFIED_LIVE` before a pair is enabled (acceptance criteria 1–2). The capability profile reports the mismatch (`gate_open` true, `meets_design_bar` false) and R1 changes nothing. Not decided here. Options:
+   - **A. Tighten the registry.** Groww's `as_child` additionally requires every Child feature to be `VERIFIED_LIVE` in the profile (or the contract's `live_verified` plus a recorded live capture). Flipping the flag alone can then never route real orders on documentation evidence. Costs a registry change and updates to the existing gate tests; the safest default.
+   - **B. Keep the flag as the explicit owner opt-in.** `GROWW_CHILD_TRADING_ENABLED` stays the single switch and the owner accepts documentation-level evidence for it, supervised, with the pair gate and live-smoke criteria of R5 still required before use. No registry change, but a configuration change alone can start real Groww orders.
+   Decide before R5 (and before turning the flag on).
 
 ## Regression risks for Alice → Alice
 
