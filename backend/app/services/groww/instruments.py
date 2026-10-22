@@ -20,7 +20,8 @@ import csv
 import io
 import logging
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 import httpx
 
@@ -43,6 +44,8 @@ class GrowwInstrument:
     freeze_quantity: int          # 0 = not provided
     buy_allowed: Optional[bool]   # None = unreadable (treated as not allowed)
     sell_allowed: Optional[bool]
+    # False when the CSV gave no usable lot size and `lot_size` is only the coerced default of 1 (R4b).
+    lot_size_stated: bool = False
 
 
 def _flag(value: object) -> Optional[bool]:
@@ -62,11 +65,30 @@ def _int(value: object) -> int:
 
 
 class GrowwInstrumentStore:
-    def __init__(self) -> None:
+    def __init__(self, clock: Optional[Callable[[], datetime]] = None) -> None:
         self._by_key: Dict[Tuple[str, str], List[GrowwInstrument]] = {}
         self.size = 0
+        # Freshness metadata for read-only consumers (R4b); it does not influence loading or resolve().
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._load_calls = 0
+        self._snapshot_at: Optional[datetime] = None
+
+    @property
+    def snapshot_loaded_at(self) -> Optional[datetime]:
+        """When a COMPLETE catalog snapshot finished loading, else None. Loading accumulates, so only the case
+        where exactly one full-document load (load_csv_text / load_file) populated the store counts. Any other
+        history - rows added directly, a second load, a failed or empty load - leaves the freshness unknown."""
+        return self._snapshot_at if self._load_calls == 1 else None
+
+    def iter_instruments(self) -> Tuple[GrowwInstrument, ...]:
+        return tuple(i for key in sorted(self._by_key) for i in self._by_key[key])
+
+    def lookup_symbol(self, exchange: str, symbol: str) -> Tuple[GrowwInstrument, ...]:
+        """Every stored row for the exact (exchange, trading_symbol), duplicates included. No suffix handling."""
+        return tuple(self._by_key.get((str(exchange or "").strip().upper(), str(symbol or "").strip().upper()), ()))
 
     def load_rows(self, rows: Iterable[Dict[str, str]]) -> int:
+        self._load_calls += 1
         added = 0
         for r in rows:
             exch = str(r.get("exchange") or "").strip().upper()
@@ -78,10 +100,12 @@ class GrowwInstrumentStore:
             isin = str(r.get("isin") or "").strip().upper()
             if isin == "NAN":
                 isin = ""
+            lot = _int(r.get("lot_size"))
             inst = GrowwInstrument(
                 exchange=exch, trading_symbol=sym, isin=isin,
-                lot_size=max(1, _int(r.get("lot_size"))), freeze_quantity=max(0, _int(r.get("freeze_quantity"))),
+                lot_size=max(1, lot), freeze_quantity=max(0, _int(r.get("freeze_quantity"))),
                 buy_allowed=_flag(r.get("buy_allowed")), sell_allowed=_flag(r.get("sell_allowed")),
+                lot_size_stated=lot > 0,
             )
             self._by_key.setdefault((exch, sym), []).append(inst)
             added += 1
@@ -89,7 +113,11 @@ class GrowwInstrumentStore:
         return added
 
     def load_csv_text(self, text: str) -> int:
-        return self.load_rows(csv.DictReader(io.StringIO(text)))
+        first_load = self._load_calls == 0
+        added = self.load_rows(csv.DictReader(io.StringIO(text)))
+        if first_load and added > 0:
+            self._snapshot_at = self._clock()      # the whole document parsed; set only after load_rows returned
+        return added
 
     def load_file(self, path: str) -> int:
         with open(path, "r", encoding="utf-8", newline="") as fh:

@@ -163,6 +163,32 @@ def test_a_symbol_carrying_a_different_isin_is_a_conflict_not_a_match():
     assert r.verdict is Verdict.UNMAPPED and r.reason == "ISIN_CONFLICT"
 
 
+def test_a_candidate_without_an_isin_cannot_confirm_an_isin_master():
+    r = cmp(normalize_equity("NSE", "RELIANCE", REL), view(bi(isin=None)))
+    assert r.verdict is Verdict.UNMAPPED and r.reason == "CANDIDATE_LACKS_ISIN" and r.matched is None
+    assert cmp(normalize_equity("NSE", "RELIANCE", REL), view(bi(sym="INFY", isin=None))).reason == "NOT_FOUND"
+    assert cmp(normalize_equity("NSE", "RELIANCE", REL), view(bi(isin=None), bi(isin=INFY))).reason == "ISIN_CONFLICT"
+
+
+def test_a_matching_isin_is_not_definitive_while_another_same_symbol_candidate_lacks_one():
+    master = normalize_equity("NSE", "RELIANCE", REL)
+    assert cmp(master, view(bi(isin=REL))).verdict is Verdict.MATCH                      # no competing candidate
+    for cands in ((bi(isin=REL), bi(isin=None, token="2")), (bi(isin=None, token="2"), bi(isin=REL))):
+        r = cmp(master, view(*cands))                                                    # order never matters
+        assert r.verdict is Verdict.UNMAPPED and r.reason == "CANDIDATE_LACKS_ISIN" and r.matched is None
+    # a lot-size difference cannot turn it into a definitive ATTRIBUTE_DIFF either
+    r = cmp(master, view(bi(isin=REL, lot=5), bi(isin=None, token="2")), master_details=bi(lot=1))
+    assert r.verdict is Verdict.UNMAPPED and r.diffs == ()
+    # precedence is preserved: a conflicting ISIN on the same symbol is still reported first
+    assert cmp(master, view(bi(isin=INFY))).reason == "ISIN_CONFLICT"
+    assert cmp(master, view(bi(isin=None), bi(isin=INFY))).reason == "ISIN_CONFLICT"
+    assert cmp(master, view(bi(isin=REL), bi(isin=INFY), bi(isin=None))).verdict is Verdict.AMBIGUOUS
+    # no matching ISIN and no competing symbol: the established behaviour
+    assert cmp(master, view(bi(sym="INFY", isin=INFY))).reason == "NOT_FOUND"
+    # a candidate without an ISIN on a DIFFERENT symbol or exchange is irrelevant
+    assert cmp(master, view(bi(isin=REL), bi(sym="INFY", isin=None), bi(exchange="BSE", isin=None))).verdict is Verdict.MATCH
+
+
 def test_the_same_isin_twice_or_a_shared_symbol_is_ambiguous():
     master = normalize_equity("NSE", "RELIANCE", REL)
     assert cmp(master, view(bi(token="1"), bi(token="2"))).verdict is Verdict.AMBIGUOUS

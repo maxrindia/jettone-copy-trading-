@@ -15,7 +15,8 @@ F&O is not mapped (no lot-size validation exists), so derivatives fail closed.
 """
 
 import json
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from app.services.alice_blue.instruments import InstrumentResolutionError
 
@@ -23,12 +24,36 @@ _EXCHANGES = {"NSE": "NSE", "NSE_CM": "NSE", "BSE": "BSE", "BSE_CM": "BSE"}
 
 
 class AngelInstrumentStore:
-    def __init__(self) -> None:
+    def __init__(self, clock: Optional[Callable[[], datetime]] = None) -> None:
         # (exchange, tradingsymbol upper) -> {token, ...}
         self._by_symbol: Dict[Tuple[str, str], set] = {}
         self.size = 0
+        # Freshness metadata for read-only consumers (R4b); it does not influence loading or resolve().
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._load_calls = 0
+        self._snapshot_at: Optional[datetime] = None
+
+    @property
+    def snapshot_loaded_at(self) -> Optional[datetime]:
+        """When a COMPLETE catalog snapshot finished loading, else None. Only exactly one full-file load
+        (load_file) counts; records added directly, a second load, or an empty load leave freshness unknown."""
+        return self._snapshot_at if self._load_calls == 1 else None
+
+    def iter_records(self) -> Tuple[Tuple[str, str, str], ...]:
+        """(exchange, symbol, token) for every stored record, sorted."""
+        return tuple(sorted((ex, sym, tok) for (ex, sym), toks in self._by_symbol.items() for tok in toks))
+
+    def lookup_symbol(self, exchange: str, symbol: str) -> Tuple[Tuple[str, str], ...]:
+        """(symbol, token) rows for the exchange and symbol, trying the bare and "-EQ" spellings as resolve() does."""
+        exch = _EXCHANGES.get(str(exchange or "").strip().upper())
+        sym = str(symbol or "").strip().upper()
+        if exch is None or not sym:
+            return ()
+        names = (sym,) if sym.endswith("-EQ") else (sym, f"{sym}-EQ")
+        return tuple(sorted((name, tok) for name in names for tok in self._by_symbol.get((exch, name), ())))
 
     def load_records(self, records: Iterable[Dict[str, Any]]) -> int:
+        self._load_calls += 1
         added = 0
         for r in records:
             token = str(r.get("token") or "").strip()
@@ -46,7 +71,11 @@ class AngelInstrumentStore:
             data = json.load(fh)
         if not isinstance(data, list):
             raise InstrumentResolutionError("Angel One instrument master must be a JSON list.")
-        return self.load_records(data)
+        first_load = self._load_calls == 0
+        added = self.load_records(data)
+        if first_load and added > 0:
+            self._snapshot_at = self._clock()      # the whole file parsed; set only after load_records returned
+        return added
 
     def resolve(self, exchange: str, symbol: str) -> Tuple[str, str]:
         """(symboltoken, tradingsymbol) for an equity, or InstrumentResolutionError."""

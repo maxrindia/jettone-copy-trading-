@@ -124,12 +124,20 @@ def compare_instrument(
     if inst.isin:
         hits = [r for r in rows if r[2] == inst.isin]
         if not hits:
-            conflict = any(r[2] and r[2] != inst.isin for r in same_symbol)
-            return _result(view, master, Verdict.UNMAPPED, "ISIN_CONFLICT" if conflict else "NOT_FOUND")
+            if any(r[2] and r[2] != inst.isin for r in same_symbol):
+                return _result(view, master, Verdict.UNMAPPED, "ISIN_CONFLICT")
+            if any(r[2] is None for r in same_symbol):
+                # The broker lists the symbol but its data carries no ISIN: identity cannot be confirmed by name.
+                return _result(view, master, Verdict.UNMAPPED, "CANDIDATE_LACKS_ISIN")
+            return _result(view, master, Verdict.UNMAPPED, "NOT_FOUND")
         if len(hits) > 1:
             return _result(view, master, Verdict.AMBIGUOUS, "MULTIPLE_CANDIDATES_FOR_ISIN")
         if any(r[2] and r[2] != inst.isin for r in same_symbol):
             return _result(view, master, Verdict.AMBIGUOUS, "SYMBOL_SHARED_WITH_OTHER_ISIN")
+        if any(r[2] is None for r in same_symbol):
+            # Another listing with this exact symbol carries no ISIN, so it cannot be told apart from the ISIN hit:
+            # identity is unresolved and a definitive MATCH would be a guess.
+            return _result(view, master, Verdict.UNMAPPED, "CANDIDATE_LACKS_ISIN")
         row = hits[0][0]
         diffs, unverified = _diffs(master_details, row)
         verdict = Verdict.ATTRIBUTE_DIFF if diffs else Verdict.MATCH
