@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     # WS feed and risk pipeline run, but no broker orders are ever placed.
     ENGINE_LIVE_TRADING_ENABLED: bool = False
 
+    # R3b restart recovery. When true, after an engine restart a LIMIT / SL-pending Master order whose fanout
+    # PROVABLY began (a durable COPY_FANOUT_STARTED record) but did not reach every routed Child may be resumed for
+    # the Children that have no decision yet - only inside a 10-minute window, only while the order is still working
+    # and unchanged, and only with live trading and the master toggle ON. OFF by default: with it OFF, recovery only
+    # reports. Lifecycle continuity (cancel / modify of orders that were already copied) is not governed by this flag.
+    # See docs/RESTART_RECOVERY.md.
+    ENGINE_RECOVERY_RESUME_ENABLED: bool = False
+
     # TEMPORARY test switch: true skips the follower SELL position checks in
     # both places - initial SELL placement (_enforce_sell_position_safety) and
     # the SELL child LIMIT->MARKET reprice (handle_master_modification) - so a

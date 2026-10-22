@@ -47,6 +47,7 @@ from app.services.reliability.emergency_stop import (
 from app.services.reliability.follower_fill_syncer import FollowerFillSyncer
 from app.services.reliability.master_order_poller import MasterOrderPoller
 from app.services.reliability.reconciliation import ReconciliationEngine
+from app.services.reliability.restart_recovery import RestartRecovery
 from app.services.reliability.stale_order_sweeper import StaleOrderSweeper
 from app.services.reliability.stop_provider import build_stop_provider
 from app.services.runtime import hooks as runtime_hooks
@@ -82,6 +83,7 @@ class EngineLoop:
         self._child_account_ids: Set[str] = set()
         self._legacy_master_id: Optional[str] = None
         self._pipeline: Optional[CopyEnginePipeline] = None
+        self._recovery: Optional[RestartRecovery] = None
         self._on_order_update = None
         # P2 #11: per-broker_order_id locks serializing persist_and_process_event
         # so that concurrently-scheduled WS update tasks for the SAME order
@@ -363,8 +365,25 @@ class EngineLoop:
                             return
                         detector = monitor.detector
 
+                        # R3b: the one CANCEL / MODIFY the poller's seed pass dispatched for this order (if any). It may
+                        # only become an event that acts on existing Children - never a new order.
+                        pop_action = getattr(monitor.poller, "pop_recovery_action", None)
+                        recovery_action = pop_action(event.broker_order_id) if callable(pop_action) else None
+                        if not isinstance(recovery_action, str):
+                            recovery_action = None
+
                         trade_event = detector.process_order_update(event)
                         if trade_event is None:
+                            return
+                        if recovery_action is not None and not RestartRecovery.allows(recovery_action, trade_event):
+                            logger.warning(
+                                f"[EngineLoop] Restart recovery: {recovery_action} of {event.broker_order_id} produced "
+                                f"{trade_event.event_type}, which recovery may not apply. Not applied."
+                            )
+                            if self._recovery is not None:
+                                await self._recovery.report_blocked(
+                                    source_id, event.broker_order_id, recovery_action, trade_event.event_type
+                                )
                             return
 
                         # Re-evaluated per event so the UI switch applies at once.
@@ -416,6 +435,12 @@ class EngineLoop:
 
         self._pipeline = pipeline
         self._on_order_update = handle_order_update
+        # R3b: classifies each Master's first order book after a (re)start. See restart_recovery.py.
+        self._recovery = RestartRecovery(
+            pipeline=pipeline,
+            redis=self.redis,
+            clients_provider=lambda master_id: account_manager.get_clients_map_excluding(master_id),
+        )
 
         # REST order-book polling for every monitored Master. This is the only
         # mechanism proven to observe orders placed from Alice Blue's own
@@ -596,6 +621,9 @@ class EngineLoop:
                     check_interval_seconds=settings.MASTER_ORDER_POLL_INTERVAL_SECONDS,
                     activation_baseline=activation_ids,
                     activation_deadline=activation_deadline,
+                    # A monitor started by a Master SWITCH has its own activation snapshot; restart recovery is for
+                    # a monitor that starts without one.
+                    recovery=self._recovery if activation_ids is None else None,
                 )
                 self._monitors[account_id] = _MasterMonitor(account_id, detector, poller)
                 await poller.start()

@@ -33,6 +33,7 @@ class EventValidator:
         event: MasterTradeEvent,
         is_emergency_stopped: bool = False,
         is_master_healthy: bool = True,
+        check_duplicate: bool = True,
     ) -> ValidationResult:
         # Check 1: Global Emergency Stop
         if is_emergency_stopped:
@@ -49,7 +50,10 @@ class EventValidator:
             logger.warning(f"[Validator] Rejected event {event.master_order_id + '#' + str(event.fill_sequence)}: SYMBOL_NOT_ALLOWED ({event.symbol})")
             return ValidationResult(False, "SYMBOL_NOT_ALLOWED")
 
-        # Check 4: Redis First-Line Deduplication Check
+        # Check 4: Redis First-Line Deduplication Check. `check_duplicate=False` is used ONLY by a deliberate restart
+        # recovery (R3b), whose Children are still stopped by the database claim; every other check above still ran.
+        if not check_duplicate:
+            return ValidationResult(True)
         seen_key = f"copy:seen:{event.master_order_id}:{event.fill_sequence}"
         was_set = await self.redis.set(seen_key, "1", ex=self.DEDUP_TTL_SECONDS, nx=True)
         if not was_set:

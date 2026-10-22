@@ -29,12 +29,14 @@ from app.services.copy_engine.calculator import QuantityCalculator
 from app.services.copy_engine.child_outcomes import (
     ClaimKind,
     NO_CLIENT,
+    RecoveryScope,
     CHILD_BROKER_NOT_READY,
     claim_child_trade,
     excluded_reason,
     fail_unsent_claim,
     finalize_child_trade,
     pre_send_outcome,
+    record_fanout_started,
     record_fanout_summary,
     record_pre_send_outcome,
 )
@@ -292,10 +294,16 @@ class CopyEnginePipeline:
         clients: Dict[str, AliceBlueClient],
         global_emergency_stop: bool = False,
         stagger_ms: int = 0,
+        recovery: Optional[RecoveryScope] = None,
     ) -> Dict[str, Any]:
         """
         Main replication router: dispatches immediate limit replication or market replication.
+
+        `recovery` (R3b) marks a deliberate restart-recovery fanout: only LIMIT creation and SL-pending creation are
+        supported, only the named Children are routed, and only the Redis dedupe check is skipped.
         """
+        if recovery is not None and event.event_type not in ("LIMIT_CREATED", "SL_PENDING_CREATED"):
+            return {"status": "recovery_not_supported", "reason": event.event_type}
         if event.event_type == "ORDER_MODIFIED":
             # A master order observed as LIMIT -> MARKET while STILL OPEN has
             # not executed yet, so there is no confirmed execution price to
@@ -331,6 +339,7 @@ class CopyEnginePipeline:
                 clients=clients,
                 global_emergency_stop=global_emergency_stop,
                 stagger_ms=stagger_ms,
+                recovery=recovery,
             )
         elif event.event_type == "SL_PENDING_CREATED":
             # Native SL/SL-M order still TRIGGER_PENDING at the master:
@@ -343,6 +352,7 @@ class CopyEnginePipeline:
                 clients=clients,
                 global_emergency_stop=global_emergency_stop,
                 stagger_ms=stagger_ms,
+                recovery=recovery,
             )
         elif event.event_type == "SL_PENDING_MODIFIED":
             return await self.handle_pending_sl_modification(
@@ -619,6 +629,7 @@ class CopyEnginePipeline:
         clients: Dict[str, AliceBlueClient],
         global_emergency_stop: bool = False,
         stagger_ms: int = 0,
+        recovery: Optional[RecoveryScope] = None,
     ) -> Dict[str, Any]:
         """
         IMMEDIATE LIMIT ORDER REPLICATION:
@@ -630,6 +641,7 @@ class CopyEnginePipeline:
             event=event,
             is_emergency_stopped=stop_active,
             is_master_healthy=True,
+            check_duplicate=recovery is None,
         )
         if not validation.is_valid:
             logger.warning(f"[Pipeline] Master LIMIT order {event.master_order_id} validation failed: {validation.reason_code}")
@@ -640,9 +652,17 @@ class CopyEnginePipeline:
         followers, strategy_id = await self._get_eligible_followers_for_master(
             event.account_id, master_order_id=event.master_order_id, excluded_out=excluded
         )
+        if recovery is not None:
+            # A recovery fanout reaches ONLY the named Children, and only those still routed today.
+            followers = [(f, m) for f, m in followers if str(f.id) in recovery.only_children]
         if not followers:
             logger.info(f"[Pipeline] No active followers configured for master {event.account_id}.")
             return {"status": "no_followers"}
+
+        if recovery is None:
+            # Durable proof the fanout began, BEFORE any Child task starts (R3b). Best effort: if it cannot be
+            # written the fanout still runs, but this event never qualifies for automatic recovery.
+            await self._record_fanout_started(event=event, strategy_id=strategy_id, followers=followers)
 
         lot_size = self._get_lot_size(event.symbol)
 
@@ -689,7 +709,7 @@ class CopyEnginePipeline:
 
         await self._record_fanout(
             event=event, strategy_id=strategy_id, followers=followers, excluded=excluded, summary=summary,
-            fill_sequence=1,
+            fill_sequence=1, recovery=recovery is not None,
         )
         return {"status": "completed", "results": summary}
 
@@ -1085,6 +1105,7 @@ class CopyEnginePipeline:
         excluded: List[Dict[str, str]],
         summary: Dict[str, Any],
         fill_sequence: int,
+        recovery: bool = False,
     ) -> None:
         """
         R3 tracking, run after the Children have all finished: a terminal CopyTrade row for each Child that left before
@@ -1119,10 +1140,26 @@ class CopyEnginePipeline:
             async with AsyncSessionLocal() as session:
                 await record_fanout_summary(
                     session, event=event, strategy_id=strategy_id, routed=followers, excluded=excluded,
-                    results=summary, row_statuses=row_statuses,
+                    results=summary, row_statuses=row_statuses, recovery=recovery,
                 )
         except Exception as exc:
             logger.error(f"[Pipeline] Could not record the fanout summary for {event.master_order_id}: {exc}")
+
+    async def _record_fanout_started(
+        self, *, event: MasterTradeEvent, strategy_id: Optional[uuid.UUID], followers: List[Any]
+    ) -> bool:
+        """Writes the COPY_FANOUT_STARTED record (see child_outcomes.record_fanout_started). Never raises."""
+        try:
+            async with AsyncSessionLocal() as session:
+                return await record_fanout_started(
+                    session, event=event, strategy_id=strategy_id, routed_ids=[str(f.id) for f, _ in followers]
+                )
+        except Exception as exc:
+            logger.error(
+                f"[Pipeline] Could not record the fanout start for {event.master_order_id}; this event will not "
+                f"qualify for automatic recovery: {exc}"
+            )
+            return False
 
     async def _record_child_result(self, event: MasterTradeEvent, follower: Account, result: Any, fill_sequence: int) -> None:
         copy_event_uuid = derive_copy_event_id(event.master_order_id, str(follower.id), fill_sequence)
@@ -1214,6 +1251,7 @@ class CopyEnginePipeline:
         clients: Dict[str, AliceBlueClient],
         global_emergency_stop: bool = False,
         stagger_ms: int = 0,
+        recovery: Optional[RecoveryScope] = None,
     ) -> Dict[str, Any]:
         """
         IMMEDIATE NATIVE SL / SL-M REPLICATION:
@@ -1230,6 +1268,7 @@ class CopyEnginePipeline:
             event=event,
             is_emergency_stopped=stop_active,
             is_master_healthy=True,
+            check_duplicate=recovery is None,
         )
         if not validation.is_valid:
             logger.warning(f"[Pipeline] Master SL order {event.master_order_id} validation failed: {validation.reason_code}")
@@ -1239,9 +1278,17 @@ class CopyEnginePipeline:
         followers, strategy_id = await self._get_eligible_followers_for_master(
             event.account_id, master_order_id=event.master_order_id, excluded_out=excluded
         )
+        if recovery is not None:
+            # A recovery fanout reaches ONLY the named Children, and only those still routed today.
+            followers = [(f, m) for f, m in followers if str(f.id) in recovery.only_children]
         if not followers:
             logger.info(f"[Pipeline] No active followers configured for master {event.account_id}.")
             return {"status": "no_followers"}
+
+        if recovery is None:
+            # Durable proof the fanout began, BEFORE any Child task starts (R3b). Best effort: if it cannot be
+            # written the fanout still runs, but this event never qualifies for automatic recovery.
+            await self._record_fanout_started(event=event, strategy_id=strategy_id, followers=followers)
 
         lot_size = self._get_lot_size(event.symbol)
 
@@ -1275,7 +1322,7 @@ class CopyEnginePipeline:
 
         await self._record_fanout(
             event=event, strategy_id=strategy_id, followers=followers, excluded=excluded, summary=summary,
-            fill_sequence=1,
+            fill_sequence=1, recovery=recovery is not None,
         )
         return {"status": "completed", "results": summary}
 
@@ -3291,6 +3338,10 @@ class CopyEnginePipeline:
         if not followers:
             logger.info("[Pipeline] No active follower accounts configured.")
             return {"status": "no_followers"}
+
+        # Durable proof the fanout began, BEFORE any Child task starts (R3b). Best effort: if it cannot be written the
+        # fanout still runs, but this event never qualifies for automatic recovery. (MARKET fills are never resumed.)
+        await self._record_fanout_started(event=event, strategy_id=strategy_id, followers=followers)
 
         lot_size = self._get_lot_size(event.symbol)
 

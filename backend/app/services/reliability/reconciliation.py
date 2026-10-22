@@ -1,6 +1,7 @@
+import inspect
 import logging
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 from uuid import UUID
 
 from sqlalchemy import or_, select, func
@@ -11,7 +12,7 @@ from app.models.trades import CopyTrade, CopyTradeStatus, Order, OrderSide, Orde
 from app.models.reconciliation import ReconciliationRecord
 from app.models.strategies import GroupStrategy, StrategyMember
 from app.models.audit import SystemEvent, EventSeverity
-from app.services.alice_blue.client import AliceBlueClient
+from app.services.alice_blue.client import AliceBlueClient, order_book_row_id
 from app.services.alice_blue.types import Position
 
 logger = logging.getLogger(__name__)
@@ -200,7 +201,18 @@ class ReconciliationEngine:
         result = await db.execute(stmt)
         ambiguous_orders = result.scalars().all()
 
+        # One alert per unresolved order, however many times the engine restarts (R3b).
+        already = {
+            (e.metadata_payload or {}).get("order_id")
+            for e in (await db.execute(
+                select(SystemEvent).where(SystemEvent.event_type == "CRASH_RECOVERY_AMBIGUOUS_ORDER")
+            )).scalars().all()
+        }
+        new_orders = 0
         for order in ambiguous_orders:
+            if str(order.id) in already:
+                continue
+            new_orders += 1
             event = SystemEvent(
                 event_type="CRASH_RECOVERY_AMBIGUOUS_ORDER",
                 severity=EventSeverity.WARNING,
@@ -220,11 +232,50 @@ class ReconciliationEngine:
             )
             db.add(event)
 
-        if ambiguous_orders:
+        if new_orders:
             await db.commit()
-            logger.warning(f"Crash recovery flagged {len(ambiguous_orders)} ambiguous Order row(s) for manual review.")
+            logger.warning(f"Crash recovery flagged {new_orders} new ambiguous Order row(s) for manual review.")
 
         return len(ambiguous_orders)
+
+    @staticmethod
+    async def _event_once(db: AsyncSession, event_type: str, account_id: Any, key: str, severity: Any,
+                          message: str, metadata: Dict[str, Any]) -> bool:
+        """One SystemEvent per (type, account, key): repeated recovery runs do not repeat the alert."""
+        existing = (await db.execute(
+            select(SystemEvent).where(SystemEvent.event_type == event_type, SystemEvent.account_id == account_id)
+        )).scalars().all()
+        if any((e.metadata_payload or {}).get("dedupe_key") == key for e in existing):
+            return False
+        db.add(SystemEvent(event_type=event_type, severity=severity, account_id=account_id, message=message,
+                           metadata_payload={**metadata, "dedupe_key": key}))
+        await db.commit()
+        return True
+
+    @staticmethod
+    async def _submitted_verdict(trade: CopyTrade, client_provider: Optional[Callable], cache: Dict[str, Optional[Set[str]]]) -> str:
+        """KNOWN | NOT_IN_BOOK | NO_BROKER_ID | UNVERIFIABLE for a SUBMITTED row. UNVERIFIABLE (no client, the read
+        failed or returned nothing usable) is never read as 'missing'."""
+        if not trade.broker_order_id:
+            return "NO_BROKER_ID"
+        key = str(trade.follower_account_id)
+        if key not in cache:
+            ids: Optional[Set[str]] = None
+            client = client_provider(key) if client_provider else None
+            raw_fn = getattr(client, "get_order_book_raw", None) if client is not None else None
+            if callable(raw_fn):
+                try:
+                    probe = raw_fn()
+                    rows = await probe if inspect.isawaitable(probe) else None
+                    if isinstance(rows, list):
+                        ids = {order_book_row_id(r) for r in rows if isinstance(r, dict)}
+                except Exception as exc:
+                    logger.warning(f"Crash recovery could not read the order book for {key}: {exc}")
+            cache[key] = ids
+        ids = cache[key]
+        if ids is None:
+            return "UNVERIFIABLE"
+        return "KNOWN" if trade.broker_order_id in ids else "NOT_IN_BOOK"
 
     @classmethod
     async def run_crash_recovery(
@@ -234,8 +285,16 @@ class ReconciliationEngine:
     ) -> int:
         """
         On startup recovery:
-        1. Find all copy_trades in PENDING or SUBMITTED state, transition
-           them to RECONCILIATION_REQUIRED for human review (unchanged).
+        1. Classify copy_trades left in PENDING or SUBMITTED (R3b - evidence based, nothing is resent):
+             PENDING, never submitted  -> RECONCILIATION_REQUIRED "CRASH_BEFORE_SEND" (the submit stamp is best
+                                          effort, so its absence does not prove nothing was sent);
+             PENDING, submitted        -> RECONCILIATION_REQUIRED "CRASH_DURING_SEND";
+             SUBMITTED, broker id present in the Child's freshly read order book -> left alone (the fill syncer
+                                          owns it);
+             SUBMITTED, id missing from a successfully read book -> RECONCILIATION_REQUIRED "SUBMITTED_NOT_IN_BOOK";
+             SUBMITTED, book unreadable / no client -> left as it is and reported once: a failed read is not proof
+                                          that the order is missing, still less that it is safe to resend.
+           TIMEOUT rows are not touched here (the R2 unresolved-send handling owns them).
         2. Flag ambiguous SYSTEM-sourced Order rows left PENDING with no
            broker_order_id (see flag_ambiguous_orders) - reported, not
            mutated.
@@ -279,16 +338,40 @@ class ReconciliationEngine:
         unresolved_trades = result.scalars().all()
 
         recovered_count = 0
+        child_books: Dict[str, Optional[Set[str]]] = {}
         for trade in unresolved_trades:
+            if trade.status == CopyTradeStatus.PENDING:
+                code = "CRASH_DURING_SEND" if trade.submitted_at is not None else "CRASH_BEFORE_SEND"
+                detail = (
+                    "System restarted after the order may have been sent; verify at the broker, do not resend"
+                    if trade.submitted_at is not None else
+                    "System restarted after the claim and before a send was recorded; the submit stamp is best effort, "
+                    "so verify at the broker before assuming nothing was sent, and do not resend"
+                )
+            else:
+                verdict = await cls._submitted_verdict(trade, client_provider, child_books)
+                if verdict == "KNOWN":
+                    continue                      # in the Child's book: the fill syncer reconciles it
+                if verdict == "UNVERIFIABLE":
+                    await cls._event_once(
+                        db, "CRASH_RECOVERY_CHILD_BOOK_UNAVAILABLE", trade.follower_account_id, str(trade.id),
+                        EventSeverity.WARNING,
+                        f"CopyTrade {trade.id} is SUBMITTED but the Child's order book could not be read at startup; left "
+                        "as it is. A failed read does not show the order is missing or safe to resend.",
+                        {"trade_id": str(trade.id), "master_order_id": trade.master_order_id},
+                    )
+                    continue
+                code = "SUBMITTED_NOT_IN_BOOK" if verdict == "NOT_IN_BOOK" else "SUBMITTED_NO_BROKER_ID"
+                detail = "Not found in the Child's freshly read order book; verify at the broker, do not resend"
             trade.status = CopyTradeStatus.RECONCILIATION_REQUIRED
-            trade.failure_reason = "System restarted while order was in-flight (crash recovery)"
+            trade.failure_reason = f"{code}: {detail}"
             recovered_count += 1
 
             event = SystemEvent(
                 event_type="CRASH_RECOVERY_FLAGGED_TRADE",
                 severity=EventSeverity.WARNING,
-                message=f"CopyTrade {trade.id} flagged RECONCILIATION_REQUIRED on crash recovery startup",
-                metadata_payload={"trade_id": str(trade.id), "master_order_id": trade.master_order_id},
+                message=f"CopyTrade {trade.id} flagged RECONCILIATION_REQUIRED on crash recovery startup ({code})",
+                metadata_payload={"trade_id": str(trade.id), "master_order_id": trade.master_order_id, "code": code},
             )
             db.add(event)
 

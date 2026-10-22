@@ -33,6 +33,7 @@ loss) a second summary can be written. The CopyTrade rows are the authority.
 import enum
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 RECLAIM_WINDOW_SECONDS = 600
 SUMMARY_EVENT_TYPE = "COPY_FANOUT_SUMMARY"
+FANOUT_STARTED_EVENT_TYPE = "COPY_FANOUT_STARTED"
 
 # Reason codes written by the pipeline's own gates are carried through unchanged (FUNDS_FETCH_FAILED,
 # RISK_INPUTS_UNAVAILABLE, REFERENCE_PRICE_UNAVAILABLE, INSUFFICIENT_LONG_POSITION, ...). These are the codes R3 adds.
@@ -64,6 +66,65 @@ ACCOUNT_INACTIVE = "ACCOUNT_INACTIVE"
 ACCOUNT_EMERGENCY_STOPPED = "ACCOUNT_EMERGENCY_STOPPED"
 ACCOUNT_DELETED = "ACCOUNT_DELETED"
 CHILD_BROKER_NOT_READY = "CHILD_BROKER_NOT_READY"
+
+
+@dataclass(frozen=True)
+class RecoveryScope:
+    """A deliberate restart-recovery fanout (R3b): only these Children (account ids as strings) may be routed, and the
+    Redis event-deduplication check - the only check skipped - does not apply. Everything else, including the database
+    claim, still does."""
+    only_children: frozenset
+
+
+def fanout_started_metadata(event: Any, strategy_id: Optional[uuid.UUID], routed_ids: List[str]) -> Dict[str, Any]:
+    """Everything a later recovery needs to prove what was started and to rebuild the event. Values are JSON-safe."""
+    return {
+        "v": 1,
+        "master_order_id": event.master_order_id,
+        "master_account_id": str(event.account_id) if event.account_id else None,
+        "strategy_id": str(strategy_id) if strategy_id else None,
+        "event_type": event.event_type,
+        "fill_sequence": event.fill_sequence,
+        "order_type": event.order_type,
+        "symbol": event.symbol,
+        "exchange": event.exchange,
+        "side": event.side,
+        "quantity": event.quantity,
+        "price": str(event.price),
+        "limit_price": str(event.limit_price),
+        "trigger_price": str(event.trigger_price),
+        "product_type": event.product_type,
+        "instrument_id": event.instrument_id,
+        "status": event.status,
+        "source": event.source,
+        "routed_children": list(routed_ids),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),      # OUR clock; never the broker's timestamp
+    }
+
+
+async def record_fanout_started(
+    session: AsyncSession, *, event: Any, strategy_id: Optional[uuid.UUID], routed_ids: List[str]
+) -> bool:
+    """
+    Durable proof that a fanout BEGAN, written before any Child task starts. An observe-only Master order and a crash
+    before fanout leave the same rows (a Master Order and nothing else); this record is what tells them apart. It
+    places nothing. If it cannot be written the caller carries on, and that event simply never qualifies for
+    automatic recovery.
+    """
+    session.add(AuditLog(
+        event_type=FANOUT_STARTED_EVENT_TYPE,
+        account_id=uuid.UUID(str(event.account_id)) if event.account_id else None,
+        master_order_id=event.master_order_id,
+        symbol=event.symbol,
+        exchange=event.exchange,
+        side=event.side,
+        quantity=event.quantity,
+        price=event.price,
+        reason_code=f"{event.event_type}#{event.fill_sequence}"[:100],
+        metadata_payload=fanout_started_metadata(event, strategy_id, routed_ids),
+    ))
+    await session.commit()
+    return True
 
 
 def format_reason(code: str, detail: Optional[str] = None) -> str:
@@ -339,6 +400,7 @@ async def record_fanout_summary(
     excluded: List[Dict[str, str]],
     results: Dict[str, Any],
     row_statuses: Optional[Dict[str, str]] = None,
+    recovery: bool = False,
 ) -> bool:
     """
     One advisory AuditLog row for a Master event: the routed Children with their outcomes, and the excluded members.
@@ -374,6 +436,7 @@ async def record_fanout_summary(
             "children": children,
             "counts": counts,
             "authoritative_source": "copy_trades",
+            "recovery": recovery,
             "note": "advisory; may be written again if the event is reprocessed",
             "recorded_at": datetime.now(timezone.utc).isoformat(),
         },

@@ -50,6 +50,7 @@ Two safety rules this module enforces, both deliberately fail-closed
    they are simply never handed to the copy engine.
 """
 import asyncio
+import inspect
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -63,6 +64,7 @@ from app.models.trades import Order, OrderSide, OrderSource, OrderStatus
 from app.services.alice_blue.client import AliceBlueClient
 from app.services.alice_blue.types import OrderRecord, OrderUpdateEvent
 from app.services.copy_engine.pipeline import CopyEnginePipeline
+from app.services.reliability.restart_recovery import DISPATCH_ACTIONS
 from app.services.monitoring.notifier import emit_system_event
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,7 @@ class MasterOrderPoller:
         check_interval_seconds: int = 5,
         activation_baseline: Optional[Set[str]] = None,
         activation_deadline: Optional[datetime] = None,
+        recovery: Optional[Any] = None,
     ):
         self.master_account_id = str(master_account_id)
         self.client_provider = client_provider
@@ -138,6 +141,13 @@ class MasterOrderPoller:
         )
         self._activation_deadline = activation_deadline
 
+        # R3b restart recovery (restart_recovery.RestartRecovery), used on the SEED pass only. None = the original
+        # behaviour: the whole first book is baselined and nothing is recovered.
+        self.recovery = recovery
+        # broker_order_id -> CANCEL / MODIFY, for the ONE dispatch the seed pass made for that order; the engine reads
+        # it once (pop_recovery_action) to restrict what that dispatch may turn into.
+        self._recovery_actions: Dict[str, str] = {}
+
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
@@ -149,6 +159,9 @@ class MasterOrderPoller:
         # ineligible (rule 1).
         self._baseline_order_ids: Set[str] = set()
         self._seeded = False
+
+    def pop_recovery_action(self, broker_order_id: str) -> Optional[str]:
+        return self._recovery_actions.pop(broker_order_id, None)
 
     @property
     def is_seeded(self) -> bool:
@@ -198,13 +211,19 @@ class MasterOrderPoller:
             )
             return 0
 
+        is_seed_pass = not self._seeded
         try:
-            book = await client.get_order_book()
+            book = await self._fetch_book(client, checked=is_seed_pass)
         except Exception as exc:
             logger.warning(f"[MasterOrderPoller] Order book fetch failed: {exc}")
             return 0
+        if book is None:
+            # The seed pass must be built on a book that was PROVABLY read. get_order_book() turns a network error or a
+            # non-200 into an empty list, and an empty baseline would make the next poll treat every existing order as
+            # new. Not seeded: the next poll tries again.
+            logger.warning("[MasterOrderPoller] Seed-pass order book could not be read reliably; not seeding, will retry.")
+            return 0
 
-        is_seed_pass = not self._seeded
         dispatched = 0
 
         # Activation replay applies to the seed pass only, and only while the
@@ -223,6 +242,15 @@ class MasterOrderPoller:
                     "first poll; baselining the whole order book (nothing in it is copied)."
                 )
 
+        plan = None
+        if is_seed_pass and not replay and self.recovery is not None:
+            try:
+                plan = await self.recovery.plan_seed(self.master_account_id, book)
+            except Exception as exc:
+                # Fail closed: without a plan this is the original behaviour - baseline everything, copy nothing.
+                logger.error(f"[MasterOrderPoller] Restart-recovery planning failed; plain baseline: {exc}", exc_info=True)
+                plan = None
+
         for record in book:
             if not record.broker_order_id:
                 continue
@@ -231,6 +259,21 @@ class MasterOrderPoller:
             if self._seen_state.get(record.broker_order_id) == current_state:
                 continue  # nothing changed since the last poll
             self._seen_state[record.broker_order_id] = current_state
+
+            if plan is not None and record.broker_order_id in plan.lifecycle:
+                # R3b: an order that ALREADY has Children stays under normal change detection (it is not baselined), so
+                # a later cancel / modify still reaches them. What the seed pass itself may dispatch is limited to a
+                # cancel or modify of Children that are still working; everything else is just persisted.
+                action = plan.lifecycle[record.broker_order_id]
+                if action in DISPATCH_ACTIONS and BROKER_STATUS_MAP.get(str(record.status or "").upper()) is not None:
+                    self._recovery_actions[record.broker_order_id] = action
+                    result = self.on_order_update(self._to_event(record))
+                    if asyncio.iscoroutine(result):
+                        await result
+                    dispatched += 1
+                else:
+                    await self._persist_only(record)
+                continue
 
             if is_seed_pass and not replay:
                 self._baseline_order_ids.add(record.broker_order_id)
@@ -267,7 +310,33 @@ class MasterOrderPoller:
             if missed_activation_orders:
                 await self._report_missed_activation_orders(missed_activation_orders)
 
+        if is_seed_pass and plan is not None and plan.resume:
+            # After the seed pass is complete (readiness is not held up). Never raises.
+            try:
+                await self.recovery.resume(self.master_account_id, plan.resume)
+            except Exception as exc:
+                logger.error(f"[MasterOrderPoller] Restart-recovery resume failed closed: {exc}", exc_info=True)
+
         return dispatched
+
+    async def _fetch_book(self, client: Any, *, checked: bool):
+        """
+        The order book, or None when `checked` and it cannot be shown to have been read. A client that offers
+        get_order_book_raw() (None on any failure) is asked first; one without it is read as before.
+        """
+        raw: Any = None
+        if checked:
+            probe_fn = getattr(client, "get_order_book_raw", None)
+            if callable(probe_fn):
+                probe = probe_fn()
+                if inspect.isawaitable(probe):
+                    raw = await probe
+                    if raw is None:
+                        return None
+        book = await client.get_order_book()
+        if checked and isinstance(raw, list) and raw and not book:
+            return None                      # the raw read saw orders but the parsed read found none: inconsistent
+        return book
 
     async def _report_missed_activation_orders(self, records) -> None:
         """Orders placed after the switch snapshot that the expired-snapshot
