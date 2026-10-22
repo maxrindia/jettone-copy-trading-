@@ -3372,6 +3372,19 @@ class CopyEnginePipeline:
         Executes market order replication for a single follower with complete risk checks.
         """
         acc_id = follower.id
+
+        # A disabled, emergency-stopped or runtime-paused Child never receives a new MARKET copy. This is the same
+        # guard, in the same first position, as the LIMIT and SL paths, and it uses the pause state already resolved
+        # for this event (`follower_runtime_paused`, from the stop provider) - no extra Redis read. It must not depend
+        # on the risk gate below: that gate only runs for a Child WITH copy settings, so a paused Child without
+        # settings used to be copied. Nothing past this point runs for such a Child: no funds fetch, sizing, risk
+        # evaluation, SELL guard, claim, Order pre-write or broker call.
+        # Known limitation, deliberate: this also blocks a position-REDUCING copy (an exit) for a paused Child, exactly
+        # as LIMIT and SL already do. There is no exit bypass; a paused Child's exits are handled manually.
+        if not follower.is_active or follower.is_emergency_stopped or follower_runtime_paused:
+            logger.info(f"[Pipeline] Follower {follower.display_name} paused/disabled. Skipping market order.")
+            return {"status": "SKIPPED", "reason": "TRADING_DISABLED"}
+
         settings_obj = follower.copy_settings
 
         copy_event_uuid = derive_copy_event_id(

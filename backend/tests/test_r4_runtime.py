@@ -119,8 +119,9 @@ async def test_follower_specific_stop_blocks_only_that_follower(db_session, samp
     pipeline = CopyEnginePipeline(validator=EventValidator(redis=AsyncMock()), stop_provider=stop_provider)
     res = await pipeline.execute_replication(event=_event(), clients={fid: client})
 
-    assert res["results"][fid]["status"] == "REJECTED"
-    assert "FOLLOWER_EMERGENCY_STOP" in res["results"][fid]["reasons"]
+    # A runtime-paused Child is skipped before any gate on every path (was REJECTED / FOLLOWER_EMERGENCY_STOP from the
+    # risk gate, which only a Child with copy settings reached). Still zero sends.
+    assert res["results"][fid] == {"status": "SKIPPED", "reason": "TRADING_DISABLED"}
     client.place_order.assert_not_called()
 
 
