@@ -61,9 +61,18 @@ async def lifespan(app: FastAPI):
     engine_loop = EngineLoop(redis)
     await engine_loop.start()
 
+    # R4c: observe-only instrument shadow comparison. Creates no task unless INSTRUMENT_SHADOW_ENABLED is true.
+    from app.services.instruments.shadow import ShadowJob
+    shadow_job = ShadowJob()
+    try:
+        await shadow_job.start()
+    except Exception as exc:
+        logger.error(f"Instrument shadow job could not start (ignored, observe-only): {exc}")
+
     yield
 
     logger.info("Shutting down Alice Blue Copy Trading Engine...")
+    await shadow_job.stop()
     if engine_loop:
         await engine_loop.stop()
     await close_redis()

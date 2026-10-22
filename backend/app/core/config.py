@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     # See docs/RESTART_RECOVERY.md.
     ENGINE_RECOVERY_RESUME_ENABLED: bool = False
 
+    # R4c observe-only instrument shadow comparison. OFF by default: no task is created and no event is written. When
+    # on, a background job compares persisted Master orders' instruments with the in-memory broker catalogs and records
+    # INSTRUMENT_SHADOW_COMPARE events for the read-only report; it never calls a broker or influences an order.
+    # The interval is raised to at least 300 s, the window capped at 168 h and the order count at 500.
+    # See docs/INSTRUMENT_SHADOW.md.
+    INSTRUMENT_SHADOW_ENABLED: bool = False
+    INSTRUMENT_SHADOW_INTERVAL_SECONDS: int = 900
+    INSTRUMENT_SHADOW_WINDOW_HOURS: int = 24
+    INSTRUMENT_SHADOW_MAX_ORDERS: int = 500
+
     # TEMPORARY test switch: true skips the follower SELL position checks in
     # both places - initial SELL placement (_enforce_sell_position_safety) and
     # the SELL child LIMIT->MARKET reprice (handle_master_modification) - so a
