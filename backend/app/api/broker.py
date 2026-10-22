@@ -28,7 +28,7 @@ from app.services.alice_blue.types import (
 )
 from app.services.brokers.guards import ensure_alice_blue_account
 from app.services.copy_engine.events import MasterTradeEvent
-from app.services.copy_engine.pipeline import CopyEnginePipeline
+from app.services.copy_engine.pipeline import CopyEnginePipeline, is_ambiguous_send
 from app.services.copy_engine.validator import EventValidator
 from app.services.live_trading import get_live_trading_state
 from app.services.monitoring.notifier import emit_system_event
@@ -37,6 +37,18 @@ from app.services.reliability.emergency_stop import (
     set_master_trading,
 )
 from app.services.reliability.stop_provider import build_stop_provider
+from app.services.reliability.unresolved_sends import (
+    UNRESOLVED_BROKER_STATUS,
+    ResolutionError,
+    blocked_detail,
+    emit_unresolved_send_event,
+    escalate_if_overdue,
+    find_unresolved_send,
+    list_unresolved_sends,
+    outcome_unknown_message,
+    resolve_unresolved_send,
+    send_claim_lock,
+)
 from app.services import strategy_membership as membership
 from app.services.runtime import hooks as runtime_hooks
 from sqlalchemy.orm import selectinload
@@ -337,6 +349,79 @@ async def place_manual_master_order(
         return await _place_and_replicate_manual_order(payload, db, redis, master, client)
 
 
+async def _record_unresolved_manual_order(
+    pipeline: CopyEnginePipeline,
+    db: AsyncSession,
+    master: Account,
+    payload: "ManualOrderRequest",
+    db_side,
+    order_type_str: str,
+    order_price: Decimal,
+    client_order_id: str,
+    result,
+) -> Dict[str, Any]:
+    """Ambiguous manual master order: store it UNRESOLVED (never REJECTED), alert, do not replicate, say 'do not retry'."""
+    symbol = payload.symbol.upper()
+    logger.critical(
+        f"Manual master order {client_order_id} for {symbol}: broker outcome UNKNOWN "
+        f"(category={result.category.value}). Not rejected, not retried, not replicated."
+    )
+    try:
+        await pipeline.save_or_update_order(
+            internal_order_id=client_order_id,
+            broker_order_id=None,
+            account_id=master.id,
+            source=OrderSource.INTERNAL_UI,
+            exchange=payload.exchange.upper(),
+            symbol=symbol,
+            side=db_side,
+            order_type=order_type_str,
+            product_type=payload.product_type,
+            quantity=payload.quantity,
+            filled_quantity=0,
+            pending_quantity=payload.quantity,
+            price=order_price,
+            trigger_price=payload.trigger_price or Decimal("0"),
+            status=OrderStatus.PENDING,
+            broker_status=UNRESOLVED_BROKER_STATUS,
+        )
+    except Exception as exc:
+        logger.critical(
+            f"Could not mark manual order {client_order_id} unresolved: {exc}", exc_info=True
+        )
+    await emit_unresolved_send_event(
+        db,
+        event_type="MANUAL_ORDER_UNRESOLVED_SEND",
+        account_id=master.id,
+        message=(
+            f"Manual master order {client_order_id} ({payload.side.value} {payload.quantity} {symbol}) has an "
+            f"UNKNOWN broker outcome ({result.category.value}). It may have been placed. Verify it at the broker "
+            "before sending another order; it is not rejected and was not replicated."
+        ),
+        metadata={
+            "account_id": str(master.id),
+            "client_order_id": client_order_id,
+            "symbol": symbol,
+            "exchange": payload.exchange.upper(),
+            "side": payload.side.value,
+            "quantity": payload.quantity,
+            "order_type": order_type_str,
+            "price": str(order_price),
+            "category": result.category.value,
+            "strategy_id": str(payload.strategy_id),
+        },
+    )
+    return {
+        "placed": False,
+        "outcome_unknown": True,
+        "category": result.category.value,
+        "message": outcome_unknown_message("Order", symbol, client_order_id),
+        "master_order_id": None,
+        "client_order_id": client_order_id,
+        "replication": None,
+    }
+
+
 async def _place_and_replicate_manual_order(
     payload: "ManualOrderRequest", db: AsyncSession, redis, master: Account, client: AliceBlueClient
 ) -> Dict[str, Any]:
@@ -380,30 +465,84 @@ async def _place_and_replicate_manual_order(
     # Step 1: Pre-write the Order record in PENDING state BEFORE contacting the
     # broker, keyed by client_order_id, so this request is identifiable and
     # recoverable even if everything after the broker call below fails.
-    await pipeline.save_or_update_order(
-        internal_order_id=client_order_id,
-        broker_order_id=None,
-        account_id=master.id,
-        source=OrderSource.INTERNAL_UI,
-        exchange=payload.exchange.upper(),
-        symbol=payload.symbol.upper(),
-        side=db_side,
-        order_type=order_type_str,
-        product_type=payload.product_type,
-        quantity=payload.quantity,
-        filled_quantity=0,
-        pending_quantity=payload.quantity,
-        price=order_price,
-        trigger_price=payload.trigger_price or Decimal("0"),
-        status=OrderStatus.PENDING,
-    )
+    #
+    # The guard and the pre-write are ONE step per account + symbol (send_claim_lock, released before the broker
+    # call): an earlier order whose broker outcome is still unknown - or one still in flight - blocks a new one,
+    # because sending again could place it twice, and two simultaneous requests cannot both pass the check.
+    async with send_claim_lock(master.id, payload.symbol, payload.exchange):
+        unresolved = await find_unresolved_send(db, master.id, payload.symbol, payload.exchange)
+        if unresolved is not None:
+            logger.warning(
+                f"Manual master order blocked: unresolved send {unresolved.internal_order_id} "
+                f"for account {master.id}, symbol {payload.symbol.upper()}"
+            )
+            await escalate_if_overdue(db, unresolved)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=blocked_detail(unresolved))
+        await pipeline.save_or_update_order(
+            internal_order_id=client_order_id,
+            broker_order_id=None,
+            account_id=master.id,
+            source=OrderSource.INTERNAL_UI,
+            exchange=payload.exchange.upper(),
+            symbol=payload.symbol.upper(),
+            side=db_side,
+            order_type=order_type_str,
+            product_type=payload.product_type,
+            quantity=payload.quantity,
+            filled_quantity=0,
+            pending_quantity=payload.quantity,
+            price=order_price,
+            trigger_price=payload.trigger_price or Decimal("0"),
+            status=OrderStatus.PENDING,
+        )
 
     # Step 2: Submit to the broker. Exactly one call, no matter what happens
     # afterward -- a timed-out/ambiguous broker response must never be
     # re-sent from this function.
-    result = await client.place_order(req)
+    try:
+        result = await client.place_order(req)
+    except Exception as exc:
+        # Only the EXACT AuthenticationError is known to be pre-send: it comes from get_session()/_get_headers(),
+        # before the request is issued. A SessionExpiredError (a subclass) is raised AFTER the request went out - the
+        # broker's answer may be a gateway error that merely mentions the session - and any other exception (or a
+        # cancellation, which is not an Exception at all) cannot be proven pre-send either. Those leave the
+        # pre-written PENDING row unresolved, so the retry guard keeps blocking until the operator verifies it.
+        if type(exc) is not AuthenticationError:
+            logger.critical(
+                f"Manual master order {client_order_id}: place_order raised {type(exc).__name__}; the request may have "
+                "reached the broker. Left unresolved - verify at the broker, then clear it with the resolve endpoint."
+            )
+            raise
+        logger.error(f"Manual master order {client_order_id} was not sent: no active broker session")
+        try:
+            await pipeline.save_or_update_order(
+                internal_order_id=client_order_id,
+                broker_order_id=None,
+                account_id=master.id,
+                source=OrderSource.INTERNAL_UI,
+                exchange=payload.exchange.upper(),
+                symbol=payload.symbol.upper(),
+                side=db_side,
+                order_type=order_type_str,
+                product_type=payload.product_type,
+                quantity=payload.quantity,
+                price=order_price,
+                status=OrderStatus.FAILED,
+                pending_quantity=0,
+                broker_status="FAILED",
+                rejection_reason="Not sent: no active broker session",
+            )
+        except Exception as persist_exc:
+            logger.critical(f"Could not record manual order {client_order_id} as not sent: {persist_exc}", exc_info=True)
+        raise
 
-    # Step 3: Handle rejection.
+    # Step 3: Handle rejection - but an AMBIGUOUS outcome (TIMEOUT / UNKNOWN) is not a rejection: the order may
+    # exist at the broker. Keep it unresolved and tell the caller not to retry.
+    if is_ambiguous_send(result):
+        return await _record_unresolved_manual_order(
+            pipeline, db, master, payload, db_side, order_type_str, order_price, client_order_id, result
+        )
+
     if result.category != OrderResultCategory.SUCCESS or not result.broker_order_id:
         logger.warning(
             f"Master order placement rejected/failed: category={result.category.value}, "
@@ -598,4 +737,63 @@ async def _place_and_replicate_manual_order(
         "client_order_id": client_order_id,
         "fill_price": float(event.price),
         "replication": replication,
+    }
+
+
+class ResolveUnresolvedRequest(BaseModel):
+    client_order_id: str = Field(..., min_length=1, max_length=100)
+    outcome: str = Field(..., description="NOT_PLACED (the broker has no such order) or PLACED (the broker holds it)")
+    verified_at_broker: bool = Field(..., description="Must be true: you checked the broker's order book and positions")
+    note: str = Field(..., min_length=5, max_length=300, description="What you checked at the broker")
+    broker_order_id: Optional[str] = Field(None, max_length=100, description="Required when outcome is PLACED")
+
+
+def _unresolved_row(order) -> Dict[str, Any]:
+    return {
+        "client_order_id": order.internal_order_id,
+        "account_id": str(order.account_id),
+        "symbol": order.symbol,
+        "exchange": order.exchange,
+        "side": order.side.value if hasattr(order.side, "value") else str(order.side),
+        "quantity": order.quantity,
+        "order_type": order.order_type,
+        "source": order.source.value if hasattr(order.source, "value") else str(order.source),
+        "broker_status": order.broker_status,
+        "created_at": order.created_at.isoformat() if order.created_at else None,
+    }
+
+
+@router.get("/unresolved-orders")
+async def list_unresolved_orders(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
+    """Manual master orders and square-offs whose broker outcome is unknown and which block new orders."""
+    rows = await list_unresolved_sends(db)
+    return {"count": len(rows), "orders": [_unresolved_row(o) for o in rows]}
+
+
+@router.post("/unresolved-orders/resolve")
+async def resolve_unresolved_order(payload: ResolveUnresolvedRequest, db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
+    """
+    Clears an unresolved manual master order or square-off AFTER you verified it in the broker's order book and
+    positions. Nothing clears it automatically. Records what you found - it places, cancels and replicates nothing:
+      NOT_PLACED -> the order becomes REJECTED;  PLACED (+ broker_order_id) -> the order becomes OPEN, or, if the
+      master order poller already recorded that exact broker order (same account, symbol, side, quantity) as an
+      external order, this row is closed as CANCELLED ("superseded") and the real row is left untouched.
+    Copy-pipeline child orders are refused (409). Resolving never copies anything to the Children: if you resolve
+    PLACED before the poller saw the order, it is not replicated and must be copied by hand.
+    """
+    try:
+        order = await resolve_unresolved_send(
+            db,
+            client_order_id=payload.client_order_id,
+            outcome=payload.outcome,
+            note=payload.note,
+            verified_at_broker=payload.verified_at_broker,
+            broker_order_id=payload.broker_order_id,
+        )
+    except ResolutionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    return {
+        "resolved": True,
+        "outcome": payload.outcome,
+        "order": {**_unresolved_row(order), "status": order.status.value, "broker_order_id": order.broker_order_id},
     }

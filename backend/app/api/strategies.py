@@ -21,6 +21,7 @@ from app.services import strategy_membership as membership
 from app.services import strategy_switch
 from app.services.runtime import hooks as runtime_hooks
 from app.services.alice_blue.client import AliceBlueClient
+from app.services.alice_blue.exceptions import AuthenticationError
 from app.services.alice_blue.types import OrderResultCategory, OrderSide
 from app.services.brokers.guards import ensure_alice_blue_account
 from app.schemas.strategies import (
@@ -34,10 +35,22 @@ from app.schemas.strategies import (
     StrategyResponse,
     StrategyUpdate,
 )
-from app.services.copy_engine.pipeline import CopyEnginePipeline
+from app.services.copy_engine.pipeline import CopyEnginePipeline, is_ambiguous_send
 from app.services.copy_engine.validator import EventValidator
 from app.services.monitoring.notifier import emit_system_event
 from app.services.reliability.stop_provider import build_stop_provider
+from app.services.reliability.unresolved_sends import (
+    UNRESOLVED_BROKER_STATUS,
+    ResolutionError,
+    blocked_detail,
+    emit_unresolved_send_event,
+    escalate_if_overdue,
+    find_unresolved_send,
+    list_unresolved_sends,
+    outcome_unknown_message,
+    resolve_unresolved_send,
+    send_claim_lock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -676,33 +689,146 @@ async def square_off_child_position(
     # for a follower) picks this up; master_broker_order_id stays NULL,
     # there is no master order behind a manual square-off. No CopyTrade
     # write - this isn't a copy-replication event.
-    if target_qty > 0:
-        await pipeline.save_or_update_order(
-            internal_order_id=client_order_id,
-            broker_order_id=None,
-            account_id=account.id,
-            source=OrderSource.SYSTEM,
-            exchange=payload.exchange.upper(),
-            symbol=payload.symbol.upper(),
-            side=db_side,
-            order_type="MARKET",
-            product_type=payload.product_type,
-            quantity=target_qty,
-            filled_quantity=0,
-            pending_quantity=target_qty,
-            price=Decimal("0"),
-            status=OrderStatus.PENDING,
-            master_broker_order_id=None,
-        )
+    #
+    # The guard and the pre-write are ONE step per account + symbol (send_claim_lock, released before the broker
+    # call): an earlier order whose broker outcome is still unknown - or one still in flight - blocks a new
+    # square-off, because sending again could close the position twice and reverse it, and two simultaneous
+    # requests cannot both pass the check.
+    async with send_claim_lock(account.id, payload.symbol, payload.exchange):
+        unresolved = await find_unresolved_send(db, account.id, payload.symbol, payload.exchange)
+        if unresolved is not None:
+            logger.warning(
+                f"[SquareOff] Blocked: unresolved send {unresolved.internal_order_id} "
+                f"for account {account.id}, symbol {payload.symbol.upper()}"
+            )
+            await escalate_if_overdue(db, unresolved)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=blocked_detail(unresolved))
+        if target_qty > 0:
+            await pipeline.save_or_update_order(
+                internal_order_id=client_order_id,
+                broker_order_id=None,
+                account_id=account.id,
+                source=OrderSource.SYSTEM,
+                exchange=payload.exchange.upper(),
+                symbol=payload.symbol.upper(),
+                side=db_side,
+                order_type="MARKET",
+                product_type=payload.product_type,
+                quantity=target_qty,
+                filled_quantity=0,
+                pending_quantity=target_qty,
+                price=Decimal("0"),
+                status=OrderStatus.PENDING,
+                master_broker_order_id=None,
+            )
 
-    result, target_side, target_qty = await client.square_off_position(
-        symbol=payload.symbol,
-        exchange=payload.exchange,
-        quantity=payload.quantity,
-        side=payload.side,
-        product=payload.product_type,
-        client_order_id=client_order_id,
-    )
+    try:
+        result, target_side, target_qty = await client.square_off_position(
+            symbol=payload.symbol,
+            exchange=payload.exchange,
+            quantity=payload.quantity,
+            side=payload.side,
+            product=payload.product_type,
+            client_order_id=client_order_id,
+        )
+    except Exception as exc:
+        # Only the EXACT AuthenticationError is known to be pre-send: it comes from get_session()/_get_headers(),
+        # before the request is issued. A SessionExpiredError (a subclass) is raised AFTER the request went out - the
+        # broker's answer may be a gateway error that merely mentions the session - and any other exception (or a
+        # cancellation, which is not an Exception at all) cannot be proven pre-send either. Those leave the
+        # pre-written PENDING row unresolved, so the retry guard keeps blocking until the operator verifies it.
+        if type(exc) is not AuthenticationError:
+            logger.critical(
+                f"[SquareOff] Order {client_order_id}: place_order raised {type(exc).__name__}; the request may have "
+                "reached the broker. Left unresolved - verify at the broker, then clear it with the resolve endpoint."
+            )
+            raise
+        logger.error(f"[SquareOff] Order {client_order_id} was not sent: no active broker session")
+        if target_qty > 0:
+            try:
+                await pipeline.save_or_update_order(
+                    internal_order_id=client_order_id,
+                    broker_order_id=None,
+                    account_id=account.id,
+                    source=OrderSource.SYSTEM,
+                    exchange=payload.exchange.upper(),
+                    symbol=payload.symbol.upper(),
+                    side=db_side,
+                    order_type="MARKET",
+                    product_type=payload.product_type,
+                    quantity=target_qty,
+                    filled_quantity=0,
+                    pending_quantity=0,
+                    price=Decimal("0"),
+                    status=OrderStatus.FAILED,
+                    broker_status="FAILED",
+                    rejection_reason="Not sent: no active broker session",
+                    master_broker_order_id=None,
+                )
+            except Exception as persist_exc:
+                logger.critical(
+                    f"[SquareOff] Could not record order {client_order_id} as not sent: {persist_exc}", exc_info=True
+                )
+        raise
+
+    # An AMBIGUOUS outcome (TIMEOUT / UNKNOWN) is not a rejection: the order may exist at the broker. Keep it
+    # unresolved (never REJECTED), alert, and tell the caller not to retry.
+    if is_ambiguous_send(result):
+        symbol = payload.symbol.upper()
+        logger.critical(
+            f"[SquareOff] Order {client_order_id} for {symbol} on account {account.id}: broker outcome UNKNOWN "
+            f"(category={result.category.value}). Not rejected, not retried."
+        )
+        if target_qty > 0:
+            try:
+                await pipeline.save_or_update_order(
+                    internal_order_id=client_order_id,
+                    broker_order_id=None,
+                    account_id=account.id,
+                    source=OrderSource.SYSTEM,
+                    exchange=payload.exchange.upper(),
+                    symbol=symbol,
+                    side=db_side,
+                    order_type="MARKET",
+                    product_type=payload.product_type,
+                    quantity=target_qty,
+                    filled_quantity=0,
+                    pending_quantity=target_qty,
+                    price=Decimal("0"),
+                    status=OrderStatus.PENDING,
+                    broker_status=UNRESOLVED_BROKER_STATUS,
+                    master_broker_order_id=None,
+                )
+            except Exception as exc:
+                logger.critical(
+                    f"[SquareOff] Could not mark square-off order {client_order_id} unresolved "
+                    f"for account {account.id}: {exc}",
+                    exc_info=True,
+                )
+        await emit_unresolved_send_event(
+            db,
+            event_type="SQUARE_OFF_UNRESOLVED_SEND",
+            account_id=account.id,
+            message=(
+                f"Square-off order {client_order_id} ({db_side.value} {target_qty} {symbol}) on account "
+                f"{account.id} has an UNKNOWN broker outcome ({result.category.value}). It may have been placed. "
+                "Verify it at the broker before squaring off again; it is not rejected."
+            ),
+            metadata={
+                "account_id": str(account.id),
+                "strategy_id": str(strategy_id),
+                "client_order_id": client_order_id,
+                "symbol": symbol,
+                "exchange": payload.exchange.upper(),
+                "side": db_side.value,
+                "quantity": target_qty,
+                "category": result.category.value,
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=outcome_unknown_message("Square-off", symbol, client_order_id),
+        )
 
     if result.category != OrderResultCategory.SUCCESS:
         if target_qty > 0:
