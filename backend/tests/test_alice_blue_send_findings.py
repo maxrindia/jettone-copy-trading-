@@ -15,11 +15,11 @@ Contract asserted here (all with a mocked HTTP layer; nothing leaves the process
   * every other transport error after the send -> TIMEOUT, exactly ONE POST, never retried
   * timeouts (including connect/pool timeouts) -> TIMEOUT, exactly ONE POST (existing, conservative)
   * an unreadable/unexpected response          -> TIMEOUT, exactly ONE POST, no exception reaches RetryPolicy
-  * a 401 / expired session                    -> unchanged: propagates SessionExpiredError
+  * a 401                                      -> REJECTED (definite: refused before it could execute), ONE POST (Batch A)
   * normal accept / reject                     -> unchanged
+  * a parsable 200 with no order id, and 5xx   -> TIMEOUT, ONE POST (Batch A; they used to be pinned as REJECTED)
 
-Known ambiguous-response cases that are DELIBERATELY NOT changed here and are pinned as they are: see
-test_unchanged_*_is_still_rejected below (a parsable 200 with no order id, and any non-200/400/422 status).
+The full response-classification matrix and the RetryPolicy rules live in test_alice_blue_order_response_safety.py.
 """
 from decimal import Decimal
 from unittest.mock import AsyncMock
@@ -184,7 +184,7 @@ async def test_an_unparsable_body_is_ambiguous_and_sent_exactly_once(mock_redis,
 @pytest.mark.parametrize("body,expected", [
     (b'["not-a-dict"]', OrderResultCategory.TIMEOUT),      # item.get on a str: used to raise into the retry loop
     (b'[1, 2]', OrderResultCategory.TIMEOUT),              # item.get on an int: same
-    (b'"just a string"', OrderResultCategory.REJECTED),    # no exception: no order id, no error -> existing REJECTED
+    (b'"just a string"', OrderResultCategory.TIMEOUT),     # no exception, no order id, no error -> ambiguous (Batch A)
 ], ids=["str_item", "int_items", "str_body"])
 async def test_a_body_of_an_unexpected_shape_never_raises_into_the_retry_loop(mock_redis, body, expected):
     http = await http_with(mock_redis, response=raw(200, body, headers={"content-type": "application/json"}))
@@ -212,32 +212,28 @@ async def test_a_definite_rejection_is_still_a_rejection(mock_redis):
 
 
 @pytest.mark.asyncio
-async def test_a_401_still_propagates_session_expiry_and_is_not_turned_into_an_ambiguous_result(mock_redis):
+async def test_a_401_is_a_definite_rejection_with_one_post_and_is_not_ambiguous(mock_redis):
     http = await http_with(mock_redis, response=raw(401, b'{"message":"unauthorized"}'))
-    with pytest.raises(SessionExpiredError):
-        await make(mock_redis, http).place_order(req())
-    assert len(posts(http)) == 1                                  # re-auth cannot succeed here; no second POST
+    out = await RETRY().execute(make(mock_redis, http).place_order, req())
+    assert out.category == OrderResultCategory.REJECTED and "HTTP 401" in out.message
+    assert len(posts(http)) == 1                                  # no re-auth retry, no second POST
 
 
-# Unchanged and deliberately NOT part of R2A. Recorded so the open question stays visible.
+# Batch A: these two used to be pinned as REJECTED ("unchanged, OPEN"); neither proves the order was not placed.
 @pytest.mark.asyncio
-async def test_unchanged_a_parsable_200_with_no_order_id_is_still_rejected(mock_redis):
-    """OPEN: HTTP 200 whose JSON carries no order id and no error is reported as REJECTED today. Whether that
-    should be ambiguous needs the broker's documented behaviour; not changed here."""
+async def test_a_parsable_200_with_no_order_id_is_ambiguous_and_sent_once(mock_redis):
     http = await http_with(mock_redis, response=raw(200, b"{}", headers={"content-type": "application/json"}))
-    out = await make(mock_redis, http).place_order(req())
-    assert out.category == OrderResultCategory.REJECTED
+    out = await RETRY().execute(make(mock_redis, http).place_order, req())
+    assert out.category == OrderResultCategory.TIMEOUT and "no usable broker order id" in out.message
+    assert len(posts(http)) == 1
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", [500, 502, 503, 504])
-async def test_unchanged_a_5xx_status_is_still_rejected(mock_redis, status):
-    """OPEN: a gateway/server error after the send is reported as REJECTED today (the body is never read for
-    statuses other than 200/400/422). It is not retried, so it cannot duplicate, but it may be a false
-    definitive rejection. Not changed here."""
+async def test_a_5xx_status_is_ambiguous_and_sent_once(mock_redis, status):
     http = await http_with(mock_redis, response=raw(status, b"upstream failure"))
     out = await RETRY().execute(make(mock_redis, http).place_order, req())
-    assert out.category == OrderResultCategory.REJECTED
+    assert out.category == OrderResultCategory.TIMEOUT and f"HTTP {status}" in out.message
     assert len(posts(http)) == 1
 
 

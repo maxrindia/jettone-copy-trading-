@@ -43,8 +43,9 @@ from app.services.monitoring.notifier import emit_system_event
 logger = logging.getLogger("copy_engine_pipeline")
 
 # A send whose outcome the broker never confirmed either way. TIMEOUT: the adapter reached the point of
-# sending and got no usable answer. UNKNOWN: produced only by RetryPolicy after place_order RAISED on every
-# attempt - an exception can follow a request the broker already accepted. Neither proves the order was not
+# sending and got no usable answer. UNKNOWN: produced only by RetryPolicy when place_order RAISED an exception
+# that is not proven to have happened before the request left (it is then attempted once, never retried) - an
+# exception can follow a request the broker already accepted. Neither proves the order was not
 # placed, so neither may be recorded as a rejection or failure; both wait for the sweeper's order-book
 # reconciliation. NETWORK_ERROR is deliberately not here: every adapter - Alice Blue included, since the
 # R2A fix - returns it only for failures that prove the request never left (brokers/transport.py), and it

@@ -145,7 +145,8 @@ async def test_retry_policy_timeout_is_terminal():
 async def test_retry_policy_exception_returns_unknown_result():
     """
     5.2/R4: an exception inside the wrapped call returns a proper UNKNOWN
-    OrderResult instead of raising TypeError (regression test).
+    OrderResult instead of raising TypeError (regression test). Batch A: an exception that is not PROVEN to have
+    happened before the request left may follow an accepted order, so it is attempted ONCE, never retried.
     """
     policy = RetryPolicy(max_attempts=2, base_delay_sec=0.01)
     mock_func = AsyncMock(side_effect=RuntimeError("boom"))
@@ -153,7 +154,7 @@ async def test_retry_policy_exception_returns_unknown_result():
     res = await policy.execute(mock_func)
     assert res.category == OrderResultCategory.UNKNOWN
     assert "boom" in res.message
-    assert mock_func.call_count == 2
+    assert mock_func.call_count == 1
 
 
 @pytest.mark.asyncio

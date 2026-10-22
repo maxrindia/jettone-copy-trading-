@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Set
 
 from app.services.alice_blue.types import OrderResult, OrderResultCategory
+from app.services.brokers.transport import is_marked_not_sent
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +14,11 @@ logger = logging.getLogger(__name__)
 RETRYABLE_CATEGORIES: Set[OrderResultCategory] = {
     OrderResultCategory.NETWORK_ERROR,
 }
+
+
+# A RAISED exception is retried only when it carries proof that the request never left (transport.mark_not_sent). Any
+# other exception may follow a request the broker already accepted, so it ends the attempts at once as UNKNOWN - an
+# unresolved outcome for the stale-order sweeper / operator - and never triggers another placement.
 
 
 class RetryPolicy:
@@ -56,10 +62,15 @@ class RetryPolicy:
 
             except Exception as exc:
                 logger.error(f"Exception during order execution on attempt {attempt}/{self.max_attempts}: {exc}", exc_info=True)
-                if attempt >= self.max_attempts:
+                if not is_marked_not_sent(exc):
                     return self._failure(
                         OrderResultCategory.UNKNOWN,
-                        f"Exception after retries: {str(exc)}",
+                        f"Exception after the request may have been sent (not retried): {str(exc)}",
+                    )
+                if attempt >= self.max_attempts:
+                    return self._failure(
+                        OrderResultCategory.NETWORK_ERROR,
+                        f"Order not sent after {attempt} attempts: {type(exc).__name__}",
                     )
                 await asyncio.sleep(current_delay)
                 current_delay *= self.backoff_factor

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -28,7 +29,7 @@ from app.services.alice_blue.types import (
     Position,
     ProductType,
 )
-from app.services.brokers.transport import SendState, is_provably_not_sent
+from app.services.brokers.transport import SendState, is_provably_not_sent, mark_not_sent
 
 logger = logging.getLogger("alice_blue_client")
 
@@ -180,17 +181,30 @@ class AliceBlueClient:
         once (force_refresh) and retries exactly once. A second auth failure
         raises SessionExpiredError instead of being swallowed as empty data.
 
-        `state` (order creation only): set to sent=True immediately before each request is
+        `state` (order creation only): set to sent=True immediately before the request is
         issued, so a caller can tell a failure BEFORE the request left (safe to retry) from
-        one AFTER it (the broker may already hold the order). It is never reset. A session
-        rejection (_is_auth_failure) surfaces as SessionExpiredError, which place_order lets
-        propagate unchanged, i.e. it is treated as "the order was not taken". The flag stays True
-        so that any OTHER error raised afterwards (for example during re-authentication) is
-        still handled as an ambiguous outcome, never as a retryable one.
+        one AFTER it (the broker may already hold the order). It is never reset. With a `state`
+        this is a SINGLE attempt (see the branch below): a 401 raises SessionExpiredError, which
+        place_order turns into a definite rejection; nothing else is read as an auth failure.
         """
         headers = await self._get_headers()
         if state is not None:
+            # ORDER CREATION: exactly one request, never a second. Only an HTTP 401 is read as a refused session: by HTTP
+            # semantics an unauthenticated request is not executed. That is an inference from the status code, not
+            # something Alice Blue documents. A non-401 response that merely MENTIONS an
+            # expired session - a gateway error, say - proves nothing about whether the order was taken, so it goes
+            # back to the caller's status handling unchanged. There is no re-authentication retry on this path.
             state.sent = True
+            resp = await self._http.request(method, f"{self.A3_BASE_URL}{path}", headers=headers, **kwargs)
+            if resp.status_code == 401:
+                try:                      # drop the refused token first, so it cannot be reused even if the DB step fails
+                    await self.redis.delete(f"alice:session:{self.account_id}")
+                    await self.redis.delete(f"alice:funds:{self.account_id}")
+                except Exception as exc:
+                    logger.warning(f"[{self.account_id}] Could not clear cached session/funds after a 401: {type(exc).__name__}")
+                await self._invalidate_db_session()
+                raise SessionExpiredError(self.account_id, f"Session rejected (HTTP 401) on {path}")
+            return resp
         resp = await self._http.request(method, f"{self.A3_BASE_URL}{path}", headers=headers, **kwargs)
         if not self._is_auth_failure(resp):
             return resp
@@ -206,8 +220,6 @@ class AliceBlueClient:
             )
 
         headers = await self._get_headers()
-        if state is not None:
-            state.sent = True
         resp = await self._http.request(method, f"{self.A3_BASE_URL}{path}", headers=headers, **kwargs)
         if self._is_auth_failure(resp):
             await self._invalidate_db_session()
@@ -534,7 +546,20 @@ class AliceBlueClient:
         """
         Submits an order to Alice Blue A3 /open-api/od/v1/orders/placeorder.
         Categorizes failures strictly into SUCCESS, REJECTED, TIMEOUT, NETWORK_ERROR, UNKNOWN.
+
+        Any exception that escapes BEFORE the request was issued is tagged (transport.mark_not_sent): RetryPolicy
+        re-sends only after such proof. An exception after the send never escapes - it is returned as an ambiguous
+        TIMEOUT result.
         """
+        state = SendState()
+        try:
+            return await self._place_order_once(order, state)
+        except Exception as exc:
+            if not state.sent:
+                mark_not_sent(exc)
+            raise
+
+    async def _place_order_once(self, order: OrderRequest, state: SendState) -> OrderResult:
         # Validate order inputs before constructing payload
         if not order.quantity or order.quantity <= 0:
             return OrderResult(
@@ -735,7 +760,6 @@ class AliceBlueClient:
         # Only a failure that PROVES the request never left may be reported as NETWORK_ERROR, the one
         # category RetryPolicy re-sends. Everything after the send is ambiguous (TIMEOUT: never resent,
         # reconciled by the stale-order sweeper) - see brokers/transport.py.
-        state = SendState()
         try:
             resp = await self._request_with_reauth(
                 "POST",
@@ -744,9 +768,21 @@ class AliceBlueClient:
                 timeout=5.0,  # Strict timeout
                 state=state,
             )
+        except SessionExpiredError as exc:
+            # HTTP 401 on the placeorder POST: treated as a definite refusal because an unauthenticated request is not
+            # executed (HTTP semantics - an inference, not an Alice Blue guarantee; the runbook says to check the order
+            # book if in doubt). Reported as a rejection, never raised (a raised exception would be retried).
+            logger.warning(f"[{self.account_id}] placeorder refused with HTTP 401 for {order.client_order_id}")
+            return OrderResult(
+                category=OrderResultCategory.REJECTED,
+                client_order_id=order.client_order_id,
+                broker_order_id=None,
+                message="Order not placed: Alice Blue refused the session (HTTP 401); log in again (check the order book before re-sending if in doubt)",
+                raw_response={"http_status": 401},
+                timestamp=now,
+            )
         except AuthenticationError:
-            raise  # unchanged: an auth failure is treated as "order not taken"; it propagates, and RetryPolicy
-            #        may re-send (each attempt is answered with an auth failure - see _is_auth_failure)
+            raise  # raised by get_session()/_get_headers() BEFORE the request is issued: nothing was sent
         except httpx.TimeoutException:
             logger.error(f"[{self.account_id}] Timeout executing order {order.client_order_id}")
             return OrderResult(
@@ -791,31 +827,88 @@ class AliceBlueClient:
                 f"[{self.account_id}] Unreadable response for order {order.client_order_id} "
                 f"(HTTP {resp.status_code}, {type(exc).__name__}); outcome unknown, not retried"
             )
-            return self._ambiguous_send(order, now, f"unreadable response, HTTP {resp.status_code}")
+            return self._ambiguous_send(order, now, f"unreadable response, HTTP {resp.status_code}", resp.status_code)
 
     @staticmethod
-    def _ambiguous_send(order: OrderRequest, now: datetime, why: str) -> OrderResult:
+    def _ambiguous_send(order: OrderRequest, now: datetime, why: str, http_status: Optional[int] = None) -> OrderResult:
         """The order may or may not exist at Alice Blue. TIMEOUT is never re-sent by RetryPolicy and is
-        picked up by the pipeline's unresolved-send handling; nothing here may ever resend the create."""
+        picked up by the pipeline's unresolved-send handling; nothing here may ever resend the create.
+        `why` is a fixed description (never response text); raw_response carries only the HTTP status."""
         return OrderResult(
             category=OrderResultCategory.TIMEOUT,
             client_order_id=order.client_order_id,
             broker_order_id=None,
             message=f"Order submission outcome unknown ({why}); not resent - reconcile at the broker",
-            raw_response={},
+            raw_response={"http_status": http_status} if http_status is not None else {},
             timestamp=now,
         )
 
+    # Structured error markers, taken ONLY from the `status` fields of the response (never from a substring of the raw
+    # body, a symbol or a message): an Alice Blue error code ("EC930", "EC941", "EC965" ...) or an explicit failure word.
+    _EC_STATUS = re.compile(r"^EC\d+$")
+    _FAILURE_WORDS = frozenset({"rejected", "error", "failed", "not_ok"})
+    # HTTP statuses after which the order may still have been executed (the server may have forwarded it before failing).
+    _AMBIGUOUS_HTTP = frozenset({408, 429})
+
+    @classmethod
+    def _is_error_status(cls, value: Any) -> bool:
+        text = str(value or "").strip()
+        return bool(cls._EC_STATUS.match(text.upper())) or text.lower() in cls._FAILURE_WORDS
+
+    @staticmethod
+    def _safe_message(value: Any, limit: int = 300) -> str:
+        return str(value or "").strip()[:limit]
+
     def _interpret_place_response(self, order: OrderRequest, resp: httpx.Response, now: datetime) -> OrderResult:
-        """Turns the placeorder HTTP response into an OrderResult. Moved unchanged out of place_order so
-        that any failure to read it can be caught by the caller as an AMBIGUOUS outcome."""
-        raw_data = resp.json() if resp.status_code in (200, 400, 422) else {}
-        logger.info(f"[{self.account_id}] Alice Blue A3 Response HTTP {resp.status_code}: {raw_data}")
+        """
+        Turns the placeorder HTTP response into an OrderResult. Anything that does not PROVE an outcome is ambiguous
+        (TIMEOUT: never re-sent, resolved by the operator / sweeper):
 
-        item = raw_data[0] if (isinstance(raw_data, list) and len(raw_data) > 0) else (raw_data if isinstance(raw_data, dict) else {})
-        stat = str(item.get("status", "")).lower()
+          HTTP 200, order id present, no error status   -> SUCCESS
+          HTTP 200, error status (EC### / rejected ...), no order id -> REJECTED   (explicit broker error code)
+          HTTP 200, error status AND an order id        -> ambiguous (contradictory)
+          HTTP 200, no order id and no error status     -> ambiguous (no usable broker order id)
+          HTTP 200, unparsable / unexpected body        -> ambiguous
+          HTTP 5xx, 408, 429, 3xx, other 2xx            -> ambiguous (the order may have been executed)
+          HTTP 4xx (401 handled earlier) with a structured body -> REJECTED (the server declined to process it)
+          HTTP 4xx with an unreadable / unexpected body -> ambiguous
 
-        # Extract orderNo / brokerOrderId & nested result status from A3 result array or top-level field
+        A structured 4xx is treated as a definite refusal on the strength of HTTP semantics, not of anything the body
+        says. Words such as "session expired" in a body never decide the outcome.
+        """
+        code = resp.status_code
+        if code != 200:
+            if code in self._AMBIGUOUS_HTTP or code >= 500 or code < 400 or code == 401:
+                logger.warning(f"[{self.account_id}] placeorder HTTP {code} for {order.client_order_id}: outcome unknown, not retried")
+                return self._ambiguous_send(order, now, f"HTTP {code}", code)
+            # A 4xx is a definite refusal only when it carries a STRUCTURED body; an unreadable or oddly shaped one
+            # is a malformed response and stays ambiguous.
+            try:
+                body = resp.json()
+                item = body[0] if isinstance(body, list) and body else body
+            except Exception:
+                item = None
+            if not isinstance(item, dict):
+                return self._ambiguous_send(order, now, f"unreadable response, HTTP {code}", code)
+            message = self._safe_message(item.get("message") or item.get("emsg") or item.get("infoMessage"))
+            logger.warning(f"[{self.account_id}] Order REJECTED by Alice Blue (HTTP {code}): '{message}'")
+            return OrderResult(
+                category=OrderResultCategory.REJECTED,
+                client_order_id=order.client_order_id,
+                broker_order_id=None,
+                message=f"Order rejected by Alice Blue (HTTP {code}): {message or 'request refused'}",
+                raw_response={"http_status": code},
+                timestamp=now,
+            )
+
+        raw_data = resp.json()
+        logger.info(f"[{self.account_id}] Alice Blue A3 Response HTTP 200: {raw_data}")
+
+        item = raw_data[0] if (isinstance(raw_data, list) and len(raw_data) > 0) else raw_data
+        if not isinstance(item, dict):
+            return self._ambiguous_send(order, now, "unexpected response shape, HTTP 200", 200)
+
+        # Extract the broker order id and the nested result status from the A3 `result` array or the top-level fields.
         broker_order_id = None
         res_status = ""
         res_msg = ""
@@ -831,46 +924,38 @@ class AliceBlueClient:
             broker_order_id = str(item.get("brokerOrderId", item.get("orderNo", item.get("orderID", item.get("Nstordno", ""))))).strip() or None
 
         top_msg = item.get("message") or item.get("emsg") or item.get("infoMessage") or ""
-        error_msg = res_msg or top_msg
-
-        # Detect error codes (e.g. EC965, EC941) anywhere in status, message or payload body
-        raw_str = str(raw_data)
-        has_ec_in_body = "EC" in raw_str or "EC" in res_status or "EC" in error_msg
-        is_result_error = bool(
-            has_ec_in_body or
-            (res_status and (res_status.upper().startswith("EC") or res_status.upper() in ("REJECTED", "ERROR", "FAILED"))) or
-            (stat and stat in ("rejected", "error", "failed", "not_ok"))
-        )
+        error_msg = self._safe_message(res_msg or top_msg)
+        has_error_status = self._is_error_status(res_status) or self._is_error_status(item.get("status"))
 
         logger.info(
             f"[{self.account_id}] Alice Blue Parsed Outcome: broker_order_id={broker_order_id}, "
-            f"status_code={res_status}, is_error={is_result_error}, error_msg='{error_msg}'"
+            f"result_status={res_status!r}, error_status={has_error_status}, message='{error_msg}'"
         )
 
-        if resp.status_code == 200 and broker_order_id and not is_result_error:
-            logger.info(f"[{self.account_id}] Order ACCEPTED by Alice Blue: broker_order_id={broker_order_id}")
-            return OrderResult(
-                category=OrderResultCategory.SUCCESS,
-                client_order_id=order.client_order_id,
-                broker_order_id=broker_order_id,
-                message="Order placed successfully with broker",
-                raw_response=raw_data,
-                timestamp=now,
-            )
-        else:
-            clean_msg = error_msg.strip() if error_msg else "Invalid order parameters"
-            logger.warning(
-                f"[{self.account_id}] Order REJECTED by Alice Blue (HTTP {resp.status_code}): "
-                f"error='{clean_msg}', raw_status='{res_status}'"
-            )
+        if has_error_status and not broker_order_id:
+            logger.warning(f"[{self.account_id}] Order REJECTED by Alice Blue: error='{error_msg}', status='{res_status}'")
             return OrderResult(
                 category=OrderResultCategory.REJECTED,
                 client_order_id=order.client_order_id,
                 broker_order_id=None,
-                message=f"Order rejected by Alice Blue: {clean_msg}",
+                message=f"Order rejected by Alice Blue: {error_msg or 'Invalid order parameters'}",
                 raw_response=raw_data,
                 timestamp=now,
             )
+        if has_error_status:
+            return self._ambiguous_send(order, now, "contradictory response: error status with an order id, HTTP 200", 200)
+        if not broker_order_id:
+            return self._ambiguous_send(order, now, "no usable broker order id, HTTP 200", 200)
+
+        logger.info(f"[{self.account_id}] Order ACCEPTED by Alice Blue: broker_order_id={broker_order_id}")
+        return OrderResult(
+            category=OrderResultCategory.SUCCESS,
+            client_order_id=order.client_order_id,
+            broker_order_id=broker_order_id,
+            message="Order placed successfully with broker",
+            raw_response=raw_data,
+            timestamp=now,
+        )
 
     async def get_order_book(self) -> List[OrderRecord]:
         """

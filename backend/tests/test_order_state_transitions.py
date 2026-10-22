@@ -170,16 +170,16 @@ async def test_success_is_unchanged(db_session, mock_redis, kind, order_status):
     assert trade.submitted_at is not None and trade.status != CopyTradeStatus.TIMEOUT
 
 
-# ── KNOWN LIMITATION, pinned so a change is deliberate: place_order RAISING is retried by RetryPolicy ──
+# ── Batch A: a place_order that RAISES (untagged) is attempted once, then recorded unresolved ──
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", KINDS)
-async def test_limitation_a_raised_exception_is_retried_by_the_policy_then_recorded_unresolved(db_session, mock_redis, kind):
-    """Not changed here (needs approval): RetryPolicy retries exceptions, so an adapter that raises AFTER the broker
-    accepted an order is re-sent. The Groww / Angel One adapters never raise from place_order; the Alice Blue adapter
-    can (e.g. an unparsable 200 body). What is recorded afterwards is correct: unresolved, not failed."""
+async def test_a_raised_exception_is_not_retried_and_is_recorded_unresolved(db_session, mock_redis, kind):
+    """RetryPolicy used to re-send after any raised exception, so an adapter that raised AFTER the broker accepted an
+    order was re-sent up to three times. An exception without proof that the request never left now ends the attempts
+    at once: ONE placement call, recorded unresolved (not failed), exactly as before."""
     master, child, client, out = await run(db_session, mock_redis, kind, RuntimeError(SECRET_TEXT))
-    assert client.place_order.await_count == 3
+    assert client.place_order.await_count == 1
     trade, orders, _ = await rows(child)
     assert out["status"] == "TIMEOUT" and trade.status == CopyTradeStatus.TIMEOUT
     assert orders[0].status == OrderStatus.PENDING and orders[0].broker_status == "TIMEOUT"

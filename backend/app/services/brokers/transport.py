@@ -1,9 +1,10 @@
 """
 Transport-error classification for order creation
 =================================================
-The copy pipeline retries ONE result category, NETWORK_ERROR, and also retries any
-exception raised by place_order (reliability/retry.py). Re-sending a create is only
-safe when the failure PROVES the request never left this process. Everything else -
+The copy pipeline retries ONE result category, NETWORK_ERROR, and an exception raised
+by place_order only when it is tagged as raised before the request left (mark_not_sent
+below; reliability/retry.py). Re-sending a create is only safe when the failure PROVES
+the request never left this process. Everything else -
 a read or write failure, a protocol error, a reset connection, a 5xx, a response that
 cannot be understood - may have followed a request the broker already accepted, so
 it is an ambiguous outcome that must never be retried (the adapters report it as
@@ -38,3 +39,17 @@ class SendState:
 
     def __init__(self) -> None:
         self.sent = False
+
+
+def mark_not_sent(exc: BaseException) -> BaseException:
+    """Tag an exception that escaped an order-creation call BEFORE the request was issued. RetryPolicy re-sends only
+    after an exception carrying this proof; an untagged exception may have followed a request the broker accepted."""
+    try:
+        exc.request_not_sent = True          # type: ignore[attr-defined]
+    except Exception:                         # an exception type that refuses attributes simply stays untagged
+        pass
+    return exc
+
+
+def is_marked_not_sent(exc: BaseException) -> bool:
+    return getattr(exc, "request_not_sent", False) is True

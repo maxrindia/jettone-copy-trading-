@@ -229,7 +229,7 @@ async def deliver_fast(event, client, follower):
 async def test_a_send_that_raised_on_every_attempt_leaves_an_unresolved_claim_and_is_never_resent(
         db_session, sample_accounts, sample_strategy):
     """What this tests (and what it does NOT): the claim and the child-Order pre-write both succeed, then the broker
-    call RAISES on every attempt (RetryPolicy retries a raised exception, then reports UNKNOWN). The pipeline records
+    call RAISES (RetryPolicy no longer retries an exception it cannot prove pre-send: one attempt, then UNKNOWN). The pipeline records
     an UNRESOLVED send - CopyTrade TIMEOUT with submitted_at stamped, child Order PENDING with broker_status TIMEOUT -
     and a later redelivery (Redis bypassed) is skipped with no broker call. It does NOT simulate a crash between the
     claim and the Order pre-write; that is test_failure_after_the_claim_commits_and_before_the_order_pre_write_*."""
@@ -237,7 +237,7 @@ async def test_a_send_that_raised_on_every_attempt_leaves_an_unresolved_claim_an
     c = broker()
     c.place_order.side_effect = RuntimeError("the send raised")
     first = await deliver_fast(make_event("LIMIT", mid), c, f)
-    assert first["status"] == "TIMEOUT" and c.place_order.await_count == 3        # a raised exception is retried by policy
+    assert first["status"] == "TIMEOUT" and c.place_order.await_count == 1        # an unproven exception is never retried
     (trade,), (order,) = await rows(mid)
     assert trade.status == CopyTradeStatus.TIMEOUT and trade.submitted_at is not None
     assert order.status == OrderStatus.PENDING and order.broker_status == "TIMEOUT" and order.broker_order_id is None
