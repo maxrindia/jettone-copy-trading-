@@ -58,7 +58,7 @@ async def test_successful_limit_copy_emits_exactly_one_copy_executed_audit_event
     assert res["results"][str(follower.id)]["status"] == "SUCCESS"
 
     rows = (
-        await db_session.execute(select(AuditLog).where(AuditLog.master_order_id == "ORD_LIM_AUDIT_1"))
+        await db_session.execute(select(AuditLog).where(AuditLog.master_order_id == "ORD_LIM_AUDIT_1", AuditLog.event_type != "COPY_FANOUT_SUMMARY"))
     ).scalars().all()
     assert len(rows) == 1
     assert rows[0].event_type == "COPY_EXECUTED"
@@ -92,7 +92,7 @@ async def test_rejected_limit_copy_emits_exactly_one_copy_failed_audit_event(
     assert res["results"][str(follower.id)]["status"] == "REJECTED"
 
     rows = (
-        await db_session.execute(select(AuditLog).where(AuditLog.master_order_id == "ORD_LIM_AUDIT_2"))
+        await db_session.execute(select(AuditLog).where(AuditLog.master_order_id == "ORD_LIM_AUDIT_2", AuditLog.event_type != "COPY_FANOUT_SUMMARY"))
     ).scalars().all()
     assert len(rows) == 1
     assert rows[0].event_type == "COPY_FAILED"

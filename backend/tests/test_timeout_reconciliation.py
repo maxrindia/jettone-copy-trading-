@@ -175,7 +175,7 @@ async def test_successful_limit_placement_is_unchanged(db_session, mock_redis, g
     assert out["status"] == "SUCCESS" and out["broker_order_id"] == "GRW-NEW-1"
     o = (await _orders(child))[0]
     assert o.status == OrderStatus.OPEN and o.broker_status == "SUCCESS" and o.broker_order_id == "GRW-NEW-1"
-    assert (await _trade(child)).status == CopyTradeStatus.PENDING             # unchanged: the fill syncer owns the rest
+    assert (await _trade(child)).status == CopyTradeStatus.SUBMITTED           # R3: finalised on accept; the fill syncer owns the rest
 
 
 @pytest.mark.asyncio

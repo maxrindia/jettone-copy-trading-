@@ -99,11 +99,14 @@ async def test_insufficient_margin_prevents_limit_broker_submission(db_session, 
     assert "INSUFFICIENT_MARGIN" in res["results"][fid]["reasons"]
     client.place_order.assert_not_called()
 
-    # Consistent with MARKET risk-rejection: no Order/CopyTrade row pre-written.
+    # No Order is pre-written for a rejected event. R3: the Child's decision IS recorded - one terminal CopyTrade
+    # (REJECTED, quantity 0, no client_order_id, never sent) carrying the reason code.
     orders = (await db_session.execute(select(Order).where(Order.account_id == follower.id))).scalars().all()
     trades = (await db_session.execute(select(CopyTrade).where(CopyTrade.follower_account_id == follower.id))).scalars().all()
     assert orders == []
-    assert trades == []
+    assert len(trades) == 1
+    assert trades[0].status.value == "REJECTED" and trades[0].quantity == 0 and trades[0].client_order_id is None
+    assert trades[0].failure_reason == "INSUFFICIENT_MARGIN" and trades[0].submitted_at is None
 
 
 @pytest.mark.asyncio

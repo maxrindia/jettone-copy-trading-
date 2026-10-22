@@ -192,8 +192,8 @@ async def test_a_later_distinct_event_still_processes_after_a_skipped_duplicate(
 
 CONTROL = {          # kind: (copy_trade status, client_order_id prefix, order status, order type)
     "MARKET": (CopyTradeStatus.SUBMITTED, "JT__", OrderStatus.OPEN, "LIMIT"),          # marketable LIMIT conversion
-    "LIMIT": (CopyTradeStatus.PENDING, "JT_LIM_", OrderStatus.OPEN, "LIMIT"),
-    "SL": (CopyTradeStatus.PENDING, "JT_SL_", OrderStatus.PENDING, "SL"),
+    "LIMIT": (CopyTradeStatus.SUBMITTED, "JT_LIM_", OrderStatus.OPEN, "LIMIT"),       # R3: finalised, no longer left PENDING
+    "SL": (CopyTradeStatus.SUBMITTED, "JT_SL_", OrderStatus.PENDING, "SL"),
 }
 
 

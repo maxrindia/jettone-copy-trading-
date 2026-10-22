@@ -26,6 +26,18 @@ from app.services.alice_blue.types import (
     ProductType,
 )
 from app.services.copy_engine.calculator import QuantityCalculator
+from app.services.copy_engine.child_outcomes import (
+    ClaimKind,
+    NO_CLIENT,
+    CHILD_BROKER_NOT_READY,
+    claim_child_trade,
+    excluded_reason,
+    fail_unsent_claim,
+    finalize_child_trade,
+    pre_send_outcome,
+    record_fanout_summary,
+    record_pre_send_outcome,
+)
 from app.services.copy_engine.events import MasterTradeEvent, derive_copy_event_id
 from app.services.alice_blue.instruments import InstrumentResolutionError
 from app.services.brokers.registry import can_be_child, persisted_order_label
@@ -624,8 +636,9 @@ class CopyEnginePipeline:
             return {"status": "rejected", "reason": validation.reason_code}
 
         # Resolve Strategy and Followers
+        excluded: List[Dict[str, str]] = []
         followers, strategy_id = await self._get_eligible_followers_for_master(
-            event.account_id, master_order_id=event.master_order_id
+            event.account_id, master_order_id=event.master_order_id, excluded_out=excluded
         )
         if not followers:
             logger.info(f"[Pipeline] No active followers configured for master {event.account_id}.")
@@ -674,6 +687,10 @@ class CopyEnginePipeline:
             else:
                 summary[str(follower.id)] = res
 
+        await self._record_fanout(
+            event=event, strategy_id=strategy_id, followers=followers, excluded=excluded, summary=summary,
+            fill_sequence=1,
+        )
         return {"status": "completed", "results": summary}
 
     async def _process_single_limit_follower(
@@ -853,8 +870,8 @@ class CopyEnginePipeline:
         # child Order (save_or_update_order is an upsert) and must not reach the broker a second time.
         copy_event_uuid = derive_copy_event_id(event.master_order_id, str(acc_id), 1)
         async with AsyncSessionLocal() as session:
-            ct = CopyTrade(
-                id=uuid.uuid4(),
+            claim = await claim_child_trade(
+                session,
                 master_order_id=event.master_order_id,
                 follower_account_id=acc_id,
                 copy_event_id=copy_event_uuid,
@@ -865,18 +882,18 @@ class CopyEnginePipeline:
                 product_type=event.product_type,
                 estimated_price=limit_price,
                 client_order_id=client_order_id,
-                status=CopyTradeStatus.PENDING,
             )
-            session.add(ct)
-            try:
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                logger.info(
-                    f"[Pipeline] Duplicate LIMIT copy detected for master_order_id={event.master_order_id}, "
-                    f"follower={acc_id}. Skipping: nothing written, nothing sent."
-                )
-                return {"status": "SKIPPED", "reason": "DUPLICATE_EVENT"}
+        if not claim.won:
+            logger.info(
+                f"[Pipeline] Duplicate LIMIT copy detected for master_order_id={event.master_order_id}, "
+                f"follower={acc_id}. Skipping: nothing written, nothing sent."
+            )
+            return {"status": "SKIPPED", "reason": "DUPLICATE_EVENT"}
+        if claim.kind == ClaimKind.RECLAIMED:
+            logger.info(
+                f"[Pipeline] LIMIT copy for master_order_id={event.master_order_id}, follower={acc_id}: claimed a "
+                "pre-send decision recorded earlier (compare-and-set); the first attempt never reached the broker."
+            )
 
         # Step 2: Pre-write child Order in PENDING status
         child_order = await self.save_or_update_order(
@@ -945,6 +962,10 @@ class CopyEnginePipeline:
         try:
             if unresolved:
                 await self._record_unresolved_send(client_order_id, order_res)
+            else:
+                # R3: SUBMITTED / REJECTED / FAILED, so the row is never left PENDING after a normal broker answer.
+                async with AsyncSessionLocal() as ct_session:
+                    await finalize_child_trade(ct_session, client_order_id, order_res)
             await self.save_or_update_order(
                 internal_order_id=internal_child_ord_id,
                 broker_order_id=order_res.broker_order_id,
@@ -1055,6 +1076,97 @@ class CopyEnginePipeline:
             "price": str(limit_price),
         }
 
+    async def _record_fanout(
+        self,
+        *,
+        event: MasterTradeEvent,
+        strategy_id: Optional[uuid.UUID],
+        followers: List[Any],
+        excluded: List[Dict[str, str]],
+        summary: Dict[str, Any],
+        fill_sequence: int,
+    ) -> None:
+        """
+        R3 tracking, run after the Children have all finished: a terminal CopyTrade row for each Child that left before
+        the send, a SystemEvent for each Child whose task raised, and the advisory fanout summary. Tracking is best
+        effort and NEVER raises or changes a copy outcome: nothing here sends, retries or alters a claimed row (except
+        marking a never-attempted claim FAILED).
+        """
+        for follower, _ in followers:
+            result = summary.get(str(follower.id))
+            try:
+                await self._record_child_result(event, follower, result, fill_sequence)
+            except Exception as exc:
+                logger.error(f"[Pipeline] Could not record the outcome for {follower.display_name}: {exc}")
+        row_statuses: Dict[str, str] = {}
+        try:
+            by_event_id = {
+                derive_copy_event_id(event.master_order_id, str(f.id), fill_sequence): str(f.id) for f, _ in followers
+            }
+            if by_event_id:
+                async with AsyncSessionLocal() as session:
+                    found = await session.execute(
+                        select(CopyTrade.copy_event_id, CopyTrade.status).where(
+                            CopyTrade.master_order_id == event.master_order_id,
+                            CopyTrade.copy_event_id.in_(list(by_event_id)),
+                        )
+                    )
+                    for copy_event_id, row_status in found.all():
+                        row_statuses[by_event_id[copy_event_id]] = row_status.value
+        except Exception as exc:
+            logger.error(f"[Pipeline] Could not read the Children's row statuses for the summary: {exc}")
+        try:
+            async with AsyncSessionLocal() as session:
+                await record_fanout_summary(
+                    session, event=event, strategy_id=strategy_id, routed=followers, excluded=excluded,
+                    results=summary, row_statuses=row_statuses,
+                )
+        except Exception as exc:
+            logger.error(f"[Pipeline] Could not record the fanout summary for {event.master_order_id}: {exc}")
+
+    async def _record_child_result(self, event: MasterTradeEvent, follower: Account, result: Any, fill_sequence: int) -> None:
+        copy_event_uuid = derive_copy_event_id(event.master_order_id, str(follower.id), fill_sequence)
+        outcome = pre_send_outcome(result)
+        async with AsyncSessionLocal() as session:
+            if outcome is not None:
+                status, code, detail = outcome
+                limit_price = getattr(event, "limit_price", None)
+                await record_pre_send_outcome(
+                    session,
+                    master_order_id=event.master_order_id,
+                    follower_account_id=follower.id,
+                    copy_event_id=copy_event_uuid,
+                    symbol=event.symbol,
+                    exchange=event.exchange,
+                    side=event.side,
+                    product_type=event.product_type,
+                    estimated_price=limit_price if limit_price and limit_price > 0 else event.price,
+                    status=status,
+                    code=code,
+                    detail=detail,
+                )
+            elif isinstance(result, dict) and result.get("status") == "REJECTED" and result.get("reason") == NO_CLIENT:
+                await fail_unsent_claim(
+                    session, master_order_id=event.master_order_id, follower_account_id=follower.id,
+                    copy_event_id=copy_event_uuid, code=NO_CLIENT,
+                )
+            elif isinstance(result, dict) and result.get("status") == "EXCEPTION":
+                await emit_system_event(
+                    session,
+                    event_type="COPY_CHILD_EXCEPTION",
+                    severity="WARNING",
+                    message=(
+                        f"Copying {event.master_order_id} to {follower.display_name} raised an exception; any claimed "
+                        "row is left as it is for reconciliation (it was not failed automatically)."
+                    ),
+                    account_id=follower.id,
+                    metadata_payload={
+                        "master_order_id": event.master_order_id,
+                        "fill_sequence": fill_sequence,
+                        "error": str(result.get("error"))[:200],
+                    },
+                )
+
     async def _stamp_submitted(self, client_order_id: str) -> None:
         """
         Persist CopyTrade.submitted_at immediately BEFORE the broker call, in its
@@ -1123,8 +1235,9 @@ class CopyEnginePipeline:
             logger.warning(f"[Pipeline] Master SL order {event.master_order_id} validation failed: {validation.reason_code}")
             return {"status": "rejected", "reason": validation.reason_code}
 
+        excluded: List[Dict[str, str]] = []
         followers, strategy_id = await self._get_eligible_followers_for_master(
-            event.account_id, master_order_id=event.master_order_id
+            event.account_id, master_order_id=event.master_order_id, excluded_out=excluded
         )
         if not followers:
             logger.info(f"[Pipeline] No active followers configured for master {event.account_id}.")
@@ -1160,6 +1273,10 @@ class CopyEnginePipeline:
             else:
                 summary[str(follower.id)] = res
 
+        await self._record_fanout(
+            event=event, strategy_id=strategy_id, followers=followers, excluded=excluded, summary=summary,
+            fill_sequence=1,
+        )
         return {"status": "completed", "results": summary}
 
     async def _process_single_sl_follower(
@@ -1335,8 +1452,8 @@ class CopyEnginePipeline:
         # (save_or_update_order is an upsert) and must not reach the broker a second time.
         copy_event_uuid = derive_copy_event_id(event.master_order_id, str(acc_id), 1)
         async with AsyncSessionLocal() as session:
-            ct = CopyTrade(
-                id=uuid.uuid4(),
+            claim = await claim_child_trade(
+                session,
                 master_order_id=event.master_order_id,
                 follower_account_id=acc_id,
                 copy_event_id=copy_event_uuid,
@@ -1347,18 +1464,18 @@ class CopyEnginePipeline:
                 product_type=event.product_type,
                 estimated_price=trigger_price if trigger_price > 0 else sl_price,
                 client_order_id=client_order_id,
-                status=CopyTradeStatus.PENDING,
             )
-            session.add(ct)
-            try:
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                logger.info(
-                    f"[Pipeline] Duplicate SL copy detected for master_order_id={event.master_order_id}, "
-                    f"follower={acc_id}. Skipping: nothing written, nothing sent."
-                )
-                return {"status": "SKIPPED", "reason": "DUPLICATE_EVENT"}
+        if not claim.won:
+            logger.info(
+                f"[Pipeline] Duplicate SL copy detected for master_order_id={event.master_order_id}, "
+                f"follower={acc_id}. Skipping: nothing written, nothing sent."
+            )
+            return {"status": "SKIPPED", "reason": "DUPLICATE_EVENT"}
+        if claim.kind == ClaimKind.RECLAIMED:
+            logger.info(
+                f"[Pipeline] SL copy for master_order_id={event.master_order_id}, follower={acc_id}: claimed a "
+                "pre-send decision recorded earlier (compare-and-set); the first attempt never reached the broker."
+            )
 
         # Step 2: Pre-write child Order in PENDING status - the follower's
         # own SL is, from this point, ALSO TRIGGER_PENDING at the broker,
@@ -1427,6 +1544,10 @@ class CopyEnginePipeline:
         try:
             if unresolved:
                 await self._record_unresolved_send(client_order_id, order_res)
+            else:
+                # R3: SUBMITTED / REJECTED / FAILED, so the row is never left PENDING after a normal broker answer.
+                async with AsyncSessionLocal() as ct_session:
+                    await finalize_child_trade(ct_session, client_order_id, order_res)
             await self.save_or_update_order(
                 internal_order_id=internal_child_ord_id,
                 broker_order_id=order_res.broker_order_id,
@@ -3163,8 +3284,9 @@ class CopyEnginePipeline:
             logger.warning(f"[Pipeline] Master trade event {event.master_order_id} validation failed: {validation.reason_code}")
             return {"status": "rejected", "reason": validation.reason_code}
 
+        excluded: List[Dict[str, str]] = []
         followers, strategy_id = await self._get_eligible_followers_for_master(
-            event.account_id, master_order_id=event.master_order_id
+            event.account_id, master_order_id=event.master_order_id, excluded_out=excluded
         )
         if not followers:
             logger.info("[Pipeline] No active follower accounts configured.")
@@ -3204,6 +3326,10 @@ class CopyEnginePipeline:
             else:
                 summary[str(follower.id)] = res
 
+        await self._record_fanout(
+            event=event, strategy_id=strategy_id, followers=followers, excluded=excluded, summary=summary,
+            fill_sequence=event.fill_sequence,
+        )
         return {"status": "completed", "results": summary}
 
     async def _process_single_follower(
@@ -3459,8 +3585,9 @@ class CopyEnginePipeline:
         internal_child_ord_id = f"JT_CH_{event.master_order_id[:16]}_{str(acc_id)[:8]}_{event.fill_sequence}"
 
         async with AsyncSessionLocal() as session:
-            trade_record = CopyTrade(
-                id=copy_trade_id,
+            claim = await claim_child_trade(
+                session,
+                trade_id=copy_trade_id,
                 master_order_id=event.master_order_id,
                 follower_account_id=acc_id,
                 copy_event_id=copy_event_uuid,
@@ -3471,15 +3598,16 @@ class CopyEnginePipeline:
                 product_type=event.product_type,
                 estimated_price=execution_price if use_marketable_limit else event.price,
                 client_order_id=client_order_id,
-                status=CopyTradeStatus.PENDING,
             )
-            session.add(trade_record)
-            try:
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                logger.info(f"[Pipeline] Duplicate copy trade detected for master_order_id={event.master_order_id}, follower={acc_id}. Skipping silently.")
-                return {"status": "SKIPPED", "reason": "DUPLICATE_EVENT"}
+        if not claim.won:
+            logger.info(f"[Pipeline] Duplicate copy trade detected for master_order_id={event.master_order_id}, follower={acc_id}. Skipping silently.")
+            return {"status": "SKIPPED", "reason": "DUPLICATE_EVENT"}
+        copy_trade_id = claim.trade_id          # the claimed row (a re-claimed pre-send row keeps its own id)
+        if claim.kind == ClaimKind.RECLAIMED:
+            logger.info(
+                f"[Pipeline] MARKET copy for master_order_id={event.master_order_id}, follower={acc_id}: claimed a "
+                "pre-send decision recorded earlier (compare-and-set); the first attempt never reached the broker."
+            )
 
         await self.save_or_update_order(
             internal_order_id=internal_child_ord_id,
@@ -3677,6 +3805,7 @@ class CopyEnginePipeline:
         *,
         existing_children_lookup: bool = False,
         master_order_id: Optional[str] = None,
+        excluded_out: Optional[List[Dict[str, str]]] = None,
     ) -> tuple[List[tuple[Account, Decimal]], Optional[uuid.UUID]]:
         """
         Resolves which Child accounts a Master's order concerns.
@@ -3777,8 +3906,16 @@ class CopyEnginePipeline:
                             ),
                             strategy_id=strategy.id,
                         )
+                        if excluded_out is not None:
+                            excluded_out.append({"account_id": str(m.account_id), "name": m.account.display_name,
+                                                 "reason": CHILD_BROKER_NOT_READY})
                         continue
                     eligible.append((m.account, m.multiplier))
+                elif excluded_out is not None:
+                    # R3: not routed this order. Recorded in the fanout summary only (no CopyTrade row).
+                    excluded_out.append({"account_id": str(m.account_id),
+                                         "name": m.account.display_name if m.account else "",
+                                         "reason": excluded_reason(m) or "NOT_ELIGIBLE"})
             return eligible, strategy.id
 
     async def _lookup_existing_children_context(
