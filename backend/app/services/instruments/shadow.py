@@ -29,6 +29,7 @@ from app.models.strategies import GroupStrategy
 from app.models.trades import Order, OrderSource
 from app.services.brokers.capabilities import Verification
 from app.services.brokers.profiles import build_profile
+from app.services.instruments import crosswalk_evidence
 from app.services.instruments.catalogs import InstrumentCatalog, default_catalogs
 from app.services.instruments.comparator import compare_instrument
 from app.services.instruments.model import BrokerView, Comparison
@@ -119,30 +120,50 @@ class ShadowResult:
     duplicates: int = 0
     error: Optional[str] = None
     keys: List[str] = field(default_factory=list)
+    crosswalk_written: int = 0
+    crosswalk_duplicates: int = 0
+    crosswalk_error: Optional[str] = None
 
 
-async def _recent_master_pairs(since: datetime, limit: int) -> Tuple[int, List[Tuple[str, str]]]:
+async def _recent_master_rows(since: datetime, limit: int) -> List[Tuple[Any, Any, Any]]:
     """The newest `limit` persisted orders placed on the Master account of a non-deleted strategy (never a copy-engine
-    order, never an order on a Child account) inside the window, reduced to distinct (exchange, symbol) pairs,
-    newest first."""
+    order, never an order on a Child account) inside the window: (exchange, symbol, instrument_token), newest first."""
     masters = select(GroupStrategy.master_account_id).where(
         GroupStrategy.deleted_at.is_(None), GroupStrategy.master_account_id.is_not(None)
     )
     async with _session() as session:
-        rows = (await session.execute(
-            select(Order.exchange, Order.symbol)
+        return list((await session.execute(
+            select(Order.exchange, Order.symbol, Order.instrument_token)
             .where(Order.account_id.in_(masters), Order.source != OrderSource.SYSTEM, Order.created_at >= since)
             .order_by(Order.created_at.desc())
             .limit(limit)
-        )).all()
+        )).all())
+
+
+async def _recent_master_pairs(since: datetime, limit: int) -> Tuple[int, List[Tuple[str, str]]]:
+    """The recent Master orders reduced to distinct (exchange, symbol) pairs, newest first."""
+    rows = await _recent_master_rows(since, limit)
     seen: Set[Tuple[str, str]] = set()
     pairs: List[Tuple[str, str]] = []
-    for exchange, symbol in rows:
+    for exchange, symbol, _token in rows:
         pair = (str(exchange or "").strip().upper(), str(symbol or "").strip().upper())
         if pair not in seen:
             seen.add(pair)
             pairs.append(pair)
     return len(rows), pairs
+
+
+def _distinct_subjects(rows: Sequence[Tuple[Any, Any, Any]]) -> List[Tuple[str, str, Optional[str]]]:
+    """Distinct (exchange, symbol, token) triples, newest first. A missing token stays None: it is never filled in."""
+    seen: Set[Tuple[str, str, Optional[str]]] = set()
+    out: List[Tuple[str, str, Optional[str]]] = []
+    for exchange, symbol, token in rows:
+        triple = (str(exchange or "").strip().upper(), str(symbol or "").strip().upper(),
+                  str(token).strip() if token not in (None, "") else None)
+        if triple not in seen:
+            seen.add(triple)
+            out.append(triple)
+    return out
 
 
 async def _todays_latest_keys(session, day_start: datetime) -> Dict[Tuple[str, str, str], str]:
@@ -163,6 +184,62 @@ async def _todays_latest_keys(session, day_start: datetime) -> Dict[Tuple[str, s
         if p.get("dedupe_key") and p.get("broker_id"):
             latest[identity_of(p)] = p["dedupe_key"]
     return latest
+
+
+async def _todays_latest_crosswalk_keys(session, day_start: datetime) -> Dict[Tuple[str, str, str], str]:
+    """Like _todays_latest_keys, for INSTRUMENT_SHADOW_CROSSWALK events: the latest dedupe key per (exchange, symbol, token)."""
+    rows = (await session.execute(
+        select(SystemEvent.metadata_payload)
+        .where(SystemEvent.event_type == crosswalk_evidence.EVENT_TYPE, SystemEvent.created_at >= day_start)
+        .order_by(SystemEvent.created_at.asc())
+        .limit(DEDUPE_KEY_LIMIT + 1)
+    )).all()
+    if len(rows) > DEDUPE_KEY_LIMIT:
+        raise RuntimeError("too many same-day crosswalk events to establish deduplication")
+    latest: Dict[Tuple[str, str, str], str] = {}
+    for (payload,) in rows:
+        p = payload or {}
+        if p.get("dedupe_key") and p.get("exchange") and p.get("symbol"):
+            latest[crosswalk_evidence.identity_of(p)] = p["dedupe_key"]
+    return latest
+
+
+async def _record_crosswalk(now: datetime, result: ShadowResult, day: str, day_start: datetime) -> None:
+    """R4i: record, per Master (exchange, symbol, token), what the configured local NSE snapshot says. Shadow-only and
+    separate from the catalog comparison: a failure here is reported in `crosswalk_error` and cannot undo or block it."""
+    try:
+        rows = await _recent_master_rows(now - timedelta(hours=window_hours()), max_orders())
+        crosswalk, error = await asyncio.to_thread(crosswalk_evidence.get_crosswalk)       # local file only, cached
+        payloads = [crosswalk_evidence.evaluate(ex, sym, tok, crosswalk, error, now) for ex, sym, tok in _distinct_subjects(rows)]
+        async with _session() as session:
+            try:
+                latest = await _todays_latest_crosswalk_keys(session, day_start)
+            except Exception as exc:
+                result.crosswalk_error = f"DEDUPE_UNAVAILABLE: {type(exc).__name__}"
+                logger.error(f"[InstrumentShadow] crosswalk deduplication unavailable; nothing written: {exc}")
+                return
+            for payload in payloads:
+                key = crosswalk_evidence.dedupe_key(payload, day)
+                ident = crosswalk_evidence.identity_of(payload)
+                if latest.get(ident) == key:
+                    result.crosswalk_duplicates += 1
+                    continue
+                latest[ident] = key
+                session.add(SystemEvent(
+                    event_type=crosswalk_evidence.EVENT_TYPE, severity=EventSeverity.INFO,
+                    message=f"NSE:{payload['symbol']} token {payload['master_token'] or '-'} -> {payload['state']}"
+                            f" ({payload['reason']}; {payload['link_status']})",
+                    metadata_payload={**payload, "dedupe_key": key, "day": day},
+                    created_at=now,
+                ))
+                result.crosswalk_written += 1
+            if result.crosswalk_written:
+                await session.commit()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        result.crosswalk_error = f"{type(exc).__name__}"
+        logger.error(f"[InstrumentShadow] crosswalk step failed: {exc}", exc_info=True)
 
 
 async def run_once(
@@ -209,6 +286,8 @@ async def run_once(
                 result.keys.append(key)
             if result.written:
                 await session.commit()
+        if crosswalk_evidence.is_configured():                  # R4i: nothing at all happens while no file is configured
+            await _record_crosswalk(now, result, day, day_start)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

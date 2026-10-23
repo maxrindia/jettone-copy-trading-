@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.models.audit import SystemEvent
-from app.services.instruments import report
+from app.services.instruments import crosswalk_evidence, report
 from app.services.instruments.shadow import EVENT_TYPE
 
 router = APIRouter(prefix="/instruments", tags=["Instruments (observe-only)"])
@@ -49,5 +49,12 @@ async def shadow_report_endpoint(
     )).all()
     truncated = len(rows) > report.REPORT_EVENT_CAP
     events = [(created, payload) for created, payload in rows[: report.REPORT_EVENT_CAP]]
-    data = report.build_report(events, hours=hours, limit=limit, offset=offset, truncated=truncated, now=now)
+    cw_rows = (await db.execute(
+        select(SystemEvent.created_at, SystemEvent.metadata_payload)
+        .where(SystemEvent.event_type == crosswalk_evidence.EVENT_TYPE, SystemEvent.created_at >= now - timedelta(hours=hours))
+        .order_by(SystemEvent.created_at.desc())
+        .limit(report.REPORT_EVENT_CAP)
+    )).all()
+    data = report.build_report(events, hours=hours, limit=limit, offset=offset, truncated=truncated, now=now,
+                               crosswalk_events=[(created, payload) for created, payload in cw_rows])
     return {"success": True, "data": data}

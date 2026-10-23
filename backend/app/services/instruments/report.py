@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.core.config import settings
 from app.services.brokers.profiles import build_profile
+from app.services.instruments import crosswalk_evidence
 from app.services.instruments.catalogs import ALICE_ID, ANGEL_ID, GROWW_ID, InstrumentCatalog, default_catalogs
 from app.services.instruments.comparator import compare_instrument
 from app.services.instruments.model import BrokerView, CanonicalInstrument
@@ -119,9 +120,11 @@ def build_report(
     truncated: bool,
     now: datetime,
     catalogs: Optional[Sequence[InstrumentCatalog]] = None,
+    crosswalk_events: Sequence[Tuple[Optional[datetime], Dict[str, Any]]] = (),
 ) -> Dict[str, Any]:
     """`events` are (created_at, metadata) newest first. Aggregates describe the CURRENT state: the latest event per
-    (broker, exchange, symbol). Rows list the events themselves, paged."""
+    (broker, exchange, symbol). Rows list the events themselves, paged. `crosswalk_events` (R4i) feed a separate
+    `crosswalk` section; they never change a group, verdict or count above."""
     rows = [_row(p, created) for created, p in events if isinstance(p, dict)]
     latest: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
     for row in rows:
@@ -155,6 +158,7 @@ def build_report(
         "by_broker": {k: {**v, "groups": dict(sorted(v["groups"].items()))} for k, v in sorted(per_broker.items())},
         "catalogs": states,
         "notes": [MASTER_NOTE] + [s["note"] for s in states],
+        "crosswalk": crosswalk_evidence.build_section(crosswalk_events, now),
         "pagination": {"limit": limit, "offset": offset, "returned": len(rows[offset:offset + limit]), "total": len(rows)},
         "rows": rows[offset:offset + limit],
     }

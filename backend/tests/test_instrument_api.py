@@ -189,7 +189,10 @@ async def test_the_report_never_claims_parity_for_symbol_only_masters(client, db
     assert groww["instruments"] == 1 and groww["with_candidates"] == 1 and groww["groups"] == {"identity_unconfirmed": 1}
     assert data["by_broker"]["alicebluenew"]["groups"] == {"catalog_not_loaded": 1}
     assert all(set(r) >= {"broker_id", "verdict", "reason", "group", "candidate_count"} for r in data["rows"])
-    assert "token" not in str(data).lower().replace("tokens", "")
+    # No credential or session value anywhere. The crosswalk section (R4i) legitimately talks about instrument tokens, so it is
+    # checked on its own for credential words and excluded from the generic "token" scan.
+    assert "token" not in str({k: v for k, v in data.items() if k != "crosswalk"}).lower().replace("tokens", "")
+    assert not any(w in str(data["crosswalk"]).lower() for w in ("bearer", "secret", "password", "authorization", "api_key"))
 
 
 @pytest.mark.asyncio

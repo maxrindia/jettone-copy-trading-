@@ -36,6 +36,33 @@ Groups are the existing verdicts, grouped: `matched`, `attribute_mismatch`, `ide
 `identity_unconfirmed` (symbol-only or a candidate without an ISIN), `ambiguous`, `catalog_not_loaded`,
 `catalog_stale`, `segment_not_supported`, `unmapped`.
 
+## NSE crosswalk evidence (R4i)
+
+Optional and **off by default**. Set `INSTRUMENT_SHADOW_NSE_CROSSWALK_PATH` to a **local** official NSE security-master file you
+downloaded yourself (`NSE_CM_security_DDMMYYYY.csv` or `.csv.gz`; the snapshot date is read from the file name). Nothing is
+downloaded, and the setting does nothing unless `INSTRUMENT_SHADOW_ENABLED` is also on. Keep the file outside the repository.
+Please check NSE's terms of use before scripting any download.
+
+For each Master `(exchange, symbol, instrument_token)` the job records one `INSTRUMENT_SHADOW_CROSSWALK` event (deduplicated
+against the latest event for that instrument today), and `GET /api/v1/instruments/shadow-report` adds a `crosswalk` section with
+the live snapshot provenance (file name, snapshot date, SHA-256 of the supplied and decompressed bytes, age, stale flag, row
+counts) and the latest state per instrument. The existing `INSTRUMENT_SHADOW_COMPARE` events, groups and verdicts are unchanged.
+
+| State | Meaning |
+|---|---|
+| `CANDIDATE` | One active, valid-ISIN row for the token in a fresh snapshot, a supported series (`EQ`, `BE`, `BZ`, `SM`, `ST`) and the same symbol as the order. |
+| `UNSUPPORTED_SERIES` / `SYMBOL_DISAGREES` | The token exists but the series is not supported here, or the order's symbol differs from the snapshot's. No ISIN is offered. |
+| `STALE_SNAPSHOT` / `CONFLICT` / `DELETED` / `INVALID_ISIN` / `UNMAPPED` | The R4h lookup refused the token (reason in `reason`). No ISIN. |
+| `NO_MASTER_TOKEN` | The persisted order has no `instrument_token`. A symbol is never used to find a record. |
+| `EXCHANGE_NOT_COVERED` | Not NSE: BSE and every derivative exchange stay unmapped in this phase. |
+| `CROSSWALK_UNAVAILABLE` | The configured file is missing or unusable (a code only, never the path or message). |
+
+**Every row carries `link_status = MASTER_TOKEN_LINK_UNVERIFIED`**, including a `CANDIDATE`. Nothing yet proves that the
+`instrumentId` Alice reports on a Master order equals the contract-master `Token`, so a candidate ISIN is a lead for an operator,
+not an identity. It is never passed to the comparator (so it cannot produce a `MATCH`), and the planner and the copy pipeline do
+not read it. The link stays unverified until authorised evidence (an order-book export compared with the contract master) says
+otherwise, and that is a separate decision.
+
 ## What the report cannot tell you yet
 
 - **Persisted Master orders have no ISIN.** The job normalises them from exchange and symbol only, so a Master identity is

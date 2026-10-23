@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     INSTRUMENT_SHADOW_INTERVAL_SECONDS: int = 900
     INSTRUMENT_SHADOW_WINDOW_HOURS: int = 24
     INSTRUMENT_SHADOW_MAX_ORDERS: int = 500
+    # R4i: path to an official NSE security-master file you downloaded yourself (NSE_CM_security_DDMMYYYY.csv[.gz]; the
+    # snapshot date is read from the file name). Empty = off. Used only by the shadow job and report as MASTER_TOKEN_LINK_UNVERIFIED
+    # evidence; never downloaded, never read by the planner or the copy pipeline. See docs/INSTRUMENT_SHADOW.md.
+    INSTRUMENT_SHADOW_NSE_CROSSWALK_PATH: str = ""
 
     # R4f per-order planner checks. OFF by default: nothing changes. When on, each new Child copy is first checked for
     # segment, instrument mapping, product and order type against the Child broker's capability profile
