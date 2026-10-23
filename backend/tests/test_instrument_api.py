@@ -197,8 +197,13 @@ async def test_aggregates_use_the_latest_result_per_instrument_and_rows_list_the
     monkeypatch.setattr(settings, "INSTRUMENT_SHADOW_ENABLED", True)
     now = datetime.now(timezone.utc)
     await seed_events(db_session, now=now - timedelta(minutes=20), groww=groww_loaded)
-    await shadow.run_once(now - timedelta(minutes=10), catalogs=[AliceCatalog(), AngelCatalog(AngelInstrumentStore()),
-                          GrowwCatalog(groww_store(groww_row(), groww_row(isin=INFY)))])       # Groww now ambiguous
+    # The helper stamps stores with a fixed 2026-10-22 snapshot time, which ages past the 24 h freshness limit as the real
+    # clock moves on. Stamp this store relative to the time the job runs at (5 minutes before it), like `groww_loaded`.
+    run_at = now - timedelta(minutes=10)
+    second = groww_store(groww_row(), groww_row(isin=INFY))
+    second._snapshot_at = run_at - timedelta(minutes=5)
+    await shadow.run_once(run_at, catalogs=[AliceCatalog(), AngelCatalog(AngelInstrumentStore()),
+                          GrowwCatalog(second)])       # Groww now ambiguous
     data = (await client.get("/api/v1/instruments/shadow-report", headers=TOKEN)).json()["data"]
     assert data["event_count"] == 4 and data["instrument_count"] == 1
     assert data["by_broker"]["groww"]["groups"] == {"ambiguous": 1}
