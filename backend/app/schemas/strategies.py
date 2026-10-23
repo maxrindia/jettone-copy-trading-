@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -48,6 +48,18 @@ class QuantityPolicyResponse(BaseModel):
     fixed_qty: Optional[int] = None
 
 
+class BrokerPairInfo(BaseModel):
+    """R6: whether the order-time broker-pair gate (R5) accepts this Master -> Child pair. Read-only diagnostics: broker ids and a
+    reason only. Membership is not execution support: when `supported` is not true, orders are NOT copied to this Child."""
+    master_broker: Optional[str] = None
+    child_broker: Optional[str] = None
+    supported: Optional[bool] = None            # None only when the strategy has no Master (unknown, never "supported")
+    code: Optional[str] = None                  # BROKER_PAIR_NOT_SUPPORTED when unsupported
+    requirement: Optional[str] = None           # the missing requirement, e.g. PAIR_NOT_ALLOWLISTED
+    detail: str = ""
+    message: str = ""
+
+
 class MemberResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
@@ -57,6 +69,7 @@ class MemberResponse(BaseModel):
     trading_enabled: bool
     created_at: datetime
     account: MemberAccountInfo
+    broker_pair: Optional[BrokerPairInfo] = None     # R6, additive
 
 
 # ─── Strategy Schemas ────────────────────────────────────────────────────────
@@ -111,3 +124,5 @@ class StrategyResponse(BaseModel):
     member_count: int = 0
     master_account: Optional[MemberAccountInfo] = None
     members: List[MemberResponse] = []
+    # R6, additive: pair support and warnings for this strategy (see services/strategy_readiness.py).
+    readiness: Optional[Dict[str, Any]] = None

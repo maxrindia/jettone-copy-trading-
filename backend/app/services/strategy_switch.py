@@ -72,6 +72,7 @@ from app.models.strategies import (
 from app.models.trades import CopyTrade, CopyTradeStatus, Order, OrderSide, OrderSource, OrderStatus
 from app.services import strategy_membership as membership
 from app.services.alice_blue.client import order_book_row_id
+from app.services import strategy_readiness as readiness
 from app.services.brokers.registry import can_be_master
 from app.services.copy_engine.risk_inputs import (
     UnknownProductTypeError,
@@ -519,6 +520,26 @@ async def run_preflight(
                     f"{len(intraday_pos)} open intraday position(s). Exits for them will not be copied from "
                     "the old Master after the switch.",
                     len(intraday_pos), [_pos_label(p) for p in intraday_pos])
+
+    # R6: Children whose broker pair would be unsupported under the NEW Master's broker. Informational only: it never blocks,
+    # never changes `allowed` or `can_override`, and reuses the R5 pair gate through strategy_readiness (no second policy).
+    pair_scope = [
+        {"name": m.account.display_name, "role": "CHILD", "broker": m.account.broker}
+        for m in strategy.members if m.account_id != new_master_id and m.account is not None
+    ]
+    if old_master_action == "CHILD" and strategy.master_account_id and strategy.master_account_id != new_master_id:
+        old_master = next((a for a in (await db.execute(
+            select(Account).where(Account.id == strategy.master_account_id))).scalars().all()), None)
+        if old_master is not None:
+            pair_scope.append({"name": old_master.display_name, "role": "CURRENT_MASTER", "broker": old_master.broker})
+    new_master_broker = readiness.master_broker_for(new_master)
+    for item in readiness.switch_pair_warnings(new_master_broker, pair_scope):
+        pair = item["pair"]
+        warnings.append(SwitchBlocker(
+            code="BROKER_PAIR_NOT_SUPPORTED",
+            message=f"{item['name']} would not receive copied orders under the new Master: {pair['message']}",
+            account_name=item["name"], role=item["role"], items=[pair["detail"]],
+        ))
 
     result = SwitchPreflight(
         strategy_id=str(strategy.id),

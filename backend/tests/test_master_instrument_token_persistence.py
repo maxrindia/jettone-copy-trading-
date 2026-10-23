@@ -348,7 +348,7 @@ def test_master_trade_events_and_child_placement_still_use_instrument_id_only():
 
 
 def test_nothing_reads_the_stored_token_yet():
-    """Only the pipeline's upsert writes it, and (R4i) the observe-only shadow job reads it for crosswalk evidence."""
+    """Only the pipeline's upsert writes it, and (R4i) the observe-only shadow job and (R6) the read-only strategy diagnostics read it for crosswalk evidence."""
     app =Path(__file__).resolve().parent.parent / "app"
     for path in app.rglob("*.py"):
         if path.name in ("trades.py",):
@@ -358,7 +358,7 @@ def test_nothing_reads_the_stored_token_yet():
             if isinstance(node, ast.Attribute) and node.attr == "instrument_token" and isinstance(node.value, ast.Name) \
                     and node.value.id in ("Order", "existing", "row"):
                 # the only writer/reader is the upsert itself
-                assert path.name in ("pipeline.py", "shadow.py"), (path, node.lineno)
+                assert path.name in ("pipeline.py", "shadow.py", "strategy_readiness.py"), (path, node.lineno)
 
 
 # ── schema and migration ─────────────────────────────────────────────────────────────────

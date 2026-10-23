@@ -18,6 +18,7 @@ from app.models.strategies import STRATEGY_ROLE_CHILD, GroupStrategy, StrategyMe
 from app.models.accounts import Account, CopySetting, QuantityMode
 from app.models.trades import CopyTrade, CopyTradeStatus, Order, OrderSide as DBOrderSide, OrderSource, OrderStatus
 from app.services import strategy_membership as membership
+from app.services import strategy_readiness
 from app.services import strategy_switch
 from app.services.runtime import hooks as runtime_hooks
 from app.services.alice_blue.client import AliceBlueClient
@@ -25,6 +26,7 @@ from app.services.alice_blue.exceptions import AuthenticationError
 from app.services.alice_blue.types import OrderResultCategory, OrderSide
 from app.services.brokers.guards import ensure_alice_blue_account
 from app.schemas.strategies import (
+    BrokerPairInfo,
     MasterSwitchRequest,
     MemberAdd,
     MemberResponse,
@@ -66,10 +68,36 @@ def _load_opts():
 
 
 def _to_response(strategy: GroupStrategy) -> StrategyResponse:
-    """Build StrategyResponse including computed member_count."""
+    """Build StrategyResponse including computed member_count and (R6) the read-only broker-pair readiness."""
     data = StrategyResponse.model_validate(strategy)
     data.member_count = len(strategy.members)
+    try:
+        readiness = strategy_readiness.strategy_readiness(strategy)
+        data.readiness = readiness
+        for member, row in zip(data.members, readiness["children"]):
+            member.broker_pair = BrokerPairInfo(**row["broker_pair"])
+    except Exception as exc:                   # diagnostics never break the strategy response
+        logger.error(f"[Strategies] readiness diagnostics unavailable: {type(exc).__name__}")
     return data
+
+
+async def _member_responses(db: AsyncSession, strategy_id: uuid.UUID, members: List[StrategyMember]) -> List[MemberResponse]:
+    """Member responses with the R6 broker-pair diagnostics. Reads the strategy's Master broker only; writes nothing."""
+    master = (await db.execute(
+        select(GroupStrategy).where(GroupStrategy.id == strategy_id, GroupStrategy.deleted_at.is_(None))
+        .options(selectinload(GroupStrategy.master_account))
+    )).scalar_one_or_none()
+    out = [MemberResponse.model_validate(m) for m in members]
+    try:
+        rows = strategy_readiness.children_readiness(
+            strategy_readiness.master_broker_for(master.master_account if master else None), members,
+            has_master=bool(master and master.master_account is not None),
+        )
+        for response, row in zip(out, rows):
+            response.broker_pair = BrokerPairInfo(**row["broker_pair"])
+    except Exception as exc:
+        logger.error(f"[Strategies] member pair diagnostics unavailable: {type(exc).__name__}")
+    return out
 
 
 def _conflict(exc: "membership.MembershipConflict") -> HTTPException:
@@ -189,6 +217,33 @@ async def update_strategy(
     return _to_response(result.scalar_one())
 
 
+@router.get("/{strategy_id}/readiness")
+async def get_strategy_readiness(
+    strategy_id: uuid.UUID,
+    hours: int = 24,
+    db: AsyncSession = Depends(get_db),
+):
+    """R6, read-only: which Master -> Child broker pairs the order-time gate accepts, and how much of the Master's recent
+    instrument activity has any mapping evidence. Makes no broker call, writes nothing, changes no role. A candidate ISIN is
+    never reported as a verified identity (`verified_identities` is always 0 until authorised evidence exists)."""
+    strategy = (await db.execute(
+        select(GroupStrategy).where(GroupStrategy.id == strategy_id, GroupStrategy.deleted_at.is_(None)).options(*_load_opts())
+    )).scalar_one_or_none()
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    pairs = strategy_readiness.strategy_readiness(strategy)
+    coverage = await strategy_readiness.coverage_for_master(db, strategy.master_account_id, hours=hours)
+    return {
+        **pairs,
+        "mapping_coverage": coverage,
+        "warnings": pairs["warnings"] + strategy_readiness.coverage_warnings(coverage),
+        "scope": [
+            "Only Alice Blue -> Alice Blue is supported end to end. Any other pair is skipped at order time as BROKER_PAIR_NOT_SUPPORTED.",
+            "Instrument mapping is diagnostic only: a candidate ISIN is MASTER_TOKEN_LINK_UNVERIFIED and is not a verified identity.",
+        ],
+    }
+
+
 # --- Master switch ------------------------------------------------------------
 
 @router.get("/{strategy_id}/switch-master/preflight")
@@ -285,7 +340,7 @@ async def list_members(strategy_id: uuid.UUID, db: AsyncSession = Depends(get_db
         .options(selectinload(StrategyMember.account))
         .order_by(StrategyMember.created_at.asc())
     )
-    return result.scalars().all()
+    return await _member_responses(db, strategy_id, list(result.scalars().all()))
 
 
 @router.post("/{strategy_id}/members", response_model=MemberResponse, status_code=status.HTTP_201_CREATED)
@@ -346,7 +401,7 @@ async def add_member(
         .where(StrategyMember.id == member.id)
         .options(selectinload(StrategyMember.account))
     )
-    return result.scalar_one()
+    return (await _member_responses(db, strategy_id, [result.scalar_one()]))[0]
 
 
 @router.put("/{strategy_id}/members/{account_id}", response_model=MemberResponse)
@@ -378,7 +433,7 @@ async def update_member(
 
     await db.commit()
     await db.refresh(member)
-    return member
+    return (await _member_responses(db, strategy_id, [member]))[0]
 
 
 _WORKING_ORDER_STATUSES = (OrderStatus.PENDING, OrderStatus.OPEN, OrderStatus.PARTIAL)

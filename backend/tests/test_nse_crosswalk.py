@@ -489,10 +489,10 @@ def test_the_module_imports_only_the_standard_library_and_the_isin_validator():
 
 
 def test_nothing_in_the_engine_imports_the_crosswalk():
-    """R4i: the ONLY importer is the shadow-evidence module, and only the shadow job, the report and the read-only API import
+    """R4i: the ONLY importer is the shadow-evidence module, and only the shadow job, the report, the read-only API and (R6) the read-only strategy diagnostics import
     that. The planner, the copy pipeline and every broker adapter cannot reach the crosswalk."""
     app = Path(__file__).resolve().parent.parent / "app"
-    evidence_users = {"crosswalk_evidence.py", "shadow.py", "report.py", "instruments.py"}
+    evidence_users = {"crosswalk_evidence.py", "shadow.py", "report.py", "instruments.py", "strategy_readiness.py"}
     for path in app.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         if path.name not in ("nse_crosswalk.py", "crosswalk_evidence.py"):

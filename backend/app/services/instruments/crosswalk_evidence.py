@@ -223,3 +223,50 @@ def build_section(events: Sequence[Tuple[Optional[datetime], Dict[str, Any]]], n
         "rows": rows[:REPORT_ROW_CAP],
         "rows_truncated": len(rows) > REPORT_ROW_CAP,
     }
+
+
+# ── coverage of a set of Master instruments (R6; read-only, no shadow job needed) ─────────────────
+
+# How each state is grouped for an operator. A CANDIDATE is never "verified": identity stays unverified in every group.
+COVERAGE_GROUPS = {
+    "identity_unverified": (State.CANDIDATE,),
+    "no_mapping_found": (State.UNMAPPED,),
+    "source_unavailable": (State.CROSSWALK_UNAVAILABLE,),
+    "source_stale": (State.STALE_SNAPSHOT,),
+    "no_master_token": (State.NO_MASTER_TOKEN,),
+    "exchange_not_covered": (State.EXCHANGE_NOT_COVERED,),
+    "needs_review": (State.CONFLICT, State.DELETED, State.INVALID_ISIN, State.UNSUPPORTED_SERIES,
+                     State.SYMBOL_DISAGREES, State.MASTER_SYMBOL_UNUSABLE),
+}
+
+
+def coverage_summary(subjects: Sequence[Tuple[Any, Any, Any]], now: datetime) -> Dict[str, Any]:
+    """Counts of what the configured local NSE snapshot says about distinct Master (exchange, symbol, token) subjects.
+
+    `verified_identities` is ALWAYS 0: no authorised evidence yet shows that Alice's `instrumentId` equals the contract-master
+    `Token`, so even a CANDIDATE is only MASTER_TOKEN_LINK_UNVERIFIED. `source` says whether the snapshot could be used at all, so
+    an absent or unusable file is never read as "nothing to map"."""
+    configured = is_configured()
+    crosswalk, error = get_crosswalk() if configured else (None, NOT_CONFIGURED)
+    source = "NOT_CONFIGURED" if not configured else ("LOADED" if crosswalk is not None else "FILE_UNUSABLE")
+    seen = set()
+    states: Counter = Counter()
+    for exchange, symbol, token in subjects:
+        key = (str(exchange or "").strip().upper(), str(symbol or "").strip().upper(),
+               str(token).strip() if token not in (None, "") else None)
+        if key in seen:
+            continue
+        seen.add(key)
+        states[evaluate(key[0], key[1], key[2], crosswalk, error, now)["state"]] += 1
+    snapshot = snapshot_summary(crosswalk, now)
+    return {
+        "source": source,
+        "source_error": None if source != "FILE_UNUSABLE" else error,
+        "snapshot": snapshot,
+        "total_instruments": len(seen),
+        "verified_identities": 0,
+        "link_status": LINK_STATUS,
+        "candidates": states.get(State.CANDIDATE.value, 0),
+        "by_state": dict(sorted(states.items())),
+        "groups": {g: sum(states.get(s.value, 0) for s in members) for g, members in COVERAGE_GROUPS.items()},
+    }
