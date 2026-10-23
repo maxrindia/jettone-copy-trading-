@@ -33,6 +33,10 @@ from test_child_execution_tracking import client_returning, run, trades_by_follo
 from test_duplicate_create_db_backstop import KINDS, make_event, ok, pipeline
 from test_instrument_catalogs import INFY, NOW, REL, groww_row, groww_store
 
+
+# R5: these tests drive a Groww / Angel One Child through the pipeline, which needs the pair enabled.
+pytestmark = pytest.mark.usefixtures("cross_broker_pairs_enabled")
+
 ALICE, GROWW = "alicebluenew", "groww"
 
 

@@ -27,6 +27,10 @@ from conftest import TestingSessionLocal
 from test_order_handling_matrix import _event, _setup
 from groww_helpers import ALICE_STYLE_TOKEN, FakeGroww, make_client, ok, position_row
 
+
+# R5: these tests drive a Groww / Angel One Child through the pipeline, which needs the pair enabled.
+pytestmark = pytest.mark.usefixtures("cross_broker_pairs_enabled")
+
 CHILD_IP = "151.245.182.60"
 
 

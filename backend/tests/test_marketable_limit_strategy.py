@@ -51,6 +51,10 @@ from app.services.copy_engine.validator import EventValidator
 from strategy_helpers import SAMPLE_MASTER_ACCOUNT_ID, add_child
 
 
+# R5: these tests drive a Groww / Angel One Child through the pipeline, which needs the pair enabled.
+pytestmark = pytest.mark.usefixtures("cross_broker_pairs_enabled")
+
+
 def _market_event(
     quantity=100,
     price=Decimal("1000.00"),

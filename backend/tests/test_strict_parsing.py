@@ -22,6 +22,10 @@ from test_angel_one_sell_safety import angel_enabled, _angel_child, CHILD_IP as 
 import angel_helpers as A
 import groww_helpers as G
 
+
+# R5: these tests drive a Groww / Angel One Child through the pipeline, which needs the pair enabled.
+pytestmark = pytest.mark.usefixtures("cross_broker_pairs_enabled")
+
 # Values that must never be accepted as a number for a required field.
 BAD_ANY = [
     ("none", None), ("empty", ""), ("blank", "   "), ("nan_text", "NaN"), ("inf_text", "Infinity"),

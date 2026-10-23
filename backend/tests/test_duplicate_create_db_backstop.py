@@ -37,6 +37,10 @@ import groww_helpers as G
 from test_angel_one_sell_safety import CHILD_IP as ANGEL_IP, _angel_child, _sell as angel_sell, angel_enabled  # noqa: F401
 from test_groww_sell_safety import CHILD_IP as GROWW_IP, _groww_child, _positions as groww_positions, _sell as groww_sell, groww_enabled  # noqa: F401
 
+
+# R5: these tests drive a Groww / Angel One Child through the pipeline, which needs the pair enabled.
+pytestmark = pytest.mark.usefixtures("cross_broker_pairs_enabled")
+
 KINDS = ["MARKET", "LIMIT", "SL"]
 
 

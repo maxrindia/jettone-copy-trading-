@@ -35,6 +35,10 @@ from test_order_send_safety import (  # noqa: F401
 from test_order_handling_matrix import _event
 
 
+# R5: these tests drive a Groww / Angel One Child through the pipeline, which needs the pair enabled.
+pytestmark = pytest.mark.usefixtures("cross_broker_pairs_enabled")
+
+
 def sl_buy(master, oid, qty=10):
     return _event(master, oid, side="BUY", order_type="SL", product="INTRADAY", exchange="NSE",
                   symbol="SBIN", qty=qty, price="800", trigger="795", token="3045")

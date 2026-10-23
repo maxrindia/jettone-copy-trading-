@@ -191,3 +191,20 @@ async def sample_copy_settings(db_session, sample_accounts):
     await db_session.commit()
     await db_session.refresh(setting)
     return setting
+
+
+@pytest.fixture
+def cross_broker_pairs_enabled(monkeypatch):
+    """R5: the pipeline refuses every Master -> Child broker pair that is not on the allowlist in
+    app/services/brokers/pairs.py, and today only Alice -> Alice is. The tests that use this fixture exercise what a Groww or
+    Angel One Child does INSIDE the pipeline (SELL guard, funds, strict parsing, ambiguous sends, reconciliation), which only
+    runs once a pair has been enabled. It lists those pairs and waives the pair gate's OWN role-gate and live-evidence checks for this test only.
+    The routing-time gate in the pipeline (`can_be_child`, CHILD_BROKER_NOT_READY) is a separate binding and is left exactly as
+    the test set it; nothing outside the test is affected."""
+    from app.services.brokers import pairs
+
+    monkeypatch.setattr(pairs, "SUPPORTED_PAIRS", {**pairs.SUPPORTED_PAIRS,
+                                                   ("alicebluenew", "groww"): "test only", ("alicebluenew", "angelone"): "test only"})
+    monkeypatch.setattr(pairs, "_feature_gap", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pairs, "can_be_master", lambda *args, **kwargs: True)
+    monkeypatch.setattr(pairs, "can_be_child", lambda *args, **kwargs: True)

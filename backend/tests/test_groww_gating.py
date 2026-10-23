@@ -138,7 +138,7 @@ def test_both_flags_expose_child_capability_only_for_a_usable_contract(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_both_flags_still_apply_the_normal_child_safety_checks(db_session, mock_redis, monkeypatch):
+async def test_both_flags_still_apply_the_normal_child_safety_checks(db_session, mock_redis, monkeypatch, cross_broker_pairs_enabled):
     flags(monkeypatch, True, True)
     monkeypatch.setattr(settings, "SELL_POSITION_SAFETY_BYPASS", False)
     master, child = await _groww_child(db_session)

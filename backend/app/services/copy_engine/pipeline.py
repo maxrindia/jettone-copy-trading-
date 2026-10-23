@@ -42,6 +42,7 @@ from app.services.copy_engine.child_outcomes import (
 )
 from app.services.copy_engine.events import MasterTradeEvent, derive_copy_event_id
 from app.services.alice_blue.instruments import InstrumentResolutionError
+from app.services.brokers.pairs import check_pair
 from app.services.brokers.registry import can_be_child, normalize_broker_id, persisted_order_label
 from app.services.instruments.planner import PlannerSkip, check_child_order
 from app.services.copy_engine.risk import RiskCheckResult, RiskEngine
@@ -169,20 +170,54 @@ class CopyEnginePipeline:
             f"[Pipeline] {skip.code} ({skip.detail}): {event.master_order_id} not copied to {follower.display_name} "
             f"({follower.broker}); other Children are unaffected."
         )
+        await self._audit_copy_skip(
+            follower, event, code=skip.code, detail=skip.detail, fill_sequence=fill_sequence,
+            extra={"child_order_type": child_order_type, "product_type": str(event.product_type)},
+        )
+        return {"status": "SKIPPED", "reason": skip.code, "detail": skip.detail}
+
+    async def _audit_copy_skip(
+        self, follower: Account, event: MasterTradeEvent, *, code: str, detail: str, fill_sequence: int,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Advisory COPY_SKIPPED audit row for ONE Child. The per-Child outcome itself is the copy_trades row written from the
+        returned SKIPPED result; a failure to write this row is logged and changes nothing."""
         try:
             async with AsyncSessionLocal() as session:
                 session.add(AuditLog(
                     event_type="COPY_SKIPPED", account_id=follower.id, master_order_id=event.master_order_id,
                     copy_event_id=derive_copy_event_id(event.master_order_id, str(follower.id), fill_sequence),
                     symbol=event.symbol, exchange=event.exchange, side=event.side, quantity=0,
-                    reason_code=skip.code,
-                    metadata_payload={"detail": skip.detail, "child_broker": str(follower.broker),
-                                      "child_order_type": child_order_type, "product_type": str(event.product_type)},
+                    reason_code=code,
+                    metadata_payload={"detail": detail, "child_broker": str(follower.broker), **(extra or {})},
                 ))
                 await session.commit()
         except Exception as exc:
-            logger.error(f"[Pipeline] Could not write the planner skip audit row: {exc}")
-        return {"status": "SKIPPED", "reason": skip.code, "detail": skip.detail}
+            logger.error(f"[Pipeline] Could not write the {code} skip audit row: {exc}")
+
+    async def _pair_gate_skip(
+        self, follower: Account, event: MasterTradeEvent, *, child_order_type: str, fill_sequence: int
+    ) -> Optional[Dict[str, Any]]:
+        """
+        R5. None when this Master-broker -> Child-broker pair is on the explicit support allowlist (brokers/pairs.py), else a
+        per-Child SKIPPED result (BROKER_PAIR_NOT_SUPPORTED) for ONLY this Child. It runs right after the TRADING_DISABLED guard
+        and before the planner, funds, risk, SELL guard, claim, pre-write and broker call, so a rejected pair makes no broker
+        call and writes no send record. Always on: it only restricts, and every failure fails closed.
+        """
+        master_broker = await self._master_broker_id(event.account_id)
+        decision = check_pair(master_broker, follower.broker)
+        if decision.supported:
+            return None
+        logger.info(
+            f"[Pipeline] {decision.code} ({decision.detail}): {event.master_order_id} not copied to {follower.display_name} "
+            f"({follower.broker}); other Children are unaffected."
+        )
+        await self._audit_copy_skip(
+            follower, event, code=decision.code, detail=decision.detail, fill_sequence=fill_sequence,
+            extra={"master_broker": str(master_broker), "child_order_type": child_order_type,
+                   "product_type": str(event.product_type)},
+        )
+        return {"status": "SKIPPED", "reason": decision.code, "detail": decision.detail}
 
     def _get_lot_size(self, symbol: str) -> int:
         for prefix, lot in self.lot_sizes.items():
@@ -823,6 +858,11 @@ class CopyEnginePipeline:
             logger.info(f"[Pipeline] Follower {follower.display_name} paused/disabled. Skipping limit order.")
             return {"status": "SKIPPED", "reason": "TRADING_DISABLED"}
 
+        # R5: explicit broker-pair gate, before the planner, funds, risk, claim and send.
+        pair_skip = await self._pair_gate_skip(follower, event, child_order_type="LIMIT", fill_sequence=1)
+        if pair_skip is not None:
+            return pair_skip
+
         # R4f: per-order planner checks (segment / instrument / product / order type), only when enforced.
         planner_skip = await self._planner_skip(follower, event, child_order_type="LIMIT", fill_sequence=1)
         if planner_skip is not None:
@@ -1446,6 +1486,13 @@ class CopyEnginePipeline:
         if not follower.is_active or follower.is_emergency_stopped or follower_runtime_paused:
             logger.info(f"[Pipeline] Follower {follower.display_name} paused/disabled. Skipping SL order.")
             return {"status": "SKIPPED", "reason": "TRADING_DISABLED"}
+
+        # R5: explicit broker-pair gate, before the planner, funds, risk, claim and send.
+        pair_skip = await self._pair_gate_skip(
+            follower, event, child_order_type="SL" if event.order_type.upper() == "SL" else "SLM", fill_sequence=1
+        )
+        if pair_skip is not None:
+            return pair_skip
 
         # R4f: per-order planner checks. The Child receives a native SL / SL-M; it is never turned into a MARKET.
         planner_skip = await self._planner_skip(
@@ -3538,6 +3585,15 @@ class CopyEnginePipeline:
         if not follower.is_active or follower.is_emergency_stopped or follower_runtime_paused:
             logger.info(f"[Pipeline] Follower {follower.display_name} paused/disabled. Skipping market order.")
             return {"status": "SKIPPED", "reason": "TRADING_DISABLED"}
+
+        # R5: explicit broker-pair gate, before the planner, funds, risk, claim and send. In MARKETABLE_LIMIT mode the
+        # Child receives a LIMIT, otherwise a MARKET.
+        pair_skip = await self._pair_gate_skip(
+            follower, event, fill_sequence=event.fill_sequence,
+            child_order_type="LIMIT" if settings.MARKET_ORDER_EXECUTION_MODE == "MARKETABLE_LIMIT" else "MARKET",
+        )
+        if pair_skip is not None:
+            return pair_skip
 
         # R4f: per-order planner checks. In MARKETABLE_LIMIT mode the Child receives a LIMIT, otherwise a MARKET.
         planner_skip = await self._planner_skip(

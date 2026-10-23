@@ -23,6 +23,10 @@ from test_angel_one_sell_safety import angel_enabled, _angel_child, _run as ange
 from test_groww_sell_safety import groww_enabled, _groww_child, _positions, _run as groww_run, _sell as groww_sell  # noqa: F401
 
 
+# R5: these tests drive a Groww / Angel One Child through the pipeline, which needs the pair enabled.
+pytestmark = pytest.mark.usefixtures("cross_broker_pairs_enabled")
+
+
 def pos(symbol="SBIN", exchange="NSE", product="MIS", qty=10, iid=None):
     return Position(symbol=symbol, quantity=qty, side="BUY" if qty >= 0 else "SELL", average_price=Decimal("800"),
                     account_id="a", exchange=exchange, product_type=product, instrument_id=iid)

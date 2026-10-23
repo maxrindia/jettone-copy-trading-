@@ -31,6 +31,10 @@ from test_angel_one_sell_safety import angel_enabled, _angel_child, CHILD_IP as 
 from test_groww_sell_safety import groww_enabled, _groww_child, CHILD_IP as GROWW_IP, _positions  # noqa: F401
 from test_order_handling_matrix import _event
 
+
+# R5: these tests drive a Groww / Angel One Child through the pipeline, which needs the pair enabled.
+pytestmark = pytest.mark.usefixtures("cross_broker_pairs_enabled")
+
 NOT_SENT = [
     ("ConnectError", lambda: httpx.ConnectError("refused")),
     ("ConnectTimeout", lambda: httpx.ConnectTimeout("connect timed out")),
