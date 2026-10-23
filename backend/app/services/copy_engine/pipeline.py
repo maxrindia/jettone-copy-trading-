@@ -140,6 +140,20 @@ class CopyEnginePipeline:
             logger.error(f"[Pipeline] Stop provider failed ({exc}); failing closed.")
             return True, set()
 
+    @staticmethod
+    def _identity_token(token: Any, reported_exchange: Any, row_exchange: Any) -> Optional[str]:
+        """The token to persist, or None. Requires a string token that fits the column and an exchange that the broker
+        reported and that equals the row's exchange (case-insensitive); anything else means the pair is not trusted."""
+        if not isinstance(token, str) or not isinstance(reported_exchange, str):
+            return None
+        cleaned, reported = token.strip(), reported_exchange.strip().upper()
+        if not cleaned or not reported or reported != str(row_exchange or "").strip().upper():
+            return None
+        if len(cleaned) > 50:
+            logger.warning("[Pipeline] Instrument token longer than 50 characters ignored.")
+            return None
+        return cleaned
+
     async def save_or_update_order(
         self,
         internal_order_id: str,
@@ -164,9 +178,15 @@ class CopyEnginePipeline:
         master_broker_order_id: Optional[str] = None,
         group_strategy_id: Optional[uuid.UUID] = None,
         correlation_id: Optional[str] = None,
+        instrument_token: Optional[str] = None,
+        instrument_exchange: Optional[str] = None,
     ) -> Order:
         """
         Durable atomic upsert for an Order record.
+
+        `instrument_token` / `instrument_exchange` (R4e) record the broker's own instrument token for a Master order, but
+        only when the exchange the broker REPORTED equals the row's exchange. A token already stored is never overwritten
+        or erased: a different one is logged as a conflict and ignored. Nothing is inferred.
         """
         if pending_quantity is None:
             pending_quantity = max(0, quantity - filled_quantity)
@@ -250,6 +270,15 @@ class CopyEnginePipeline:
                     existing.master_broker_order_id = master_broker_order_id
                 if group_strategy_id:
                     existing.group_strategy_id = group_strategy_id
+                accepted_token = self._identity_token(instrument_token, instrument_exchange, existing.exchange)
+                if accepted_token:
+                    if not existing.instrument_token:
+                        existing.instrument_token = accepted_token
+                    elif existing.instrument_token != accepted_token:
+                        logger.warning(
+                            f"[Pipeline] Order {existing.internal_order_id} already holds instrument token "
+                            f"{existing.instrument_token}; a different token {accepted_token} was reported. Kept the stored one."
+                        )
                 await session.commit()
                 return existing
             else:
@@ -263,6 +292,7 @@ class CopyEnginePipeline:
                     source=source,
                     broker=broker_label,
                     exchange=exchange,
+                    instrument_token=self._identity_token(instrument_token, instrument_exchange, exchange),
                     symbol=symbol,
                     side=side,
                     order_type=order_type,

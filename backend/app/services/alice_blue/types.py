@@ -108,6 +108,10 @@ class OrderRecord:
     # when present, is the ONLY reliable way to identify exactly which
     # contract a master order actually traded.
     instrument_id: Optional[str] = None
+    # The exchange exactly as the order-book row REPORTED it, or None when the row carried no exchange (then `exchange`
+    # above is only a default). The token is persisted only when this is set, so a stored (exchange, token) pair
+    # is never built from a defaulted exchange.
+    instrument_exchange: Optional[str] = None
 
 
 @dataclass
@@ -130,3 +134,5 @@ class OrderUpdateEvent:
     exchange: str = "NSE"
     # Threaded straight from OrderRecord.instrument_id - see its docstring.
     instrument_id: Optional[str] = None
+    # Threaded from OrderRecord.instrument_exchange (None for WebSocket events, which carry no instrument token).
+    instrument_exchange: Optional[str] = None

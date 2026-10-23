@@ -93,6 +93,10 @@ class Order(Base, TimestampMixin):
     )
     broker: Mapped[str] = mapped_column(String(50), default="ALICE_BLUE", nullable=False)
     exchange: Mapped[str] = mapped_column(String(20), default="NSE", nullable=False)
+    # The broker's own instrument token for this order, exactly as its order book reported it (R4e). It identifies an
+    # instrument only TOGETHER with `exchange` (the same value exists on more than one exchange). NULL means not
+    # reported or not known: it is never inferred, never backfilled, and no ISIN or mapping is stored here.
+    instrument_token: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     symbol: Mapped[str] = mapped_column(String(100), nullable=False)
     side: Mapped[OrderSide] = mapped_column(SQLEnum(OrderSide, name="order_side_enum"), nullable=False)
     order_type: Mapped[str] = mapped_column(String(20), default="MARKET", nullable=False)  # MARKET, LIMIT, SL, SLM

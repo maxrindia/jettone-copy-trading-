@@ -444,6 +444,8 @@ class MasterOrderPoller:
                 status=status,
                 broker_status=str(record.status or ""),
                 rejection_reason=record.rejection_reason,
+                instrument_token=record.instrument_id,
+                instrument_exchange=getattr(record, "instrument_exchange", None),
             )
         except Exception as exc:
             logger.error(
@@ -472,6 +474,7 @@ class MasterOrderPoller:
             rejection_reason=record.rejection_reason,
             exchange=record.exchange or "NSE",
             instrument_id=record.instrument_id,
+            instrument_exchange=getattr(record, "instrument_exchange", None),
         )
 
     @staticmethod

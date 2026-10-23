@@ -50,6 +50,7 @@ async def lifespan(app: FastAPI):
             await conn.execute(text("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS broker VARCHAR(50) DEFAULT 'alicebluenew';"))
             await conn.execute(text("ALTER TABLE group_strategies ADD COLUMN IF NOT EXISTS place_rejected_enabled BOOLEAN DEFAULT FALSE;"))
             await conn.execute(text("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS proxy_expires_on DATE;"))
+            await conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS instrument_token VARCHAR(50);"))
         logger.info("Database schema columns verified.")
     except Exception as exc:
         logger.warning(f"Schema auto-migration notice: {exc}")

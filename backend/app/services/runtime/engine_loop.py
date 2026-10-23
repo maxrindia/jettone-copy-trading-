@@ -322,6 +322,8 @@ class EngineLoop:
                         status=status_mapped,
                         broker_status=event.status,
                         rejection_reason=event.rejection_reason,
+                        instrument_token=event.instrument_id,
+                        instrument_exchange=getattr(event, "instrument_exchange", None),
                     )
 
                     # 2. Only an account currently monitored as a Master is

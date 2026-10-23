@@ -1036,6 +1036,12 @@ class AliceBlueClient:
             # which of many same-named contracts was actually traded.
             instrument_id_raw = item.get("instrumentId", item.get("Token", item.get("token")))
             instrument_id = str(instrument_id_raw).strip() if instrument_id_raw not in (None, "") else None
+            # The exchange only when the row actually reported one: `exchange` below falls back to "NSE", which must
+            # not be paired with a token as if it were evidence.
+            instrument_exchange_raw = item.get("exchange", item.get("Exchange"))
+            instrument_exchange = (
+                str(instrument_exchange_raw).strip() if instrument_exchange_raw not in (None, "") else None
+            ) or None
 
             orders.append(
                 OrderRecord(
@@ -1055,6 +1061,7 @@ class AliceBlueClient:
                     trigger_price=trigger_price_raw,
                     rejection_reason=rej_reason,
                     instrument_id=instrument_id,
+                    instrument_exchange=instrument_exchange,
                 )
             )
 

@@ -133,11 +133,14 @@ def test_vault_describe_never_returns_values():
 
 # ── migration ───────────────────────────────────────────────────────────────
 
-def test_migration_0012_is_additive_and_the_only_head():
+def test_migration_0012_is_additive_and_the_chain_has_one_head():
     from alembic.script import ScriptDirectory
     root = Path(__file__).resolve().parent.parent / "alembic"
     script = ScriptDirectory(str(root))
-    assert script.get_heads() == ["0012_broker_credentials"]
+    # 0012 was the head when it was written; later additive migrations may follow it, but the history must stay linear
+    # (one head) and 0012 must still be part of it.
+    assert len(script.get_heads()) == 1
+    assert "0012_broker_credentials" in {r.revision for r in script.walk_revisions()}
     rev = script.get_revision("0012_broker_credentials")
     assert rev.down_revision == "0011_account_static_ip_address"
     src = (root / "versions" / "0012_broker_credentials.py").read_text(encoding="utf-8")
