@@ -3,7 +3,9 @@
 How to run and judge a one-week observation of the R4c shadow comparison. It describes the **evidence** needed before anyone
 writes a proposal to enforce instrument mapping. It does not start an observation, and it enables nothing.
 
-Read with [`INSTRUMENT_SHADOW.md`](INSTRUMENT_SHADOW.md), which describes the job and the endpoints.
+Read with [`INSTRUMENT_SHADOW.md`](INSTRUMENT_SHADOW.md), which describes the job and the endpoints, and with section G below, which
+adds what R4i (NSE crosswalk evidence), R5 (broker-pair gate) and R6 (strategy readiness) changed. Where G and an earlier section
+differ on a point G covers, G governs.
 
 ---
 
@@ -346,3 +348,147 @@ Any such change needs its own plan, review, tests and explicit approval.
 - Events are not pruned, and a report window is capped at 168 hours and 5000 events.
 - There is no durable job-liveness signal.
 - The only evidence level used is `VERIFIED_DOCS`; no broker's instrument handling has been verified against live data here.
+
+---
+
+## G. Addendum for R4i, R5 and R6 (preflight)
+
+Written before any observation. It changes nothing in the system and starts nothing. **No observation day has elapsed and none is
+claimed.** Every table is a blank template; evidence stays outside Git (section A).
+
+### G1. What changed since sections B to F were written
+
+- **R4i** records a second, separate event type, `INSTRUMENT_SHADOW_CROSSWALK`, per Master `(exchange, symbol, instrument_token)` when
+  `INSTRUMENT_SHADOW_NSE_CROSSWALK_PATH` points at a local official NSE security-master file. The shadow report gains a `crosswalk`
+  section. The comparison events, groups and verdicts of sections C and D are unchanged, and the job still passes **no ISIN** to the
+  comparator, so `matched` must still be zero for the Master side.
+- **A crosswalk candidate does not satisfy B8.** Every row is `MASTER_TOKEN_LINK_UNVERIFIED`: nothing yet shows that Alice's order-book
+  `instrumentId` equals the contract-master `Token`. A candidate ISIN is a lead for an operator, never "ISIN from verified evidence".
+  Criteria 1, 2 and 3 stay NOT VERIFIED / FAIL while the link is unverified, however many candidates the report shows.
+- **R5** supports only Alice Blue -> Alice Blue for new Child orders; every other pair is skipped at order time as
+  `BROKER_PAIR_NOT_SUPPORTED`. A skipped unsupported pair is expected behaviour, not an incident. It is also why criterion 4 cannot
+  be measured on a live pair: record unsupported pairs, do not count them as parity.
+- **R6** adds `GET /api/v1/strategies/{id}/readiness?hours=` (read-only; same authentication and proxy rules as section C). It reports
+  per-Child pair support, the Master's recent-instrument coverage against the local snapshot, warning codes and snapshot provenance,
+  **without** needing the shadow job. `verified_identities` is always 0.
+- The job's liveness signal is unchanged: **there is still no heartbeat.** Two further log lines exist (prefix `[InstrumentShadow]`):
+  `crosswalk deduplication unavailable; nothing written: ...` and `crosswalk step failed: ...`. A crosswalk failure is not reported by
+  the cycle's `cycle ended with ...` line, so search for all of them.
+
+### G2. Readiness status before any period (what exists, what does not)
+
+| Prerequisite | Status | Evidence / reason |
+|---|---|---|
+| Shadow job, `shadow-report`, `compare` and the R6 readiness endpoint exist and are tested | READY | In the repository; flags default off. |
+| Every safety flag off by default (`INSTRUMENT_SHADOW_ENABLED`, `CANONICAL_MAPPING_ENFORCED`, live trading) | READY | Pinned by tests. |
+| Evidence stored outside Git; raw exports never committed | READY | Section A. |
+| R4c+R4i+R5+R6 deployed where the Master trades (B1) | BLOCKED | Needs separate explicit approval; the deployed commit must be recorded. Not given. |
+| Approval to set `INSTRUMENT_SHADOW_ENABLED=true` (B2) | BLOCKED | Needs separate explicit approval. Not given. |
+| Master identity from verified evidence (B8) | BLOCKED | R4i candidates are unverified. Needs a fresh authorised Master order-book export showing `instrumentId` equals the contract-master `Token` per exchange, **and** a separate approved change so the job supplies a verified ISIN. |
+| Alice Blue catalog loaded with ISINs and provenance | BLOCKED | Not loaded today (criterion 3). |
+| Angel One catalog | BLOCKED | No production loader. Its pair is unsupported by R5, so it is out of scope unless that changes. |
+| Groww catalog | COVERAGE-ONLY | Only with Groww enabled and a master URL; loaded once at engine start and stale after about 24 hours. Its pair is unsupported by R5. |
+| NSE snapshot supplied by the operator | COVERAGE-ONLY | See G4: needs a manual daily download subject to NSE's terms (unresolved), and the file cannot be rotated without an engine restart. |
+| BSE identity coverage | BLOCKED | No all-scrips source. BSE is reported `EXCHANGE_NOT_COVERED`; the scope must say so. |
+| Cross-source ISIN disagreement policy | BLOCKED | Undecided. Record disagreements (G5); do not resolve them. |
+| Job liveness evidence stronger than "events exist" | BLOCKED | No heartbeat. Criterion 9 cannot be PASS. |
+| NSE data-use permission; real-row fixture in public Git history | BLOCKED | Governance decisions not made. Do not automate any download. |
+
+**Conclusion today:** a period run now can only be a `COVERAGE-ONLY REHEARSAL`. It checks operations (catalog loading, report size,
+job behaviour, snapshot handling) and **never counts** toward readiness (section B8). A counted period cannot start until every
+BLOCKED row above that applies to the chosen scope is resolved by evidence or an explicit owner decision.
+
+### G3. Daily preflight checklist (before retrieving anything)
+
+Record each answer in the day's entry. Any "no" in items 1 to 6 means the day is excluded (G7) and the reason is logged.
+
+1. The engine is the recorded deployed commit and has run without an unrecorded restart since the last entry.
+2. `INSTRUMENT_SHADOW_ENABLED` and `INSTRUMENT_SHADOW_NSE_CROSSWALK_PATH` are the approved values, and the three job settings are those recorded in B3.
+3. A log search shows the job started after the last engine start and shows none of the error lines in section C or G1 (record the query and result; container logs are UTC).
+4. The configured snapshot file is the one recorded for this period: file name, snapshot date and SHA-256 (G4) are unchanged, or the change is explained.
+5. The snapshot is fresh by the crosswalk rule (G4), or the day is logged as `STALE_SNAPSHOT` and excluded.
+6. No report you will save is truncated (section C step 3 and G6).
+7. The Master traded today (a trading session), or the day is noted as a non-trading day.
+8. The market-holiday calendar for the day is noted. The project has no holiday calendar, so a holiday can produce a false stale (it fails closed).
+
+### G4. NSE snapshot: freshness, rotation and provenance
+
+- The snapshot is an operator-supplied local file; nothing downloads it. Use of NSE data and any scripting of its download remain
+  subject to NSE's terms, which are unresolved. Do not automate it.
+- **Freshness rule:** stale when the snapshot date (read from the file name, India time) is in the future or **more than one weekday**
+  old. Friday's file is fresh on Monday; Thursday's is not. There is no holiday calendar.
+- **Rotation limit:** the snapshot date comes only from the official file name (`NSE_CM_security_DDMMYYYY.csv[.gz]`), the path is a
+  single configured value read at engine start, and a file whose newest update timestamp disagrees with its name is rejected. A new
+  day's file therefore has a new name and a new path, so **a seven-day period cannot keep a fresh snapshot without restarting the
+  engine with an updated path**. Do not restart the engine for this purpose (section C: a restart has real effects on existing
+  orders). Until a safe rotation exists the snapshot is `STALE_SNAPSHOT` from about the third trading day, which makes the mapping
+  evidence unusable on those days. Record this honestly; it blocks criterion 5 for the crosswalk exactly as the Groww staleness does.
+- **Provenance to record each day** (from `crosswalk.live_snapshot` in the shadow report or `mapping_coverage.snapshot` in the readiness
+  response): `source_filename`, `snapshot_date`, `sha256`, `content_sha256`, `age_trading_days`, `stale`, `rows_indexed`,
+  `conflicting_tokens`, `deleted_rows`, `invalid_isin_rows`. Independently hash the file on disk
+  (`Get-FileHash <file> -Algorithm SHA256`) and confirm it equals `sha256`. A mismatch is an incident.
+- Keep a copy of each snapshot actually used in the private evidence folder, not in Git (it is official NSE data).
+
+### G5. Cross-source disagreement recording (record only)
+
+The project has no policy for two sources disagreeing about an instrument's ISIN, so do not resolve any. Each day, for every Master
+instrument that the crosswalk calls a `CANDIDATE`, call `compare` with that candidate ISIN and with any ISIN from an independent source
+you hold, and record in the instrument-change list (E3): the sources, the ISINs, the exchange and the result. Record separately:
+
+- a candidate ISIN that differs from another source's ISIN for the same instrument (a `CONFLICT` inside the snapshot, or a
+  disagreement between sources) as an incident, material if it would change which instrument is chosen;
+- NSE and BSE listings of one issuer (never equated);
+- any instrument in a series outside the supported list (`UNSUPPORTED_SERIES`) or whose symbol disagrees with the snapshot.
+
+### G6. Daily evidence set (JSON and hashes)
+
+In addition to section C step 1, save and hash every day (names `YYYY-MM-DD_<what>.json`):
+
+| File | Source | Notes |
+|---|---|---|
+| `shadow_24h_p*.json`, `shadow_168h_p*.json` | `shadow-report` | As section C. Includes the `crosswalk` section: keep page 1. |
+| `readiness_<strategy>.json` | `GET /api/v1/strategies/{id}/readiness?hours=24` | One per strategy under observation. Records pair support, warnings and `mapping_coverage`. |
+| `snapshot_<name>.sha256.txt` | local hash of the snapshot file | G4. |
+
+Record the SHA-256 of each file, `generated_at`, the deployed commit and the settings (E1). Counts to copy from the readiness and
+crosswalk output into the day's entry: `by_state` (`CANDIDATE`, `NO_MASTER_TOKEN`, `UNMAPPED`, `UNSUPPORTED_SERIES`, `STALE_SNAPSHOT`,
+`CONFLICT`, `DELETED`, `INVALID_ISIN`, `EXCHANGE_NOT_COVERED`, `CROSSWALK_UNAVAILABLE`, `SYMBOL_DISAGREES`, `MASTER_SYMBOL_UNUSABLE`),
+`candidates`, `verified_identities` (must be 0), `total_instruments`, the pair summary (`children_pair_supported` and
+`children_pair_unsupported`) and every warning code. **Report limits to respect:**
+
+- The crosswalk events in `shadow-report` are the newest 5000 in the window **and the report gives no truncation flag for them**
+  (`truncated` covers only the comparison events). Count the crosswalk events you read each day; if the count reaches 5000, treat the
+  day as truncated. Its `rows` are capped at 100, so use `by_state` and the saved page, not `rows`, for counts.
+- `mapping_coverage` assesses the newest 500 Master orders in the window (`truncated: true` if more); `hours` is capped at 168.
+- A candidate ISIN is stored on the crosswalk events and appears in the saved report rows as `candidate_isin`; it is not in the readiness output.
+
+### G7. Observation-day acceptance and exclusion
+
+A day **counts** only if all of these hold, with the evidence saved:
+
+1. It is a trading session on which the Master placed orders (and the period reaches 7 consecutive calendar days and at least 5 such sessions, section C).
+2. Every G3 item 1 to 6 passed.
+3. The full evidence set (G6) was saved and hashed on the day; none truncated.
+4. Catalogs in scope were loaded and fresh as section D criterion 5 requires.
+5. Every change from the previous day is explained (section C step 6) and every incident opened is logged.
+6. `matched` is zero for symbol-only Masters, `verified_identities` is 0, and no candidate is described as verified anywhere in the notes.
+
+A day is **excluded** (logged, not counted) if any of these is true: the job was not shown to have started; a restart occurred and is
+unrecorded; a required snapshot or catalog was stale or unloaded; a report was truncated; the evidence set is incomplete or
+unhashed; the Master did not trade; or a material defect (section C) is open. Excluded days do not restart the period unless they
+fall under the material-defect rule or leave a gap that cannot be reconstructed (section C). A rehearsal day never counts.
+
+### G8. Final review checklist (before section E5)
+
+- [ ] Period was not a rehearsal and the B1, B2 and B8 approvals and evidence are filed.
+- [ ] Seven consecutive days and at least five trading sessions with Master activity, each day passing G7 or logged as excluded with a reason.
+- [ ] Snapshot provenance and independent hash recorded for every day; no unexplained change of file, date or hash.
+- [ ] Cross-source disagreements (G5) all recorded; none resolved by guesswork.
+- [ ] Unsupported broker pairs recorded from the readiness output; none counted as parity.
+- [ ] BSE and derivatives stated as out of scope or shown unmapped; no claim of coverage.
+- [ ] `verified_identities` was 0 on every day unless a separate approved change and evidence say otherwise.
+- [ ] Open incidents: none material; every other disposition recorded.
+- [ ] Section F limitations carried forward, plus: no heartbeat; crosswalk events have no truncation flag; the snapshot cannot be rotated without a restart; NSE terms and the public-history fixture unresolved.
+- [ ] The decision states it is evidence only and enables nothing.
+
+Section F still applies in full: finishing a period enables no enforcement, changes no pipeline or flag, and deploys nothing.
