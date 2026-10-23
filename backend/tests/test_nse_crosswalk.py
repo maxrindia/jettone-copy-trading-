@@ -2,9 +2,12 @@
 R4h: the offline NSE token -> ISIN crosswalk prototype (app/services/instruments/nse_crosswalk.py).
 
 It reads one operator-supplied official NSE security-master file, never fetches anything, and is imported by nothing in the engine.
-The fixture `tests/fixtures/nse_cm_security_22102026.csv` has the real 120-column header and 14 real rows (ordinary equities, an
-NSE test symbol with a placeholder ISIN, a deleted security, MOTHERSON / ELECTCAST in two series each, TMPV / TMCV). Variants for
-duplicates, conflicts and bad rows are derived from it in the tests. The clock is always injected.
+The fixture `tests/fixtures/synthetic_nse_cm_security.csv` is ENTIRELY SYNTHETIC: the official 120 column names (schema only) and 14
+invented rows - tokens from 9,000,001, symbols `SYN...`, names `SYNTHETIC ...`, and ISINs built with the non-issuer prefix `ZZ` and a
+computed check digit, so none can equal a real instrument. It holds ordinary securities, a placeholder-ISIN row, a deleted security,
+and two symbols that each exist in two series (to prove tokens never collapse on a symbol). Variants for duplicates, conflicts and bad
+rows are derived from it in the tests. The clock is always injected. No real NSE data belongs in this repository: the exchange's
+data-use terms have not been cleared for redistribution.
 """
 import ast
 import csv
@@ -28,7 +31,7 @@ from app.services.instruments.nse_crosswalk import (
     weekdays_since,
 )
 
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "nse_cm_security_22102026.csv"
+FIXTURE = Path(__file__).resolve().parent / "fixtures" / "synthetic_nse_cm_security.csv"
 IST = timezone(timedelta(hours=5, minutes=30))
 SNAP = date(2026, 10, 22)                                   # a Thursday
 LOADED = datetime(2026, 10, 23, 6, 0, tzinfo=timezone.utc)
@@ -76,10 +79,23 @@ def row_for(rows, token):
 
 # ══ loading: plain CSV and gzip, provenance ══════════════════════════════════════════════
 
-def test_the_fixture_has_the_real_header_structure():
+def test_the_fixture_has_the_official_column_structure():
     header, rows = table()
     assert len(header) == 120 and header[:5] == ["FinInstrmId", "TckrSymb", "SctySrs", "FinInstrmNm", "ISIN"]
     assert "DelFlg" in header and "NewBrdLotQty" in header and "UpdDt" in header and len(rows) == 14
+
+
+def test_the_fixture_is_entirely_synthetic():
+    """Guards against real exchange rows being put back: redistribution of NSE data has not been cleared."""
+    header, rows = table()
+    used = {"FinInstrmId", "TckrSymb", "SctySrs", "FinInstrmNm", "ISIN", "NewBrdLotQty", "DelFlg", "UpdDt"}
+    assert len({r["FinInstrmId"] for r in rows}) == 14
+    for r in rows:
+        assert int(r["FinInstrmId"]) >= 9_000_000                 # the official file's tokens have at most 6 digits; this range starts above
+        assert r["TckrSymb"].startswith("SYN") and r["FinInstrmNm"].startswith("SYNTHETIC")
+        assert r["ISIN"].startswith(("ZZ", "SYN"))                # ZZ is not an issuer country code; SYN... is a deliberate placeholder
+        assert all(not r[c] for c in header if c not in used)     # no row-specific value (capital, dates, price bands, ...) is carried
+    assert not any(r["ISIN"].startswith(("IN", "XS")) for r in rows)
 
 
 def test_a_plain_csv_and_the_same_content_gzipped_load_identically(tmp_path):
@@ -113,15 +129,15 @@ def test_the_snapshot_date_comes_from_the_official_file_name(tmp_path):
 def test_loading_twice_is_deterministic():
     a, b = load(FIXTURE, snapshot_date=SNAP), load(FIXTURE, snapshot_date=SNAP)
     assert a.provenance == b.provenance and a._records == b._records
-    assert a.lookup("10794", now=NOW) == b.lookup("10794", now=NOW)
+    assert a.lookup("9000003", now=NOW) == b.lookup("9000003", now=NOW)
 
 
 # ══ lookups keyed by (exchange, token) ═══════════════════════════════════════════════════
 
 @pytest.mark.parametrize("token,symbol,series,isin,lot", [
-    ("10794", "CANBK", "EQ", "INE476A01022", 1), ("2885", "RELIANCE", "EQ", "INE002A01018", 1), ("1594", "INFY", "EQ", "INE009A01021", 1),
-    ("3456", "TMPV", "EQ", "INE155A01022", 1), ("759782", "TMCV", "EQ", "INE1TAE01010", 1),
-    ("20454", "GRAPHISAD", "SM", "INE0POU01017", 1200), ("19078", "SGBJUN28", "GB", "IN0020200104", 1),
+    ("9000003", "SYNALPHA", "EQ", "ZZSYN001A014", 1), ("9000004", "SYNBETA", "EQ", "ZZSYN002A012", 1), ("9000005", "SYNGAMMA", "EQ", "ZZSYN003A010", 1),
+    ("9000006", "SYNDELTA", "EQ", "ZZSYN004A018", 1), ("9000007", "SYNEPSILON", "EQ", "ZZSYN005A015", 1),
+    ("9000008", "SYNSME", "SM", "ZZSYN006A013", 600), ("9000009", "SYNBOND", "GB", "ZZSYN007A011", 1),
 ])
 def test_a_token_resolves_to_its_record_and_isin(cw, token, symbol, series, isin, lot):
     r = cw.lookup(token, now=NOW)
@@ -130,9 +146,9 @@ def test_a_token_resolves_to_its_record_and_isin(cw, token, symbol, series, isin
 
 
 def test_the_same_symbol_in_two_series_stays_two_distinct_securities(cw):
-    """MOTHERSON (EQ and D1) and ELECTCAST (EQ and W1) share a symbol but not a token, a series or an ISIN."""
-    pairs = {"MOTHERSON": (("4204", "EQ", "INE775A01035"), ("25510", "D1", "INE775A08105")),
-             "ELECTCAST": (("928", "EQ", "INE086A01029"), ("18116", "W1", "INE086A13016"))}
+    """SYNCOLA (EQ and D1) and SYNCOLB (EQ and W1) share a symbol but not a token, a series or an ISIN."""
+    pairs = {"SYNCOLA": (("9000010", "EQ", "ZZSYN008A019"), ("9000011", "D1", "ZZSYN009A017")),
+             "SYNCOLB": (("9000012", "EQ", "ZZSYN010A015"), ("9000013", "W1", "ZZSYN011A013"))}
     for symbol, ((t1, s1, i1), (t2, s2, i2)) in pairs.items():
         a, b = cw.lookup(t1, now=NOW), cw.lookup(t2, now=NOW)
         assert (a.record.symbol, a.record.series, a.isin) == (symbol, s1, i1)
@@ -150,18 +166,18 @@ def test_there_is_no_symbol_keyed_lookup():
 
 
 def test_the_exchange_is_part_of_the_key(cw):
-    assert cw.lookup("10794", now=NOW, exchange="nse").status is S.MATCH
+    assert cw.lookup("9000003", now=NOW, exchange="nse").status is S.MATCH
     for other in ("BSE", "NFO", "", None):
-        r = cw.lookup("10794", now=NOW, exchange=other)
+        r = cw.lookup("9000003", now=NOW, exchange=other)
         assert (r.status, r.reason, r.isin) == (S.UNMAPPED, "EXCHANGE_NOT_COVERED", None)
 
 
 def test_a_missing_token_is_unmapped(cw):
-    r = cw.lookup("999999", now=NOW)
+    r = cw.lookup("9999999", now=NOW)
     assert (r.status, r.reason, r.isin, r.record) == (S.UNMAPPED, "TOKEN_NOT_IN_SNAPSHOT", None, None)
 
 
-@pytest.mark.parametrize("token", ["", " 10794", "10794 ", "010794", "0", "-5", "1.5", "abc", "1e3", "12345678901", None, 10794, True, b"10794"])
+@pytest.mark.parametrize("token", ["", " 9000003", "9000003 ", "09000003", "0", "-5", "1.5", "abc", "1e3", "12345678901", None, 9000003, True, b"9000003"])
 def test_a_malformed_lookup_token_is_unmapped_never_coerced(cw, token):
     r = cw.lookup(token, now=NOW)
     assert (r.status, r.reason, r.isin) == (S.UNMAPPED, "MALFORMED_TOKEN", None)
@@ -174,103 +190,103 @@ def test_the_isin_check_uses_the_existing_project_validator():
 
 
 def test_a_placeholder_isin_is_invalid_and_carries_no_isin(cw):
-    r = cw.lookup("14747", now=NOW)                                           # NSE test symbol, ISIN "DUMMYSAN005"
+    r = cw.lookup("9000001", now=NOW)                                           # NSE test symbol, ISIN "SYNDUMMY001"
     assert (r.status, r.reason, r.isin) == (S.INVALID_ISIN, "PLACEHOLDER_OR_MALFORMED_ISIN", None)
-    assert not r.usable and r.record.symbol == "011NSETEST"
+    assert not r.usable and r.record.symbol == "SYNTEST1"
 
 
-@pytest.mark.parametrize("isin,reason", [("", "BLANK_ISIN"), ("   ", "BLANK_ISIN"), ("INE476A01023", "BAD_CHECK_DIGIT"),
-                                         ("INE476A0102", "PLACEHOLDER_OR_MALFORMED_ISIN"), ("1NE476A01022", "PLACEHOLDER_OR_MALFORMED_ISIN"),
-                                         ("INE476A010222", "PLACEHOLDER_OR_MALFORMED_ISIN")])
+@pytest.mark.parametrize("isin,reason", [("", "BLANK_ISIN"), ("   ", "BLANK_ISIN"), ("ZZSYN001A015", "BAD_CHECK_DIGIT"),
+                                         ("ZZSYN001A01", "PLACEHOLDER_OR_MALFORMED_ISIN"), ("1ZSYN001A014", "PLACEHOLDER_OR_MALFORMED_ISIN"),
+                                         ("ZZSYN001A0144", "PLACEHOLDER_OR_MALFORMED_ISIN")])
 def test_each_kind_of_bad_isin_is_reported_with_its_reason(tmp_path, isin, reason):
     header, rows = table()
-    row_for(rows, "10794")["ISIN"] = isin
-    r = load(put(tmp_path, dump(header, rows))).lookup("10794", now=NOW)
+    row_for(rows, "9000003")["ISIN"] = isin
+    r = load(put(tmp_path, dump(header, rows))).lookup("9000003", now=NOW)
     assert (r.status, r.reason, r.isin) == (S.INVALID_ISIN, reason, None)
 
 
 def test_isin_case_and_padding_are_normalised_but_nothing_else(tmp_path):
     header, rows = table()
-    row_for(rows, "10794")["ISIN"] = "  ine476a01022 "
-    assert load(put(tmp_path, dump(header, rows))).lookup("10794", now=NOW).isin == "INE476A01022"
+    row_for(rows, "9000003")["ISIN"] = "  zzsyn001a014 "
+    assert load(put(tmp_path, dump(header, rows))).lookup("9000003", now=NOW).isin == "ZZSYN001A014"
 
 
 def test_a_deleted_security_is_unsupported_even_with_a_valid_isin(cw):
-    r = cw.lookup("760111", now=NOW)
-    assert (r.status, r.reason, r.isin) == (S.DELETED, "DELFLG_Y", None) and r.record.isin == "INE748C20012"
+    r = cw.lookup("9000002", now=NOW)
+    assert (r.status, r.reason, r.isin) == (S.DELETED, "DELFLG_Y", None) and r.record.isin == "ZZSYN000D010"
 
 
 def test_only_y_and_n_are_accepted_as_the_deletion_flag(tmp_path):
     header, rows = table()
-    row_for(rows, "10794")["DelFlg"] = ""
-    row_for(rows, "2885")["DelFlg"] = "X"
+    row_for(rows, "9000003")["DelFlg"] = ""
+    row_for(rows, "9000004")["DelFlg"] = "X"
     cw = load(put(tmp_path, dump(header, rows)))
     assert dict(cw.provenance.rejected_by_reason) == {"UNKNOWN_DELFLG": 2} and len(cw) == 12
-    assert cw.lookup("10794", now=NOW).reason == "ROW_REJECTED:UNKNOWN_DELFLG" and cw.lookup("10794", now=NOW).status is S.UNMAPPED
+    assert cw.lookup("9000003", now=NOW).reason == "ROW_REJECTED:UNKNOWN_DELFLG" and cw.lookup("9000003", now=NOW).status is S.UNMAPPED
 
 
 # ══ duplicates and conflicts ═════════════════════════════════════════════════════════════
 
 def test_an_identical_duplicate_row_collapses_and_is_counted(tmp_path):
     header, rows = table()
-    rows.append(dict(row_for(rows, "10794")))
+    rows.append(dict(row_for(rows, "9000003")))
     cw = load(put(tmp_path, dump(header, rows)))
     assert (cw.provenance.rows_total, cw.provenance.rows_indexed, cw.provenance.identical_duplicates) == (15, 14, 1)
-    assert cw.lookup("10794", now=NOW).status is S.MATCH
+    assert cw.lookup("9000003", now=NOW).status is S.MATCH
 
 
-@pytest.mark.parametrize("field,value", [("ISIN", "INE002A01018"), ("TckrSymb", "CANBANK"), ("SctySrs", "BE"), ("DelFlg", "Y"), ("NewBrdLotQty", "5")])
+@pytest.mark.parametrize("field,value", [("ISIN", "ZZSYN002A012"), ("TckrSymb", "SYNALPHAX"), ("SctySrs", "BE"), ("DelFlg", "Y"), ("NewBrdLotQty", "5")])
 def test_a_differing_duplicate_is_a_conflict_with_no_winner(tmp_path, field, value):
     header, rows = table()
-    clash = dict(row_for(rows, "10794"))
+    clash = dict(row_for(rows, "9000003"))
     clash[field] = value
     rows.append(clash)
     cw = load(put(tmp_path, dump(header, rows)))
-    r = cw.lookup("10794", now=NOW)
+    r = cw.lookup("9000003", now=NOW)
     assert (r.status, r.reason, r.isin, r.record) == (S.CONFLICT, "DIFFERING_ROWS_FOR_TOKEN", None, None)
     assert len(r.conflicting) == 2 and {c.isin for c in r.conflicting} | {c.symbol for c in r.conflicting} | {c.series for c in r.conflicting}
-    assert cw.provenance.conflicting_tokens == 1 and len(cw) == 13 and cw.lookup("2885", now=NOW).status is S.MATCH   # others unaffected
+    assert cw.provenance.conflicting_tokens == 1 and len(cw) == 13 and cw.lookup("9000004", now=NOW).status is S.MATCH   # others unaffected
 
 
 def test_the_order_of_conflicting_rows_does_not_pick_a_winner(tmp_path):
     header, rows = table()
-    clash = dict(row_for(rows, "10794")); clash["ISIN"] = "INE002A01018"
+    clash = dict(row_for(rows, "9000003")); clash["ISIN"] = "ZZSYN002A012"
     a = load(put(tmp_path, dump(header, rows + [clash]), "NSE_CM_security_22102026.csv"))
     b = load(put(tmp_path, dump(header, [clash] + rows), "NSE_CM_security_22102026.csv"))
-    assert a.lookup("10794", now=NOW).status is b.lookup("10794", now=NOW).status is S.CONFLICT
-    assert {c.isin for c in a.lookup("10794", now=NOW).conflicting} == {c.isin for c in b.lookup("10794", now=NOW).conflicting}
+    assert a.lookup("9000003", now=NOW).status is b.lookup("9000003", now=NOW).status is S.CONFLICT
+    assert {c.isin for c in a.lookup("9000003", now=NOW).conflicting} == {c.isin for c in b.lookup("9000003", now=NOW).conflicting}
 
 
 def test_two_tokens_sharing_a_symbol_and_series_are_counted_but_never_merged(tmp_path):
     header, rows = table()
-    twin = dict(row_for(rows, "10794")); twin["FinInstrmId"] = "777777"; twin["ISIN"] = "INE002A01018"
+    twin = dict(row_for(rows, "9000003")); twin["FinInstrmId"] = "9000099"; twin["ISIN"] = "ZZSYN002A012"
     cw = load(put(tmp_path, dump(header, rows + [twin])))
     assert cw.provenance.symbol_series_collisions == 1
-    assert cw.lookup("10794", now=NOW).isin == "INE476A01022" and cw.lookup("777777", now=NOW).isin == "INE002A01018"
+    assert cw.lookup("9000003", now=NOW).isin == "ZZSYN001A014" and cw.lookup("9000099", now=NOW).isin == "ZZSYN002A012"
 
 
 # ══ rejected rows and unusable files ═════════════════════════════════════════════════════
 
-@pytest.mark.parametrize("token", ["", "0", "abc", "-1", "010794", "1.5", " 5", "12345678901"])
+@pytest.mark.parametrize("token", ["", "0", "abc", "-1", "09000003", "1.5", " 5", "12345678901"])
 def test_a_row_with_a_malformed_identifier_is_rejected_not_indexed(tmp_path, token):
     header, rows = table()
-    bad = dict(row_for(rows, "10794")); bad["FinInstrmId"] = token
+    bad = dict(row_for(rows, "9000003")); bad["FinInstrmId"] = token
     cw = load(put(tmp_path, dump(header, rows + [bad])))
     assert dict(cw.provenance.rejected_by_reason) == {"MALFORMED_TOKEN": 1} and cw.provenance.rows_indexed == 14 and len(cw) == 14
 
 
 def test_a_row_without_a_symbol_or_series_is_rejected_and_its_token_reports_why(tmp_path):
     header, rows = table()
-    row_for(rows, "10794")["TckrSymb"] = ""
-    row_for(rows, "2885")["SctySrs"] = " "
+    row_for(rows, "9000003")["TckrSymb"] = ""
+    row_for(rows, "9000004")["SctySrs"] = " "
     cw = load(put(tmp_path, dump(header, rows)))
     assert dict(cw.provenance.rejected_by_reason) == {"MISSING_SERIES": 1, "MISSING_SYMBOL": 1}
-    assert cw.lookup("10794", now=NOW).reason == "ROW_REJECTED:MISSING_SYMBOL"
-    assert cw.lookup("2885", now=NOW).reason == "ROW_REJECTED:MISSING_SERIES"
+    assert cw.lookup("9000003", now=NOW).reason == "ROW_REJECTED:MISSING_SYMBOL"
+    assert cw.lookup("9000004", now=NOW).reason == "ROW_REJECTED:MISSING_SERIES"
 
 
 def test_a_short_or_overlong_row_is_rejected(tmp_path):
-    text = FIXTURE.read_text(encoding="utf-8").rstrip("\n") + "\n10794,CANBK\n" + "5,X,EQ,N,INE476A01022," + ",".join(["x"] * 200) + "\n"
+    text = FIXTURE.read_text(encoding="utf-8").rstrip("\n") + "\n9000003,SYNALPHA\n" + "5,X,EQ,N,ZZSYN001A014," + ",".join(["x"] * 200) + "\n"
     assert dict(load(put(tmp_path, text)).provenance.rejected_by_reason) == {"MALFORMED_ROW": 2}
 
 
@@ -287,7 +303,7 @@ def test_optional_columns_may_be_absent(tmp_path):
     header, rows = table()
     keep = [c for c in header if c not in ("FinInstrmNm", "NewBrdLotQty", "UpdDt")]
     cw = load(put(tmp_path, dump(keep, [{k: r[k] for k in keep} for r in rows])))
-    r = cw.lookup("10794", now=NOW)
+    r = cw.lookup("9000003", now=NOW)
     assert r.status is S.MATCH and r.record.name == "" and r.record.lot_size is None and cw.provenance.observed_update_date is None
 
 
@@ -382,7 +398,7 @@ def test_the_reference_dates_are_what_the_tests_assume():
 ])
 def test_freshness_boundaries_in_ist(cw, now, age, stale):
     assert cw.age_trading_days(now) == age and cw.is_stale(now) is stale
-    r = cw.lookup("10794", now=now)
+    r = cw.lookup("9000003", now=now)
     assert (r.status is S.STALE_SNAPSHOT) is stale and (r.isin is None) is stale
     if stale:
         assert r.reason == f"AGE_{age}_TRADING_DAYS"
@@ -391,35 +407,35 @@ def test_freshness_boundaries_in_ist(cw, now, age, stale):
 def test_the_boundary_is_ist_midnight_not_utc_midnight(cw):
     sunday_late = datetime(2026, 10, 25, 18, 29, 59, tzinfo=timezone.utc)                # 23:59:59 IST Sunday
     monday_start = datetime(2026, 10, 25, 18, 30, 0, tzinfo=timezone.utc)                # 00:00:00 IST Monday
-    assert cw.lookup("10794", now=sunday_late).status is S.MATCH
-    assert cw.lookup("10794", now=monday_start).status is S.STALE_SNAPSHOT
+    assert cw.lookup("9000003", now=sunday_late).status is S.MATCH
+    assert cw.lookup("9000003", now=monday_start).status is S.STALE_SNAPSHOT
 
 
 def test_a_fridays_file_is_fresh_on_monday_and_stale_on_tuesday(tmp_path):
     friday = load(put(tmp_path, FIXTURE.read_text(encoding="utf-8"), "NSE_CM_security_23102026.csv"), verify_update_timestamps=False)
     assert friday.provenance.snapshot_date == date(2026, 10, 23)
-    assert friday.lookup("10794", now=ist(2026, 10, 26, 9)).status is S.MATCH
-    assert friday.lookup("10794", now=ist(2026, 10, 27, 9)).status is S.STALE_SNAPSHOT
+    assert friday.lookup("9000003", now=ist(2026, 10, 26, 9)).status is S.MATCH
+    assert friday.lookup("9000003", now=ist(2026, 10, 27, 9)).status is S.STALE_SNAPSHOT
 
 
 def test_a_snapshot_dated_in_the_future_is_not_usable(tmp_path):
     future = load(put(tmp_path, FIXTURE.read_text(encoding="utf-8"), "NSE_CM_security_23102026.csv"), verify_update_timestamps=False)
-    r = future.lookup("10794", now=NOW)
+    r = future.lookup("9000003", now=NOW)
     assert (r.status, r.reason, r.isin) == (S.STALE_SNAPSHOT, "FUTURE_SNAPSHOT", None)
 
 
 def test_staleness_outranks_every_other_result(cw):
     late = ist(2026, 11, 2)
-    for token in ("10794", "14747", "760111", "999999"):
+    for token in ("9000003", "9000001", "9000002", "9999999"):
         assert cw.lookup(token, now=late).status is S.STALE_SNAPSHOT
     assert cw.lookup("abc", now=late).reason == "MALFORMED_TOKEN"                        # a malformed key is rejected before anything else
-    assert cw.lookup("10794", now=late, exchange="BSE").reason == "EXCHANGE_NOT_COVERED"
+    assert cw.lookup("9000003", now=late, exchange="BSE").reason == "EXCHANGE_NOT_COVERED"
 
 
 def test_the_clock_must_be_timezone_aware(cw):
     for naive in (datetime(2026, 10, 22, 12, 0), None, "2026-10-22", date(2026, 10, 22)):
         with pytest.raises(ValueError):
-            cw.lookup("10794", now=naive)
+            cw.lookup("9000003", now=naive)
 
 
 def test_weekday_counting():
@@ -432,7 +448,7 @@ def test_weekday_counting():
 # ══ immutability ═════════════════════════════════════════════════════════════════════════
 
 def test_results_records_and_provenance_are_immutable(cw):
-    r = cw.lookup("10794", now=NOW)
+    r = cw.lookup("9000003", now=NOW)
     for obj, attr in ((r, "isin"), (r.record, "isin"), (cw.provenance, "sha256")):
         with pytest.raises(dataclasses.FrozenInstanceError):
             setattr(obj, attr, "x")
@@ -452,8 +468,8 @@ def test_nothing_touches_the_network(tmp_path, monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", refuse)
     monkeypatch.setattr(socket, "create_connection", refuse)
     cw = load(put(tmp_path, FIXTURE.read_text(encoding="utf-8"), gz=True))
-    assert cw.lookup("10794", now=NOW).status is S.MATCH
-    assert cwm.main([str(FIXTURE), "--snapshot-date", "2026-10-22", "--lookup", "10794"], now=NOW) == 0
+    assert cw.lookup("9000003", now=NOW).status is S.MATCH
+    assert cwm.main([str(FIXTURE), "--snapshot-date", "2026-10-22", "--lookup", "9000003"], now=NOW) == 0
 
 
 def test_the_module_imports_only_the_standard_library_and_the_isin_validator():
@@ -482,12 +498,12 @@ def test_nothing_in_the_engine_imports_the_crosswalk():
 # ══ the operator command ═════════════════════════════════════════════════════════════════
 
 def test_the_operator_command_prints_provenance_and_lookups(capsys):
-    assert cwm.main([str(FIXTURE), "--snapshot-date", "2026-10-22", "--lookup", "10794", "--lookup", "14747", "--lookup", "999999",
+    assert cwm.main([str(FIXTURE), "--snapshot-date", "2026-10-22", "--lookup", "9000003", "--lookup", "9000001", "--lookup", "9999999",
                      "--source-url", "operator-declared"], now=NOW) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["stale"] is False and out["provenance"]["snapshot_date"] == "2026-10-22" and out["provenance"]["source_url"] == "operator-declared"
     assert out["provenance"]["sha256"] == hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
-    assert [(r["status"], r["isin"]) for r in out["lookups"]] == [("MATCH", "INE476A01022"), ("INVALID_ISIN", None), ("UNMAPPED", None)]
+    assert [(r["status"], r["isin"]) for r in out["lookups"]] == [("MATCH", "ZZSYN001A014"), ("INVALID_ISIN", None), ("UNMAPPED", None)]
 
 
 def test_the_operator_command_reports_an_unusable_file_and_a_stale_snapshot(tmp_path, capsys):
@@ -495,6 +511,6 @@ def test_the_operator_command_reports_an_unusable_file_and_a_stale_snapshot(tmp_
     assert "UNUSABLE" in capsys.readouterr().err
     assert cwm.main([str(FIXTURE), "--snapshot-date", "not-a-date"], now=NOW) == 2
     capsys.readouterr()
-    assert cwm.main([str(FIXTURE), "--snapshot-date", "2026-10-22", "--lookup", "10794"], now=ist(2026, 11, 5)) == 0
+    assert cwm.main([str(FIXTURE), "--snapshot-date", "2026-10-22", "--lookup", "9000003"], now=ist(2026, 11, 5)) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["stale"] is True and out["lookups"][0]["status"] == "STALE_SNAPSHOT" and out["lookups"][0]["isin"] is None
