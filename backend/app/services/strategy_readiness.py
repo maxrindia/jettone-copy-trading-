@@ -125,10 +125,14 @@ async def coverage_for_master(
     """Mapping coverage of the instruments the Master placed in the window. Reads `orders` only, plus the local snapshot (cached,
     no network). It does not need the shadow job and does not depend on INSTRUMENT_SHADOW_ENABLED."""
     now = now or datetime.now(timezone.utc)
-    hours = max(1, min(MAX_HOURS, int(hours)))
+    requested = int(hours)
+    hours = max(1, min(MAX_HOURS, requested))
     base = {"window_hours": hours, "max_orders": MAX_ORDERS}
+    window = {"requested_hours": requested, "applied_hours": hours, "max_hours": MAX_HOURS, "clamped": requested != hours}
     if master_account_id is None:
-        return {**base, "status": "NO_MASTER", **crosswalk_evidence.coverage_summary([], now), "total_instruments": 0}
+        return {**base, "status": "NO_MASTER", "limits": {"window": window, "orders": {"cap": MAX_ORDERS, "read": 0, "truncated": False}},
+                "complete": False, "incomplete_reasons": ["NO_MASTER"], **crosswalk_evidence.coverage_summary([], now),
+                "total_instruments": 0}
     rows = (await db.execute(
         select(Order.exchange, Order.symbol, Order.instrument_token)
         .where(Order.account_id == master_account_id, Order.source != OrderSource.SYSTEM,
@@ -139,7 +143,11 @@ async def coverage_for_master(
     truncated = len(rows) > MAX_ORDERS
     summary = crosswalk_evidence.coverage_summary(rows[:MAX_ORDERS], now)
     status = "AVAILABLE" if summary["total_instruments"] else "NO_RECENT_ORDERS"
-    return {**base, "status": status, "truncated": truncated, **summary}
+    reasons = (["ORDER_CAP_REACHED"] if truncated else []) + (["WINDOW_CLAMPED"] if window["clamped"] else []) \
+        + (["NO_RECENT_ORDERS"] if status == "NO_RECENT_ORDERS" else [])
+    limits = {"window": window, "orders": {"cap": MAX_ORDERS, "read": min(len(rows), MAX_ORDERS), "truncated": truncated}}
+    return {**base, "status": status, "truncated": truncated, "limits": limits, "complete": not reasons,
+            "incomplete_reasons": reasons, **summary}
 
 
 def master_broker_for(master_account: Any) -> Optional[str]:

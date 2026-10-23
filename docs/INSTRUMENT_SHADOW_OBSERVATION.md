@@ -371,9 +371,15 @@ claimed.** Every table is a blank template; evidence stays outside Git (section 
 - **R6** adds `GET /api/v1/strategies/{id}/readiness?hours=` (read-only; same authentication and proxy rules as section C). It reports
   per-Child pair support, the Master's recent-instrument coverage against the local snapshot, warning codes and snapshot provenance,
   **without** needing the shadow job. `verified_identities` is always 0.
-- The job's liveness signal is unchanged: **there is still no heartbeat.** Two further log lines exist (prefix `[InstrumentShadow]`):
-  `crosswalk deduplication unavailable; nothing written: ...` and `crosswalk step failed: ...`. A crosswalk failure is not reported by
-  the cycle's `cycle ended with ...` line, so search for all of them.
+- **R7 liveness.** `GET /api/v1/instruments/shadow-liveness` (and a `liveness` summary in `shadow-report`) reports `DISABLED`,
+  `ENABLED_NOT_STARTED`, `STARTING`, `HEALTHY`, `FAILING`, `OVERDUE`, `STALLED_IN_CYCLE`, `STOPPED` or `UNKNOWN`, with the last success,
+  the last failure and a stable error code. It comes from the job's own in-process state plus **one** `system_events` row of type
+  `INSTRUMENT_SHADOW_LIVENESS` that is overwritten after each completed cycle (so it survives a restart and never grows). `HEALTHY`
+  needs a successful cycle within three intervals plus 60 seconds. It is a **point-in-time** answer plus counters (`cycles_ok`,
+  `cycles_failed`, `consecutive_failures`) since the last start: it does not record every cycle between two reviews. A cycle fails if
+  either the comparison or the crosswalk step reported an error (crosswalk codes are prefixed `CROSSWALK_`). An empty report is never
+  evidence of liveness. The older log lines still apply (prefix `[InstrumentShadow]`): `crosswalk deduplication unavailable; nothing
+  written: ...`, `crosswalk step failed: ...` and `liveness evidence could not be persisted.`
 
 ### G2. Readiness status before any period (what exists, what does not)
 
@@ -388,10 +394,10 @@ claimed.** Every table is a blank template; evidence stays outside Git (section 
 | Alice Blue catalog loaded with ISINs and provenance | BLOCKED | Not loaded today (criterion 3). |
 | Angel One catalog | BLOCKED | No production loader. Its pair is unsupported by R5, so it is out of scope unless that changes. |
 | Groww catalog | COVERAGE-ONLY | Only with Groww enabled and a master URL; loaded once at engine start and stale after about 24 hours. Its pair is unsupported by R5. |
-| NSE snapshot supplied by the operator | COVERAGE-ONLY | See G4: needs a manual daily download subject to NSE's terms (unresolved), and the file cannot be rotated without an engine restart. |
+| NSE snapshot supplied by the operator | COVERAGE-ONLY | See G4. R7 lets the running engine pick up a newer file placed in a snapshot directory, without a restart; the daily download itself is still manual and subject to NSE's terms (unresolved). Not deployed. |
 | BSE identity coverage | BLOCKED | No all-scrips source. BSE is reported `EXCHANGE_NOT_COVERED`; the scope must say so. |
 | Cross-source ISIN disagreement policy | BLOCKED | Undecided. Record disagreements (G5); do not resolve them. |
-| Job liveness evidence stronger than "events exist" | BLOCKED | No heartbeat. Criterion 9 cannot be PASS. |
+| Job liveness evidence | COVERAGE-ONLY | R7 adds an explicit liveness status (G1). It shows the state at the time asked and the counters since start, not every cycle in between, and it is not deployed. Criterion 9 may be marked PASS only if the G7 liveness conditions hold on every day. |
 | NSE data-use permission; real-row fixture in public Git history | BLOCKED | Governance decisions not made. Do not automate any download. |
 
 **Conclusion today:** a period run now can only be a `COVERAGE-ONLY REHEARSAL`. It checks operations (catalog loading, report size,
@@ -417,12 +423,19 @@ Record each answer in the day's entry. Any "no" in items 1 to 6 means the day is
   subject to NSE's terms, which are unresolved. Do not automate it.
 - **Freshness rule:** stale when the snapshot date (read from the file name, India time) is in the future or **more than one weekday**
   old. Friday's file is fresh on Monday; Thursday's is not. There is no holiday calendar.
-- **Rotation limit:** the snapshot date comes only from the official file name (`NSE_CM_security_DDMMYYYY.csv[.gz]`), the path is a
-  single configured value read at engine start, and a file whose newest update timestamp disagrees with its name is rejected. A new
-  day's file therefore has a new name and a new path, so **a seven-day period cannot keep a fresh snapshot without restarting the
-  engine with an updated path**. Do not restart the engine for this purpose (section C: a restart has real effects on existing
-  orders). Until a safe rotation exists the snapshot is `STALE_SNAPSHOT` from about the third trading day, which makes the mapping
-  evidence unusable on those days. Record this honestly; it blocks criterion 5 for the crosswalk exactly as the Groww staleness does.
+- **Rotation (R7).** Set `INSTRUMENT_SHADOW_NSE_CROSSWALK_PATH` to a **directory** (a single file path still works as before, but
+  then cannot rotate). Each day, place the official file in that directory under its official name
+  (`NSE_CM_security_DDMMYYYY.csv[.gz]`). Copy it to a temporary name first (for example `.tmp`, which is ignored) and **rename it into
+  place**, so it never appears half-written. The running engine lists the directory at most once a minute and adopts a file only if:
+  its date is strictly newer than the loaded snapshot; it has been unmodified for 60 seconds; it passes the unchanged R4h validation;
+  and it indexes at least 80% as many rows as the current snapshot (a truncated CSV still parses). Otherwise the **last good
+  snapshot stays in place** and the reason is recorded: `NO_NEWER_SNAPSHOT`, `CANDIDATE_NOT_SETTLED`, `CANDIDATE_INVALID`,
+  `ROW_COUNT_DROP`, `AMBIGUOUS_SAME_DATE`, `SAME_DATE_FILE_CHANGED`, `DIRECTORY_UNREADABLE`, `NO_CANDIDATE_FILES`; a successful
+  change is `ROTATED` (`LOADED` for the first). Two files with the same date, or an edit to the loaded file, are never resolved
+  automatically. An old snapshot is never made fresh: with no valid replacement it goes `STALE_SNAPSHOT` by the freshness rule above.
+  Nothing restarts the engine and nothing downloads anything. Record the `refresh` object (outcome, candidate file name, rotations,
+  `refused_outcome` if a newer file was refused) each day; the directory path is never shown. If the engine starts with an older
+  file and a newer invalid one, the older file is loaded and the refusal is recorded in `refused_outcome`.
 - **Provenance to record each day** (from `crosswalk.live_snapshot` in the shadow report or `mapping_coverage.snapshot` in the readiness
   response): `source_filename`, `snapshot_date`, `sha256`, `content_sha256`, `age_trading_days`, `stale`, `rows_indexed`,
   `conflicting_tokens`, `deleted_rows`, `invalid_isin_rows`. Independently hash the file on disk
@@ -448,6 +461,7 @@ In addition to section C step 1, save and hash every day (names `YYYY-MM-DD_<wha
 |---|---|---|
 | `shadow_24h_p*.json`, `shadow_168h_p*.json` | `shadow-report` | As section C. Includes the `crosswalk` section: keep page 1. |
 | `readiness_<strategy>.json` | `GET /api/v1/strategies/{id}/readiness?hours=24` | One per strategy under observation. Records pair support, warnings and `mapping_coverage`. |
+| `liveness.json` | `GET /api/v1/instruments/shadow-liveness` | Status, last success, last failure and code, counters, and the snapshot `refresh` outcome. |
 | `snapshot_<name>.sha256.txt` | local hash of the snapshot file | G4. |
 
 Record the SHA-256 of each file, `generated_at`, the deployed commit and the settings (E1). Counts to copy from the readiness and
@@ -456,10 +470,13 @@ crosswalk output into the day's entry: `by_state` (`CANDIDATE`, `NO_MASTER_TOKEN
 `candidates`, `verified_identities` (must be 0), `total_instruments`, the pair summary (`children_pair_supported` and
 `children_pair_unsupported`) and every warning code. **Report limits to respect:**
 
-- The crosswalk events in `shadow-report` are the newest 5000 in the window **and the report gives no truncation flag for them**
-  (`truncated` covers only the comparison events). Count the crosswalk events you read each day; if the count reaches 5000, treat the
-  day as truncated. Its `rows` are capped at 100, so use `by_state` and the saved page, not `rows`, for counts.
-- `mapping_coverage` assesses the newest 500 Master orders in the window (`truncated: true` if more); `hours` is capped at 168.
+- **R7 truncation metadata.** `shadow-report` now carries `limits` (comparison events and crosswalk events read versus the 5000 cap,
+  the window requested versus applied, the page requested versus applied with `has_more`, and the crosswalk `rows` cap), plus
+  `complete` and `incomplete_reasons`. **A day whose 24-hour report has `complete: false` cannot count** (reasons:
+  `COMPARISON_EVENT_CAP_REACHED`, `CROSSWALK_EVENT_CAP_REACHED`, `WINDOW_CLAMPED`). Paging and the 100-row crosswalk list are not
+  incompleteness: aggregates cover every instrument. Never rely on `rows` for counts; use `by_state`.
+- `mapping_coverage` assesses the newest 500 Master orders in the window and now has its own `limits`, `complete` and
+  `incomplete_reasons` (`ORDER_CAP_REACHED`, `WINDOW_CLAMPED`, `NO_RECENT_ORDERS`); `hours` is capped at 168.
 - A candidate ISIN is stored on the crosswalk events and appears in the saved report rows as `candidate_isin`; it is not in the readiness output.
 
 ### G7. Observation-day acceptance and exclusion
@@ -472,6 +489,9 @@ A day **counts** only if all of these hold, with the evidence saved:
 4. Catalogs in scope were loaded and fresh as section D criterion 5 requires.
 5. Every change from the previous day is explained (section C step 6) and every incident opened is logged.
 6. `matched` is zero for symbol-only Masters, `verified_identities` is 0, and no candidate is described as verified anywhere in the notes.
+7. The 24-hour `shadow-report` has `complete: true`, and the saved `liveness.json` shows `HEALTHY` at review time, a `cycles_ok` count
+   consistent with the uptime and interval (roughly uptime divided by interval, allowing for the start-up delay), and any `cycles_failed`
+   explained. `OVERDUE`, `STALLED_IN_CYCLE`, `ENABLED_NOT_STARTED`, `FAILING` or `UNKNOWN` at review time excludes the day.
 
 A day is **excluded** (logged, not counted) if any of these is true: the job was not shown to have started; a restart occurred and is
 unrecorded; a required snapshot or catalog was stale or unloaded; a report was truncated; the evidence set is incomplete or
@@ -488,7 +508,7 @@ fall under the material-defect rule or leave a gap that cannot be reconstructed 
 - [ ] BSE and derivatives stated as out of scope or shown unmapped; no claim of coverage.
 - [ ] `verified_identities` was 0 on every day unless a separate approved change and evidence say otherwise.
 - [ ] Open incidents: none material; every other disposition recorded.
-- [ ] Section F limitations carried forward, plus: no heartbeat; crosswalk events have no truncation flag; the snapshot cannot be rotated without a restart; NSE terms and the public-history fixture unresolved.
+- [ ] Section F limitations carried forward, plus: liveness is a point-in-time status with counters, not a record of every cycle; the snapshot directory is operator-fed by hand; NSE terms and the public-history fixture unresolved.
 - [ ] The decision states it is evidence only and enables nothing.
 
 Section F still applies in full: finishing a period enables no enforcement, changes no pipeline or flag, and deploys nothing.

@@ -39,7 +39,8 @@ Groups are the existing verdicts, grouped: `matched`, `attribute_mismatch`, `ide
 ## NSE crosswalk evidence (R4i)
 
 Optional and **off by default**. Set `INSTRUMENT_SHADOW_NSE_CROSSWALK_PATH` to a **local** official NSE security-master file you
-downloaded yourself (`NSE_CM_security_DDMMYYYY.csv` or `.csv.gz`; the snapshot date is read from the file name). Nothing is
+downloaded yourself (`NSE_CM_security_DDMMYYYY.csv` or `.csv.gz`; the snapshot date is read from the file name), or to a **directory**
+holding such files so a newer one can be picked up without a restart (see "Snapshot rotation"). Nothing is
 downloaded, and the setting does nothing unless `INSTRUMENT_SHADOW_ENABLED` is also on. Keep the file outside the repository.
 Please check NSE's terms of use before scripting any download.
 
@@ -62,6 +63,39 @@ counts) and the latest state per instrument. The existing `INSTRUMENT_SHADOW_COM
 not an identity. It is never passed to the comparator (so it cannot produce a `MATCH`), and the planner and the copy pipeline do
 not read it. The link stays unverified until authorised evidence (an order-book export compared with the contract master) says
 otherwise, and that is a separate decision.
+
+## Snapshot rotation (R7)
+
+With a directory as the path, the engine lists it at most once a minute and adopts a newer official-named file without a restart,
+by building the complete new snapshot first and then swapping one reference, so a reader sees the old snapshot or the new one,
+never a partial one. A file is adopted only if its date is strictly newer, it has been unmodified for 60 seconds, it passes the
+R4h validation and it keeps at least 80% of the current row count. Anything else leaves the last good snapshot in place and records
+an outcome code (`NO_NEWER_SNAPSHOT`, `CANDIDATE_NOT_SETTLED`, `CANDIDATE_INVALID`, `ROW_COUNT_DROP`, `AMBIGUOUS_SAME_DATE`,
+`SAME_DATE_FILE_CHANGED`, `DIRECTORY_UNREADABLE`, `NO_CANDIDATE_FILES`, `ROTATED`, `LOADED`). A snapshot with no valid replacement
+goes stale by the usual rule; it is never presented as fresh. To place a file safely, copy it to a temporary name that does not match
+the official pattern and rename it into the directory. Nothing is downloaded and the engine is never restarted automatically.
+The snapshot provenance (file name, date, SHA-256 of the supplied and decompressed bytes, load time, row counts, stale state) and the
+latest refresh outcome appear in `shadow-liveness`, the report's `crosswalk` section and the strategy readiness coverage; the
+directory path is never shown.
+
+## Report limits (R7)
+
+`shadow-report` adds `limits`, `complete` and `incomplete_reasons`. `limits` lists, for the comparison events and the crosswalk
+events, how many were read against the 5000 cap and whether it was exceeded; the window requested versus applied; the page limit
+and offset requested versus applied with `has_more`; and the crosswalk row-list cap. `complete` is false when an event cap was
+exceeded or the window was shortened (`COMPARISON_EVENT_CAP_REACHED`, `CROSSWALK_EVENT_CAP_REACHED`, `WINDOW_CLAMPED`), so an
+incomplete report cannot pass for a full observation. Existing fields (`truncated`, `pagination`) are unchanged.
+
+## Liveness (R7)
+
+`GET /api/v1/instruments/shadow-liveness` (read-only; the same summary is in `shadow-report` as `liveness`) answers whether the job is
+running, separately from any report contents. States: `DISABLED`, `ENABLED_NOT_STARTED`, `STARTING`, `HEALTHY`, `FAILING`,
+`OVERDUE` (no completed cycle within three intervals plus 60 s), `STALLED_IN_CYCLE` (a cycle running over 10 minutes), `STOPPED`
+and `UNKNOWN` (missing or inconsistent evidence). The job records its own state in process and overwrites one
+`INSTRUMENT_SHADOW_LIVENESS` row in `system_events` after each completed cycle, so storage never grows and no migration is needed.
+Writing it is best effort and runs in a separate bounded task: a slow database cannot delay a cycle or shutdown. A cycle counts as
+a success only if neither the comparison nor the crosswalk step reported an error; the failure code is a stable identifier with
+no message, path or credential. Status is a point-in-time answer plus counters since the last start.
 
 ## What the report cannot tell you yet
 

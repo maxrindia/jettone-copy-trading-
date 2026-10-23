@@ -111,6 +111,38 @@ def _row(payload: Dict[str, Any], created_at: Optional[datetime]) -> Dict[str, A
     }
 
 
+def build_limits(
+    *, hours: int, limit: int, offset: int, requested: Optional[Dict[str, int]], events_read: int, truncated: bool,
+    crosswalk_read: int, crosswalk_truncated: bool, crosswalk_section: Dict[str, Any], returned: int, total: int,
+) -> Tuple[Dict[str, Any], bool, List[str]]:
+    """Every cap and clamp that can make a report cover less than it appears to, stated explicitly. `complete` is False when the
+    aggregates may not describe the whole window (an event cap was reached, or the window asked for was shortened). Paging is
+    separate: `has_more` only says more rows exist beyond this page; the aggregates already cover them."""
+    req = requested or {"hours": hours, "limit": limit, "offset": offset}
+    window_clamped = req["hours"] != hours
+    reasons: List[str] = []
+    if truncated:
+        reasons.append("COMPARISON_EVENT_CAP_REACHED")
+    if crosswalk_truncated:
+        reasons.append("CROSSWALK_EVENT_CAP_REACHED")
+    if window_clamped:
+        reasons.append("WINDOW_CLAMPED")
+    limits = {
+        "comparison_events": {"read": events_read, "cap": REPORT_EVENT_CAP, "truncated": truncated},
+        "crosswalk_events": {"read": crosswalk_read, "cap": REPORT_EVENT_CAP, "truncated": crosswalk_truncated},
+        "crosswalk_rows": {"cap": crosswalk_evidence.REPORT_ROW_CAP, "total": crosswalk_section.get("instrument_count", 0),
+                           "truncated": bool(crosswalk_section.get("rows_truncated"))},
+        "window": {"requested_hours": req["hours"], "applied_hours": hours, "max_hours": MAX_HOURS, "clamped": window_clamped},
+        "page": {
+            "limit_requested": req["limit"], "limit_applied": limit, "max_limit": MAX_LIMIT, "limit_clamped": req["limit"] != limit,
+            "offset_requested": req["offset"], "offset_applied": offset, "max_offset": MAX_OFFSET,
+            "offset_clamped": req["offset"] != offset,
+            "returned": returned, "total": total, "has_more": offset + returned < total,
+        },
+    }
+    return limits, not reasons, reasons
+
+
 def build_report(
     events: Sequence[Tuple[Optional[datetime], Dict[str, Any]]],
     *,
@@ -121,6 +153,9 @@ def build_report(
     now: datetime,
     catalogs: Optional[Sequence[InstrumentCatalog]] = None,
     crosswalk_events: Sequence[Tuple[Optional[datetime], Dict[str, Any]]] = (),
+    crosswalk_truncated: bool = False,
+    requested: Optional[Dict[str, int]] = None,
+    liveness: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """`events` are (created_at, metadata) newest first. Aggregates describe the CURRENT state: the latest event per
     (broker, exchange, symbol). Rows list the events themselves, paged. `crosswalk_events` (R4i) feed a separate
@@ -144,6 +179,12 @@ def build_report(
     states = catalog_states(catalogs)
     for state in states:                                   # every broker is listed, compared or not
         per_broker.setdefault(state["broker_id"], {"instruments": 0, "groups": Counter(), "with_candidates": 0})
+    crosswalk_section = crosswalk_evidence.build_section(crosswalk_events, now, events_truncated=crosswalk_truncated)
+    limits, complete, reasons = build_limits(
+        hours=hours, limit=limit, offset=offset, requested=requested, events_read=len(rows), truncated=truncated,
+        crosswalk_read=len(crosswalk_events), crosswalk_truncated=crosswalk_truncated, crosswalk_section=crosswalk_section,
+        returned=len(rows[offset:offset + limit]), total=len(rows),
+    )
     return {
         "enabled": bool(settings.INSTRUMENT_SHADOW_ENABLED),
         "generated_at": now.isoformat(),
@@ -158,7 +199,11 @@ def build_report(
         "by_broker": {k: {**v, "groups": dict(sorted(v["groups"].items()))} for k, v in sorted(per_broker.items())},
         "catalogs": states,
         "notes": [MASTER_NOTE] + [s["note"] for s in states],
-        "crosswalk": crosswalk_evidence.build_section(crosswalk_events, now),
+        "crosswalk": crosswalk_section,
+        "limits": limits,
+        "complete": complete,
+        "incomplete_reasons": reasons,
+        "liveness": liveness,
         "pagination": {"limit": limit, "offset": offset, "returned": len(rows[offset:offset + limit]), "total": len(rows)},
         "rows": rows[offset:offset + limit],
     }

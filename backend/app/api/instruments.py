@@ -10,10 +10,11 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.audit import SystemEvent
-from app.services.instruments import crosswalk_evidence, report
-from app.services.instruments.shadow import EVENT_TYPE
+from app.services.instruments import crosswalk_evidence, liveness, report
+from app.services.instruments.shadow import EVENT_TYPE, interval_seconds
 
 router = APIRouter(prefix="/instruments", tags=["Instruments (observe-only)"])
 
@@ -37,6 +38,7 @@ async def shadow_report_endpoint(
     db: AsyncSession = Depends(get_db),
 ):
     """Aggregate of recent INSTRUMENT_SHADOW_COMPARE events. Hours, limit and offset are bounded, not rejected."""
+    requested = {"hours": hours, "limit": limit, "offset": offset}
     hours = report.clamp(hours, 1, report.MAX_HOURS)
     limit = report.clamp(limit, 1, report.MAX_LIMIT)
     offset = report.clamp(offset, 0, report.MAX_OFFSET)
@@ -53,8 +55,42 @@ async def shadow_report_endpoint(
         select(SystemEvent.created_at, SystemEvent.metadata_payload)
         .where(SystemEvent.event_type == crosswalk_evidence.EVENT_TYPE, SystemEvent.created_at >= now - timedelta(hours=hours))
         .order_by(SystemEvent.created_at.desc())
-        .limit(report.REPORT_EVENT_CAP)
+        .limit(report.REPORT_EVENT_CAP + 1)
     )).all()
+    cw_truncated = len(cw_rows) > report.REPORT_EVENT_CAP
+    status, _ = await _liveness_status(db, now)
     data = report.build_report(events, hours=hours, limit=limit, offset=offset, truncated=truncated, now=now,
-                               crosswalk_events=[(created, payload) for created, payload in cw_rows])
+                               crosswalk_events=[(created, payload) for created, payload in cw_rows[: report.REPORT_EVENT_CAP]],
+                               crosswalk_truncated=cw_truncated, requested=requested, liveness=_liveness_summary(status))
     return {"success": True, "data": data}
+
+
+async def _liveness_status(db: AsyncSession, now: datetime):
+    persisted, readable = await liveness.load_persisted(db)
+    status = liveness.derive(
+        now, enabled=bool(settings.INSTRUMENT_SHADOW_ENABLED), interval_seconds=interval_seconds(),
+        memory=liveness.registry, persisted=persisted, persisted_readable=readable,
+    )
+    return status, readable
+
+
+def _liveness_summary(status):
+    keys = ("status", "reason", "last_success_at", "last_failure_at", "last_error_code", "consecutive_failures", "evaluated_at")
+    return {k: status.get(k) for k in keys}
+
+
+@router.get("/shadow-liveness")
+async def shadow_liveness_endpoint(db: AsyncSession = Depends(get_db)):
+    """Read-only: whether the shadow job is running, last succeeded or failed (a stable code only), or is overdue or stalled. It is
+    its own signal - an empty or non-empty report says nothing about the job. Also reports how the NSE snapshot was last refreshed."""
+    now = datetime.now(timezone.utc)
+    status, _ = await _liveness_status(db, now)
+    configured = crosswalk_evidence.is_configured()
+    crosswalk, error = crosswalk_evidence.get_crosswalk() if configured else (None, crosswalk_evidence.NOT_CONFIGURED)
+    status["crosswalk_snapshot"] = {
+        "configured": configured,
+        "snapshot": crosswalk_evidence.snapshot_summary(crosswalk, now),
+        "refresh": crosswalk_evidence.crosswalk_status() if configured else {"mode": "NOT_CONFIGURED", "outcome": crosswalk_evidence.NOT_CONFIGURED},
+        "load_error": None if crosswalk is not None or not configured else error,
+    }
+    return {"success": True, "data": status}

@@ -20,10 +20,12 @@ Honesty rules
 import os
 import re
 import threading
+import time
 from collections import Counter
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from enum import Enum
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.core.config import settings
 from app.services.instruments.nse_crosswalk import (
@@ -70,6 +72,22 @@ NOT_CONFIGURED = "NOT_CONFIGURED"
 _cache_lock = threading.Lock()
 _cache: Dict[Tuple[str, int, int], Tuple[Optional[NseCrosswalk], Optional[str]]] = {}
 
+# Directory mode (R7): the configured path may be a DIRECTORY the operator drops official-named snapshot files into. The process
+# notices a newer one without a restart. Constants, not settings: they are safety margins, not tuning knobs.
+RESCAN_SECONDS = 60          # the directory is listed at most this often (a parse happens only for a NEW candidate file)
+SETTLE_SECONDS = 60          # a candidate must have been unmodified this long: a half-copied CSV can still parse
+MIN_ROW_RATIO = 0.8          # a replacement indexing fewer than this share of the current rows is refused as truncated
+_OFFICIAL_NAME = re.compile(r"^NSE_CM_security_(\d{2})(\d{2})(\d{4})\.csv(\.gz)?$", re.I)
+_clock = time.monotonic      # scan throttle; replaceable in tests
+_wall = time.time            # file age; replaceable in tests
+
+# Refresh outcome codes: stable, no path or file content.
+ROTATED, LOADED = "ROTATED", "LOADED"
+NO_NEWER_SNAPSHOT, NO_CANDIDATE_FILES = "NO_NEWER_SNAPSHOT", "NO_CANDIDATE_FILES"
+CANDIDATE_NOT_SETTLED, CANDIDATE_INVALID = "CANDIDATE_NOT_SETTLED", "CANDIDATE_INVALID"
+ROW_COUNT_DROP, AMBIGUOUS_SAME_DATE = "ROW_COUNT_DROP", "AMBIGUOUS_SAME_DATE"
+SAME_DATE_FILE_CHANGED, DIRECTORY_UNREADABLE = "SAME_DATE_FILE_CHANGED", "DIRECTORY_UNREADABLE"
+
 
 def configured_path() -> str:
     return str(getattr(settings, "INSTRUMENT_SHADOW_NSE_CROSSWALK_PATH", "") or "").strip()
@@ -85,12 +103,32 @@ def _error_code(exc: Exception) -> str:
     return m.group(1) if m else "FILE_UNUSABLE"
 
 
+@dataclass(frozen=True)
+class _DirState:
+    """One immutable view of a snapshot directory. Replaced as a whole, so a reader holds either the old view or the new one."""
+    crosswalk: Optional[NseCrosswalk]
+    error: Optional[str]
+    refresh: Dict[str, Any]
+    scanned_at: float                                   # monotonic
+    current_key: Optional[Tuple[str, int, int]]         # (file name, size, mtime_ns) of the loaded snapshot
+    rejected: frozenset                                 # (name, size, mtime_ns) of candidates already refused: not re-parsed
+    rotations: int
+
+
+_dir_lock = threading.Lock()                            # one refresh at a time
+_dir_states: Dict[str, _DirState] = {}
+
+
 def get_crosswalk(path: Optional[str] = None) -> Tuple[Optional[NseCrosswalk], Optional[str]]:
-    """(crosswalk, None) or (None, error_code). Reads the configured LOCAL file once per file version (path, mtime, size);
-    an unusable file is remembered too, so it is not re-parsed every cycle. Never raises, never touches the network."""
+    """(crosswalk, None) or (None, error_code). Reads the configured LOCAL file - or, when the path is a directory, its newest valid
+    official-named file - once per file version. An unusable file is remembered too, so it is not re-parsed every cycle. Never
+    raises, never touches the network."""
     path = configured_path() if path is None else str(path).strip()
     if not path:
         return None, NOT_CONFIGURED
+    if os.path.isdir(path) or path in _dir_states:      # a directory that vanished keeps serving its last good snapshot
+        state = _directory_state(path)
+        return state.crosswalk, state.error
     try:
         st = os.stat(path)
     except OSError:
@@ -114,6 +152,128 @@ def get_crosswalk(path: Optional[str] = None) -> Tuple[Optional[NseCrosswalk], O
 def clear_cache() -> None:
     with _cache_lock:
         _cache.clear()
+    with _dir_lock:
+        _dir_states.clear()
+
+
+def _directory_state(path: str) -> _DirState:
+    state = _dir_states.get(path)
+    if state is not None and _clock() - state.scanned_at < RESCAN_SECONDS:
+        return state
+    with _dir_lock:
+        state = _dir_states.get(path)
+        if state is not None and _clock() - state.scanned_at < RESCAN_SECONDS:
+            return state                                # another thread refreshed while this one waited
+        fresh = _rescan(path, state)
+        _dir_states[path] = fresh                       # one reference assignment: readers never see a half-built state
+        return fresh
+
+
+def _candidates(path: str) -> Optional[List[Tuple[date, str, Tuple[str, int, int], float]]]:
+    """Official-named regular files as (snapshot date, name, key, mtime), or None when the directory cannot be listed."""
+    try:
+        entries = list(os.scandir(path))
+    except OSError:
+        return None
+    out = []
+    for entry in entries:
+        m = _OFFICIAL_NAME.match(entry.name)
+        if not m:
+            continue                                    # temp files, notes, anything else: ignored
+        try:
+            if not entry.is_file():
+                continue
+            snapshot = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+            st = entry.stat()
+        except (OSError, ValueError):
+            continue
+        out.append((snapshot, entry.name, (entry.name, st.st_size, st.st_mtime_ns), st.st_mtime))
+    return out
+
+
+def _rescan(path: str, prev: Optional[_DirState]) -> _DirState:
+    """Look for a strictly newer valid snapshot. Any failure leaves the last good one in place."""
+    current = prev.crosswalk if prev is not None else None
+    rejected = set(prev.rejected) if prev is not None else set()
+    rotations = prev.rotations if prev is not None else 0
+    now_wall = datetime.now(timezone.utc).isoformat()
+    first_problem: Optional[Tuple[str, Optional[str]]] = None
+
+    def state(cw, err, outcome, candidate=None, key=None, rotated=0, extra=None):
+        refresh = {
+            "mode": "DIRECTORY", "last_scan_at": now_wall, "outcome": outcome, "candidate_filename": candidate,
+            "rotations": rotations + rotated, "candidates_refused": len(rejected), **(extra or {}),
+        }
+        return _DirState(cw, err, refresh, _clock(), key if key is not None else (prev.current_key if prev else None),
+                         frozenset(rejected), rotations + rotated)
+
+    listed = _candidates(path)
+    keep_error = (prev.error if prev is not None and current is None else None) or ("FILE_UNUSABLE" if current is None else None)
+    if listed is None:
+        return state(current, keep_error, DIRECTORY_UNREADABLE)
+    if not listed:
+        return state(current, keep_error, NO_CANDIDATE_FILES)
+
+    current_date = current.provenance.snapshot_date if current is not None else None
+    by_date: Dict[date, list] = {}
+    for item in listed:
+        by_date.setdefault(item[0], []).append(item)
+
+    def note(outcome: str, name: Optional[str]) -> None:
+        nonlocal first_problem
+        if first_problem is None:
+            first_problem = (outcome, name)
+
+    for snapshot in sorted(by_date, reverse=True):
+        if current_date is not None and snapshot <= current_date:
+            if snapshot == current_date and prev is not None and prev.current_key is not None:
+                if any(item[2] != prev.current_key for item in by_date[snapshot]):
+                    note(SAME_DATE_FILE_CHANGED, by_date[snapshot][0][1])      # never replace a snapshot with a same-date file
+            break
+        group = by_date[snapshot]
+        if len(group) > 1:
+            note(AMBIGUOUS_SAME_DATE, group[0][1])                              # two files, one date: no winner is chosen
+            continue
+        _, name, key, mtime = group[0]
+        if key in rejected:
+            note(CANDIDATE_INVALID, name)
+            continue
+        if _wall() - mtime < SETTLE_SECONDS:
+            note(CANDIDATE_NOT_SETTLED, name)                                   # retried on a later scan
+            continue
+        try:
+            loaded = load_nse_security_master(os.path.join(path, name))
+        except CrosswalkFileError as exc:
+            rejected.add(key)
+            note(CANDIDATE_INVALID, name)
+            continue
+        except Exception:
+            rejected.add(key)
+            note(CANDIDATE_INVALID, name)
+            continue
+        if current is not None and loaded.provenance.rows_indexed < MIN_ROW_RATIO * current.provenance.rows_indexed:
+            rejected.add(key)
+            note(ROW_COUNT_DROP, name)
+            continue
+        outcome = ROTATED if current is not None else LOADED
+        refused = {} if first_problem is None else {"refused_outcome": first_problem[0], "refused_candidate": first_problem[1]}
+        return state(loaded, None, outcome, candidate=name, key=key, rotated=1 if current is not None else 0, extra=refused)
+
+    outcome, name = first_problem if first_problem is not None else (NO_NEWER_SNAPSHOT, None)
+    return state(current, keep_error, outcome, candidate=name)
+
+
+def crosswalk_status(path: Optional[str] = None) -> Dict[str, Any]:
+    """How the snapshot was obtained and how the last refresh went. Codes and file names only - never the configured path."""
+    path = configured_path() if path is None else str(path).strip()
+    if not path:
+        return {"mode": "NOT_CONFIGURED", "outcome": NOT_CONFIGURED}
+    if os.path.isdir(path) or path in _dir_states:
+        get_crosswalk(path)
+        state = _dir_states.get(path)
+        return dict(state.refresh) if state is not None else {"mode": "DIRECTORY", "outcome": "UNKNOWN"}
+    crosswalk, error = get_crosswalk(path)
+    return {"mode": "FILE", "outcome": LOADED if crosswalk is not None else (error or "FILE_UNUSABLE")}
 
 
 def snapshot_summary(crosswalk: Optional[NseCrosswalk], now: datetime) -> Optional[Dict[str, Any]]:
@@ -122,9 +282,9 @@ def snapshot_summary(crosswalk: Optional[NseCrosswalk], now: datetime) -> Option
     p = crosswalk.provenance
     return {
         "source_filename": p.source_filename, "snapshot_date": p.snapshot_date.isoformat(), "sha256": p.sha256,
-        "content_sha256": p.content_sha256, "age_trading_days": crosswalk.age_trading_days(now),
-        "stale": crosswalk.is_stale(now), "rows_indexed": p.rows_indexed, "conflicting_tokens": p.conflicting_tokens,
-        "deleted_rows": p.deleted_rows, "invalid_isin_rows": p.invalid_isin_rows,
+        "content_sha256": p.content_sha256, "loaded_at": p.loaded_at.isoformat(), "age_trading_days": crosswalk.age_trading_days(now),
+        "stale": crosswalk.is_stale(now), "rows_indexed": p.rows_indexed, "rows_total": p.rows_total, "rows_rejected": p.rows_rejected,
+        "conflicting_tokens": p.conflicting_tokens, "deleted_rows": p.deleted_rows, "invalid_isin_rows": p.invalid_isin_rows,
     }
 
 
@@ -195,7 +355,9 @@ def dedupe_key(payload: Dict[str, Any], day: str) -> str:
 
 # ── report section ───────────────────────────────────────────────────────────────────────────────
 
-def build_section(events: Sequence[Tuple[Optional[datetime], Dict[str, Any]]], now: datetime) -> Dict[str, Any]:
+def build_section(
+    events: Sequence[Tuple[Optional[datetime], Dict[str, Any]]], now: datetime, *, events_truncated: bool = False,
+) -> Dict[str, Any]:
     """`events` are (created_at, metadata) newest first. Counts describe the CURRENT state: the latest event per
     (exchange, symbol, token). The live file state is read from the configured local file (cached), never from a network."""
     configured = is_configured()
@@ -216,7 +378,10 @@ def build_section(events: Sequence[Tuple[Optional[datetime], Dict[str, Any]]], n
         "link_status": LINK_STATUS,
         "note": LINK_NOTE,
         "live_snapshot": snapshot_summary(crosswalk, now),
+        "refresh": crosswalk_status() if configured else {"mode": "NOT_CONFIGURED", "outcome": NOT_CONFIGURED},
         "load_error": None if crosswalk is not None or not configured else error,
+        "events_read": len(events),
+        "events_truncated": bool(events_truncated),
         "instrument_count": len(latest),
         "candidates": by_state.get(State.CANDIDATE.value, 0),
         "by_state": dict(sorted(by_state.items())),
@@ -263,6 +428,7 @@ def coverage_summary(subjects: Sequence[Tuple[Any, Any, Any]], now: datetime) ->
         "source": source,
         "source_error": None if source != "FILE_UNUSABLE" else error,
         "snapshot": snapshot,
+        "refresh": crosswalk_status() if configured else {"mode": "NOT_CONFIGURED", "outcome": NOT_CONFIGURED},
         "total_instruments": len(seen),
         "verified_identities": 0,
         "link_status": LINK_STATUS,

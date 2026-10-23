@@ -29,7 +29,7 @@ from app.models.strategies import GroupStrategy
 from app.models.trades import Order, OrderSource
 from app.services.brokers.capabilities import Verification
 from app.services.brokers.profiles import build_profile
-from app.services.instruments import crosswalk_evidence
+from app.services.instruments import crosswalk_evidence, liveness
 from app.services.instruments.catalogs import InstrumentCatalog, default_catalogs
 from app.services.instruments.comparator import compare_instrument
 from app.services.instruments.model import BrokerView, Comparison
@@ -305,6 +305,7 @@ class ShadowJob:
         self._interval = interval
         self._catalogs = catalogs
         self._task: Optional[asyncio.Task] = None
+        self._persist_task: Optional[asyncio.Task] = None
 
     @property
     def running(self) -> bool:
@@ -314,12 +315,33 @@ class ShadowJob:
         if not settings.INSTRUMENT_SHADOW_ENABLED or self._task is not None:
             return
         self._task = asyncio.create_task(self._loop(), name="instrument-shadow")
+        interval = self._interval if self._interval is not None else interval_seconds()
+        liveness.registry.mark_started(datetime.now(timezone.utc), int(interval))
         logger.info("[InstrumentShadow] enabled; first cycle after the start-up delay (observe-only).")
+
+    def _schedule_persist(self) -> None:
+        """At most one persistence attempt in flight, so a slow database cannot pile up tasks or hold back a cycle."""
+        if self._persist_task is None or self._persist_task.done():
+            self._persist_task = asyncio.create_task(self._persist_liveness(), name="instrument-shadow-liveness")
+
+    async def _persist_liveness(self, timeout: float = 10.0) -> None:
+        """Best effort and bounded: the single liveness row is evidence, never a dependency of the job or of shutdown."""
+        now = datetime.now(timezone.utc)
+        try:
+            saved = await asyncio.wait_for(liveness.persist(liveness.registry.payload(now)), timeout=timeout)
+        except asyncio.TimeoutError:
+            saved = False
+        if not saved:
+            logger.warning("[InstrumentShadow] liveness evidence could not be persisted.")
 
     async def stop(self) -> None:
         task, self._task = self._task, None
         if task is None:
             return
+        liveness.registry.mark_stopped(datetime.now(timezone.utc))
+        pending, self._persist_task = self._persist_task, None
+        if pending is not None and not pending.done():
+            pending.cancel()
         task.cancel()
         try:
             await task
@@ -327,16 +349,22 @@ class ShadowJob:
             pass
         except Exception as exc:                       # a crashed loop must not break shutdown
             logger.error(f"[InstrumentShadow] stopped after an error: {exc}")
+        await self._persist_liveness(timeout=1.0)
 
     async def _loop(self) -> None:
         await asyncio.sleep(self._initial_delay)
         while True:
+            liveness.registry.cycle_begin(datetime.now(timezone.utc))
             try:
                 outcome = await run_once(catalogs=self._catalogs)
                 if outcome.error:
                     logger.warning(f"[InstrumentShadow] cycle ended with {outcome.error}")
+                liveness.registry.cycle_end(datetime.now(timezone.utc), code=liveness.cycle_code(outcome),
+                                            counts=liveness.cycle_counts(outcome))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.error(f"[InstrumentShadow] cycle failed: {exc}", exc_info=True)
+                liveness.registry.cycle_end(datetime.now(timezone.utc), code=liveness.error_code(type(exc).__name__, "CYCLE_"))
+            self._schedule_persist()                   # never delays the next cycle
             await asyncio.sleep(self._interval if self._interval is not None else interval_seconds())
