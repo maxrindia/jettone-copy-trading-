@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     INSTRUMENT_SHADOW_WINDOW_HOURS: int = 24
     INSTRUMENT_SHADOW_MAX_ORDERS: int = 500
 
+    # R4f per-order planner checks. OFF by default: nothing changes. When on, each new Child copy is first checked for
+    # segment, instrument mapping, product and order type against the Child broker's capability profile
+    # (services/instruments/planner.py); a failing Child is SKIPPED with INSTRUMENT_UNMAPPED / SEGMENT_NOT_SUPPORTED /
+    # PRODUCT_NOT_SUPPORTED / ORDER_TYPE_NOT_SUPPORTED on its own copy_trades row, and other Children are unaffected.
+    # Fails closed: a cross-broker Child needs an ISIN-level Master identity, which does not exist yet, so such a Child is
+    # skipped as INSTRUMENT_UNMAPPED. Do not turn this on until the shadow observation (docs/INSTRUMENT_SHADOW_OBSERVATION.md)
+    # has been reviewed. It is not a pair gate and enables no broker.
+    CANONICAL_MAPPING_ENFORCED: bool = False
+
     # TEMPORARY test switch: true skips the follower SELL position checks in
     # both places - initial SELL placement (_enforce_sell_position_safety) and
     # the SELL child LIMIT->MARKET reprice (handle_master_modification) - so a

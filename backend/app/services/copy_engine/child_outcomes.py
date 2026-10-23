@@ -173,7 +173,8 @@ def pre_send_outcome(result: Any) -> Optional[Tuple[CopyTradeStatus, str, str]]:
         reason = result.get("reason")
         if not reason or reason == DUPLICATE_EVENT:
             return None
-        return CopyTradeStatus.SKIPPED, str(reason), ""
+        detail = result.get("detail")
+        return CopyTradeStatus.SKIPPED, str(reason), str(detail) if detail else ""
     if status == "REJECTED":
         reasons = result.get("reasons")
         if isinstance(reasons, (list, tuple)) and reasons:

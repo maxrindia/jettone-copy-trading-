@@ -378,12 +378,19 @@ def test_api_module_is_read_only():
     assert not calls & {"add", "commit", "flush", "delete", "execute_write"}
 
 
-def test_nothing_in_the_trading_path_imports_the_instruments_package():
+def test_nothing_in_the_trading_path_imports_the_instruments_package_except_the_planner():
+    """R4c kept the whole instruments package out of the trading path. R4f wires in exactly ONE module: the pipeline imports
+    `app.services.instruments.planner` for the per-order checks (off unless CANONICAL_MAPPING_ENFORCED). The shadow job,
+    report, catalogs, comparator and models stay out of every trading module."""
     root = Path(__file__).resolve().parent.parent / "app"
+    allowed = ("app/services/copy_engine/pipeline.py", "from app.services.instruments.planner import")
     for sub in ("services/copy_engine", "services/reliability", "services/runtime", "services/alice_blue",
                 "services/groww", "services/angel_one", "services/brokers"):
         for path in (root / sub).rglob("*.py"):
-            assert "services.instruments" not in path.read_text(encoding="utf-8"), path
+            rel = path.relative_to(root.parent).as_posix()
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if "services.instruments" in line:
+                    assert rel == allowed[0] and line.strip().startswith(allowed[1]), (rel, line)
 
 
 def test_the_lifespan_starts_and_stops_the_job_around_the_engine():

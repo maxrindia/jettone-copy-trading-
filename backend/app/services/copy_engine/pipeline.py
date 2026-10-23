@@ -42,7 +42,8 @@ from app.services.copy_engine.child_outcomes import (
 )
 from app.services.copy_engine.events import MasterTradeEvent, derive_copy_event_id
 from app.services.alice_blue.instruments import InstrumentResolutionError
-from app.services.brokers.registry import can_be_child, persisted_order_label
+from app.services.brokers.registry import can_be_child, normalize_broker_id, persisted_order_label
+from app.services.instruments.planner import PlannerSkip, check_child_order
 from app.services.copy_engine.risk import RiskCheckResult, RiskEngine
 from app.services.copy_engine.risk_inputs import (
     PositionSafetyError,
@@ -122,6 +123,66 @@ class CopyEnginePipeline:
         self.lot_sizes = lot_sizes or {"DEFAULT": 1}
         self.retry_policy = retry_policy or RetryPolicy(max_attempts=3)
         self.stop_provider = stop_provider
+        # master account id -> canonical broker id. An account's broker never changes after creation, so it is cached.
+        self._master_brokers: Dict[str, str] = {}
+
+    async def _master_broker_id(self, master_account_id: Any) -> Optional[str]:
+        """Canonical broker id of the Master account, or None if it cannot be established (then the planner fails closed)."""
+        key = str(master_account_id)
+        cached = self._master_brokers.get(key)
+        if cached is not None:
+            return cached
+        try:
+            async with AsyncSessionLocal() as session:
+                account = await session.get(Account, uuid.UUID(key))
+            broker = normalize_broker_id(account.broker) if account is not None else None
+        except Exception as exc:
+            logger.error(f"[Pipeline] Could not read the Master account's broker: {exc}")
+            return None
+        if broker:
+            self._master_brokers[key] = broker
+        return broker
+
+    async def _planner_skip(
+        self, follower: Account, event: MasterTradeEvent, *, child_order_type: str, fill_sequence: int
+    ) -> Optional[Dict[str, Any]]:
+        """
+        R4f. None when enforcement is off (the default: no behaviour change, no work done) or the Child's broker can take
+        this order. Otherwise a per-Child SKIPPED result for ONLY this Child; _record_child_result writes it to the Child's
+        copy_trades row, and an advisory audit row is added here. Any error in the check fails closed (INSTRUMENT_UNMAPPED).
+        """
+        if not settings.CANONICAL_MAPPING_ENFORCED:
+            return None
+        try:
+            skip = check_child_order(
+                master_broker=await self._master_broker_id(event.account_id),
+                child_broker=follower.broker,
+                exchange=event.exchange, symbol=event.symbol, product_type=event.product_type,
+                order_type=child_order_type, instrument_token=event.instrument_id,
+            )
+        except Exception as exc:
+            logger.error(f"[Pipeline] Planner check failed for {follower.display_name}; failing closed: {exc}")
+            skip = PlannerSkip("INSTRUMENT_UNMAPPED", "PLANNER_CHECK_ERROR")
+        if skip is None:
+            return None
+        logger.info(
+            f"[Pipeline] {skip.code} ({skip.detail}): {event.master_order_id} not copied to {follower.display_name} "
+            f"({follower.broker}); other Children are unaffected."
+        )
+        try:
+            async with AsyncSessionLocal() as session:
+                session.add(AuditLog(
+                    event_type="COPY_SKIPPED", account_id=follower.id, master_order_id=event.master_order_id,
+                    copy_event_id=derive_copy_event_id(event.master_order_id, str(follower.id), fill_sequence),
+                    symbol=event.symbol, exchange=event.exchange, side=event.side, quantity=0,
+                    reason_code=skip.code,
+                    metadata_payload={"detail": skip.detail, "child_broker": str(follower.broker),
+                                      "child_order_type": child_order_type, "product_type": str(event.product_type)},
+                ))
+                await session.commit()
+        except Exception as exc:
+            logger.error(f"[Pipeline] Could not write the planner skip audit row: {exc}")
+        return {"status": "SKIPPED", "reason": skip.code, "detail": skip.detail}
 
     def _get_lot_size(self, symbol: str) -> int:
         for prefix, lot in self.lot_sizes.items():
@@ -762,6 +823,11 @@ class CopyEnginePipeline:
             logger.info(f"[Pipeline] Follower {follower.display_name} paused/disabled. Skipping limit order.")
             return {"status": "SKIPPED", "reason": "TRADING_DISABLED"}
 
+        # R4f: per-order planner checks (segment / instrument / product / order type), only when enforced.
+        planner_skip = await self._planner_skip(follower, event, child_order_type="LIMIT", fill_sequence=1)
+        if planner_skip is not None:
+            return planner_skip
+
         limit_price = event.limit_price if event.limit_price > 0 else event.price
 
         # --- Pre-trade risk gate: same funds/RiskEngine pattern as MARKET
@@ -1380,6 +1446,13 @@ class CopyEnginePipeline:
         if not follower.is_active or follower.is_emergency_stopped or follower_runtime_paused:
             logger.info(f"[Pipeline] Follower {follower.display_name} paused/disabled. Skipping SL order.")
             return {"status": "SKIPPED", "reason": "TRADING_DISABLED"}
+
+        # R4f: per-order planner checks. The Child receives a native SL / SL-M; it is never turned into a MARKET.
+        planner_skip = await self._planner_skip(
+            follower, event, child_order_type="SL" if event.order_type.upper() == "SL" else "SLM", fill_sequence=1
+        )
+        if planner_skip is not None:
+            return planner_skip
 
         sl_price = event.price
         trigger_price = event.trigger_price
@@ -3465,6 +3538,14 @@ class CopyEnginePipeline:
         if not follower.is_active or follower.is_emergency_stopped or follower_runtime_paused:
             logger.info(f"[Pipeline] Follower {follower.display_name} paused/disabled. Skipping market order.")
             return {"status": "SKIPPED", "reason": "TRADING_DISABLED"}
+
+        # R4f: per-order planner checks. In MARKETABLE_LIMIT mode the Child receives a LIMIT, otherwise a MARKET.
+        planner_skip = await self._planner_skip(
+            follower, event, fill_sequence=event.fill_sequence,
+            child_order_type="LIMIT" if settings.MARKET_ORDER_EXECUTION_MODE == "MARKETABLE_LIMIT" else "MARKET",
+        )
+        if planner_skip is not None:
+            return planner_skip
 
         settings_obj = follower.copy_settings
 
