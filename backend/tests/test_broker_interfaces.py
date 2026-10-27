@@ -116,23 +116,25 @@ def test_satisfying_an_interface_never_grants_a_role(mock_redis, monkeypatch):
 
 # ── order book versus order lookup ─────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("name", list(CLIENTS))
-def test_no_client_exposes_a_public_per_order_query(mock_redis, name):
-    """Reading the order book (`get_order_book`) is not a query for one order. No client has a PUBLIC method
-    for the latter, so none satisfies OrderStatusProvider. When a later stage adds one, update this test."""
+@pytest.mark.parametrize("name", ["alice", "angel"])
+def test_alice_and_angel_expose_no_public_per_order_query(mock_redis, name):
+    """Reading the order book (`get_order_book`) is not a query for one order. Alice Blue and Angel One have no PUBLIC method
+    for the latter, so neither satisfies OrderStatusProvider. When one is added, update this test."""
     client = CLIENTS[name](mock_redis)
     assert not isinstance(client, OrderStatusProvider)
     public = {n for n in dir(type(client)) if not n.startswith("_")}
     assert not {n for n in public if "lookup" in n or "by_reference" in n or n in ("get_order", "get_order_status")}
 
 
-def test_groww_private_reference_lookup_exists_but_is_not_a_public_interface(mock_redis):
-    """Groww resolves an ambiguous create through a PRIVATE helper. Recorded so it is not overlooked, and not
-    promoted to a capability."""
+def test_groww_exposes_the_documented_per_order_query(mock_redis):
+    """Groww (GET /v1/order/detail + status-by-reference) has public, read-only per-order queries built from its documentation.
+    They have not been observed live (profile ORDER_LOOKUP = VERIFIED_DOCS)."""
+    assert isinstance(groww(mock_redis), OrderStatusProvider)
+
+
+def test_groww_private_reference_lookup_still_backs_ambiguous_create_resolution(mock_redis):
     client = groww(mock_redis)
     assert callable(getattr(client, "_lookup_by_reference", None))
-    assert "_lookup_by_reference".startswith("_")
-    assert not hasattr(client, "find_by_client_reference") and not hasattr(client, "get_order")
 
 
 # ── 2. signature conformance ───────────────────────────────────────────────────────────────

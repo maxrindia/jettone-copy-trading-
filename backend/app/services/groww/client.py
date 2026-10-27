@@ -781,6 +781,41 @@ class GrowwClient:
         await self._restore_client_order_ids(records)
         return records
 
+    async def get_order(self, broker_order_id: str) -> Optional[OrderRecord]:
+        """ONE order by its groww_order_id (GET /v1/order/detail). None only for HTTP 404; any other failure or an unreadable row
+        raises, so "not found" is never confused with "could not read". Read-only."""
+        self._require_contract()
+        oid = str(broker_order_id or "").strip()
+        if not oid:
+            raise GrowwError("an order id is required")
+        status, data = await self._call(
+            "read", "GET", C.ROUTES["order_detail"].format(groww_order_id=oid), params={"segment": C.SUPPORTED_SEGMENT},
+        )
+        if status == 404:
+            return None
+        record = self.parse_order_row(self._payload(status, data))
+        if record.broker_order_id != oid:
+            raise GrowwCapabilityUnavailable("order detail describes a different order")
+        await self._restore_client_order_ids([record])
+        return record
+
+    async def find_by_client_reference(self, reference: str) -> Optional[OrderRecord]:
+        """The order carrying this order_reference_id (the one Jettone derived from its client_order_id), or None when Groww has none.
+        Resolved with the documented status-by-reference call, then read in full with `get_order`. Read-only."""
+        self._require_contract()
+        ref = str(reference or "").strip()
+        if not ref:
+            raise GrowwError("a reference is required")
+        status, data = await self._call(
+            "read", "GET", C.ROUTES["order_status_ref"].format(order_reference_id=ref), params={"segment": C.SUPPORTED_SEGMENT},
+        )
+        if status == 404:
+            return None
+        oid = self._payload(status, data).get("groww_order_id")
+        if not oid:
+            return None
+        return await self.get_order(str(oid))
+
     async def _restore_client_order_ids(self, records: List[OrderRecord]) -> None:
         """Replace Groww's order_reference_id with the Jettone client_order_id it was derived from
         (the stale-order sweeper matches TIMEOUT trades on that id). An unmapped or unreadable

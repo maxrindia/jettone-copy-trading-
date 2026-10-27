@@ -94,7 +94,7 @@ GROWW_FEATURE_CEILING: Mapping[Feature, Verification] = {
     F.MODIFY: V.VERIFIED_DOCS,
     F.CANCEL: V.VERIFIED_DOCS,
     F.ORDER_STATUS: V.VERIFIED_DOCS,
-    F.ORDER_LOOKUP: V.NOT_SUPPORTED,        # `_lookup_by_reference` is private; not a public capability
+    F.ORDER_LOOKUP: V.VERIFIED_DOCS,        # public get_order / find_by_client_reference (documented detail + status-by-reference)
     F.POSITIONS: V.VERIFIED_DOCS,
     F.FUNDS: V.VERIFIED_DOCS,
     F.HOLDINGS: V.NOT_SUPPORTED,
@@ -112,7 +112,6 @@ def _groww_profile(spec: BrokerSpec) -> CapabilityProfile:
     derived = {feature: base for feature in GROWW_FEATURE_CEILING}
     derived[F.LOGIN] = V.VERIFIED_LIVE                               # independent of the response contract
     derived[F.MASTER_DETECTION] = base if contract.master_verified else V.UNVERIFIED
-    derived[F.ORDER_LOOKUP] = V.NOT_SUPPORTED
     derived[F.HOLDINGS] = V.NOT_SUPPORTED
     return CapabilityProfile(
         broker_id=spec.id,

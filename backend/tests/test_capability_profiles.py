@@ -269,7 +269,7 @@ def test_groww_login_is_the_only_live_verified_capability(monkeypatch):
     groww_on(monkeypatch)
     p = build_profile("groww")
     assert {f for f in F if p.verification(f) is V.VERIFIED_LIVE} == {F.LOGIN}   # token call observed 2026-10-19
-    assert p.verification(F.HOLDINGS) is V.NOT_SUPPORTED and p.verification(F.ORDER_LOOKUP) is V.NOT_SUPPORTED
+    assert p.verification(F.HOLDINGS) is V.NOT_SUPPORTED and p.verification(F.ORDER_LOOKUP) is V.VERIFIED_DOCS   # public per-order query
     assert p.segment("NSE", "CASH").verification is V.VERIFIED_DOCS
     assert p.segment("NFO", "OPT") is None
 
