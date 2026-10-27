@@ -95,6 +95,7 @@ def fanout_started_metadata(event: Any, strategy_id: Optional[uuid.UUID], routed
         "trigger_price": str(event.trigger_price),
         "product_type": event.product_type,
         "instrument_id": event.instrument_id,
+        "master_broker": getattr(event, "master_broker", None),   # None (absent) = Alice Blue: the key scope stays ""
         "status": event.status,
         "source": event.source,
         "routed_children": list(routed_ids),

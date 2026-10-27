@@ -19,8 +19,11 @@ class MasterTradeDetector:
     - Order rejections (status=REJECTED)
     """
 
-    def __init__(self, master_account_id: str):
+    def __init__(self, master_account_id: str, master_broker: Optional[str] = None):
         self.master_account_id = str(master_account_id)
+        # Canonical broker id of this Master (None = Alice Blue / legacy). Stamped onto every event so the duplicate guard and the
+        # copy-event keys are scoped per broker and account (brokers/identity.py); Alice Blue keys are unchanged.
+        self.master_broker = master_broker
         # Tracks previously seen filled shares per broker order ID: {order_id: (cumulative_filled_qty, fill_seq)}
         self._seen_fills: Dict[str, tuple[int, int]] = {}
         # Tracks the last known (quantity, price) for each broker order ID that
@@ -194,6 +197,12 @@ class MasterTradeDetector:
             self._known_order_ids.add(broker_order_id)
 
     def process_order_update(self, event: OrderUpdateEvent) -> Optional[MasterTradeEvent]:
+        trade = self._process_order_update(event)
+        if trade is not None:
+            trade.master_broker = self.master_broker
+        return trade
+
+    def _process_order_update(self, event: OrderUpdateEvent) -> Optional[MasterTradeEvent]:
         # Ensure event is strictly from the master account
         if event.account_id != self.master_account_id:
             return None

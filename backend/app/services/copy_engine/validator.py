@@ -54,7 +54,8 @@ class EventValidator:
         # recovery (R3b), whose Children are still stopped by the database claim; every other check above still ran.
         if not check_duplicate:
             return ValidationResult(True)
-        seen_key = f"copy:seen:{event.master_order_id}:{event.fill_sequence}"
+        # The scope is "" for an Alice Blue Master (key unchanged); other brokers' native ids are only unique per broker/account.
+        seen_key = f"copy:seen:{event.dedupe_scope}{event.master_order_id}:{event.fill_sequence}"
         was_set = await self.redis.set(seen_key, "1", ex=self.DEDUP_TTL_SECONDS, nx=True)
         if not was_set:
             logger.warning(f"[Validator] Duplicate event detected for {event.master_order_id} (seq {event.fill_sequence})")

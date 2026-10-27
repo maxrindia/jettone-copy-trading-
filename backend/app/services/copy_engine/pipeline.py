@@ -42,6 +42,7 @@ from app.services.copy_engine.child_outcomes import (
 )
 from app.services.copy_engine.events import MasterTradeEvent, derive_copy_event_id
 from app.services.alice_blue.instruments import InstrumentResolutionError
+from app.services.brokers.identity import master_scope
 from app.services.brokers.pairs import check_pair
 from app.services.brokers.registry import can_be_child, normalize_broker_id, persisted_order_label
 from app.services.instruments.planner import PlannerSkip, check_child_order
@@ -237,7 +238,7 @@ class CopyEnginePipeline:
             async with AsyncSessionLocal() as session:
                 session.add(AuditLog(
                     event_type="COPY_SKIPPED", account_id=follower.id, master_order_id=event.master_order_id,
-                    copy_event_id=derive_copy_event_id(event.master_order_id, str(follower.id), fill_sequence),
+                    copy_event_id=derive_copy_event_id(event.master_order_id, str(follower.id), fill_sequence, scope=event.dedupe_scope),
                     symbol=event.symbol, exchange=event.exchange, side=event.side, quantity=0,
                     reason_code=code,
                     metadata_payload={"detail": detail, "child_broker": str(follower.broker), **(extra or {})},
@@ -958,7 +959,7 @@ class CopyEnginePipeline:
         # follower LIMIT order is never placed, and nothing is pre-written to
         # Order/CopyTrade for a rejected event (mirrors MARKET exactly).
         settings_obj = follower.copy_settings
-        risk_audit_event_id = derive_copy_event_id(event.master_order_id, str(acc_id), 1)
+        risk_audit_event_id = derive_copy_event_id(event.master_order_id, str(acc_id), 1, scope=event.dedupe_scope)
 
         funds_data: Optional[FundsData] = None
         if client:
@@ -1112,7 +1113,7 @@ class CopyEnginePipeline:
         # follower_account_id, copy_event_id) is the authority on "already handled": if Redis dedupe was
         # bypassed (flush, key expiry) a redelivered event stops HERE - it must not overwrite the existing
         # child Order (save_or_update_order is an upsert) and must not reach the broker a second time.
-        copy_event_uuid = derive_copy_event_id(event.master_order_id, str(acc_id), 1)
+        copy_event_uuid = derive_copy_event_id(event.master_order_id, str(acc_id), 1, scope=event.dedupe_scope)
         async with AsyncSessionLocal() as session:
             claim = await claim_child_trade(
                 session,
@@ -1345,7 +1346,7 @@ class CopyEnginePipeline:
         row_statuses: Dict[str, str] = {}
         try:
             by_event_id = {
-                derive_copy_event_id(event.master_order_id, str(f.id), fill_sequence): str(f.id) for f, _ in followers
+                derive_copy_event_id(event.master_order_id, str(f.id), fill_sequence, scope=event.dedupe_scope): str(f.id) for f, _ in followers
             }
             if by_event_id:
                 async with AsyncSessionLocal() as session:
@@ -1385,7 +1386,7 @@ class CopyEnginePipeline:
             return False
 
     async def _record_child_result(self, event: MasterTradeEvent, follower: Account, result: Any, fill_sequence: int) -> None:
-        copy_event_uuid = derive_copy_event_id(event.master_order_id, str(follower.id), fill_sequence)
+        copy_event_uuid = derive_copy_event_id(event.master_order_id, str(follower.id), fill_sequence, scope=event.dedupe_scope)
         outcome = pre_send_outcome(result)
         async with AsyncSessionLocal() as session:
             if outcome is not None:
@@ -1594,7 +1595,7 @@ class CopyEnginePipeline:
         # --- Pre-trade risk gate: identical pattern to
         # _process_single_limit_follower/_process_single_market_follower.
         settings_obj = follower.copy_settings
-        risk_audit_event_id = derive_copy_event_id(event.master_order_id, str(acc_id), 1)
+        risk_audit_event_id = derive_copy_event_id(event.master_order_id, str(acc_id), 1, scope=event.dedupe_scope)
 
         funds_data: Optional[FundsData] = None
         if client:
@@ -1740,7 +1741,7 @@ class CopyEnginePipeline:
         # sent, exactly as the MARKET path does (see _process_single_limit_follower): a redelivered event
         # whose Redis dedupe was bypassed stops HERE - it must not overwrite the existing child Order
         # (save_or_update_order is an upsert) and must not reach the broker a second time.
-        copy_event_uuid = derive_copy_event_id(event.master_order_id, str(acc_id), 1)
+        copy_event_uuid = derive_copy_event_id(event.master_order_id, str(acc_id), 1, scope=event.dedupe_scope)
         async with AsyncSessionLocal() as session:
             claim = await claim_child_trade(
                 session,
@@ -2188,7 +2189,7 @@ class CopyEnginePipeline:
 
         # --- Funds/RiskEngine: identical to handle_master_modification's
         # pre-modify gate, evaluated at the marketable price.
-        risk_audit_event_id = derive_copy_event_id(master_order_id, acc_id_str, 1)
+        risk_audit_event_id = derive_copy_event_id(master_order_id, acc_id_str, 1, scope=event.dedupe_scope)
         settings_obj = account.copy_settings if account else None
 
         async def _risk_reject(reason_code: str, quantity: int) -> str:
@@ -2806,6 +2807,7 @@ class CopyEnginePipeline:
             str(account.id): (account, multiplier) for account, multiplier in eligible_followers
         }
         stop_active, stopped_followers = await self._resolve_stop_state(global_emergency_stop)
+        master_scope_prefix = master_scope(await self._master_broker_id(master_account_id), master_account_id)
 
         results = {}
         for ord_rec in child_orders:
@@ -2823,7 +2825,7 @@ class CopyEnginePipeline:
             # closed - this follower's order is never modified if funds
             # can't be fetched, risk inputs can't be fetched, or the risk
             # engine rejects; other followers are unaffected.
-            risk_audit_event_id = derive_copy_event_id(master_order_id, acc_id_str, 1)
+            risk_audit_event_id = derive_copy_event_id(master_order_id, acc_id_str, 1, scope=master_scope_prefix)
             follower_runtime_paused = acc_id_str in stopped_followers
 
             # The RiskEngine block below is the only emergency-stop check on
@@ -3722,7 +3724,7 @@ class CopyEnginePipeline:
         settings_obj = follower.copy_settings
 
         copy_event_uuid = derive_copy_event_id(
-            event.master_order_id, str(acc_id), event.fill_sequence
+            event.master_order_id, str(acc_id), event.fill_sequence, scope=event.dedupe_scope
         )
         client_order_id = (
             f"JT__{event.master_order_id[:24]}__{str(acc_id)[:8]}__{event.fill_sequence}"

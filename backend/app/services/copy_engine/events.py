@@ -4,6 +4,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal, Optional
 
+from app.services.brokers.identity import master_scope
+
 COPY_EVENT_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "jettone:copy-engine:copy-event")
 
 
@@ -11,16 +13,20 @@ def derive_copy_event_id(
     master_order_id: str,
     follower_account_id: str,
     fill_sequence: int = 1,
+    scope: str = "",
 ) -> uuid.UUID:
     """
     Deterministic idempotency key. The same broker event redelivered any number
     of times (WebSocket replay, restart, Redis flush) always maps to the same
     UUID, so the DB unique constraint (master_order_id, follower_account_id,
     copy_event_id) genuinely blocks duplicate copy trades.
+
+    `scope` (brokers/identity.master_scope) makes the key broker-aware for Masters that are not Alice Blue. It is "" for Alice Blue
+    and for every event that predates it, which leaves the hashed string - and so every existing key - exactly as it always was.
     """
     return uuid.uuid5(
         COPY_EVENT_NAMESPACE,
-        f"{master_order_id}:{follower_account_id}:{fill_sequence}",
+        f"{scope}{master_order_id}:{follower_account_id}:{fill_sequence}",
     )
 
 
@@ -62,3 +68,11 @@ class MasterTradeEvent:
     # since a bare option/future symbol like "NIFTY" cannot by itself
     # identify which of many same-named contracts was actually traded.
     instrument_id: Optional[str] = None
+    # Canonical id of the broker this event's Master trades through (brokers/registry). None = an event that predates multi-broker
+    # support, which is Alice Blue. Only used to scope the duplicate-guard and copy-event keys (see brokers/identity.py).
+    master_broker: Optional[str] = None
+
+    @property
+    def dedupe_scope(self) -> str:
+        """"" for Alice Blue (keys unchanged), "<broker>:<master account>:" otherwise."""
+        return master_scope(self.master_broker, self.account_id)

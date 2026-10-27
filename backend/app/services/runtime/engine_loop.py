@@ -30,6 +30,7 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.services.live_trading import event_allowed_when_live_off, is_live_trading_enabled
+from app.models.accounts import Account
 from app.models.strategies import GroupStrategy, StrategyMember
 from app.models.trades import Order, OrderSide, OrderSource, OrderStatus
 from app.services import strategy_membership as membership
@@ -47,6 +48,7 @@ from app.services.reliability.emergency_stop import (
 from app.services.reliability.follower_fill_syncer import FollowerFillSyncer
 from app.services.reliability.master_order_poller import MasterOrderPoller
 from app.services.brokers.order_book_read import read_order_book_single
+from app.services.brokers.registry import normalize_broker_id
 from app.services.reliability.reconciliation import ReconciliationEngine
 from app.services.reliability.restart_recovery import RestartRecovery
 from app.services.reliability.stale_order_sweeper import StaleOrderSweeper
@@ -475,11 +477,24 @@ class EngineLoop:
         except Exception as exc:
             logger.error(f"EngineLoop WS stream terminated unexpectedly: {exc}", exc_info=True)
 
+    @staticmethod
+    async def _master_broker_for(account_id: str) -> Optional[str]:
+        """Canonical broker id of a Master account, or None when it cannot be read (then Alice Blue's unchanged keys are used,
+        which is also what every Master was before multi-broker support). Read-only."""
+        try:
+            async with AsyncSessionLocal() as db:
+                acc = await db.get(Account, uuid.UUID(str(account_id)))
+            return normalize_broker_id(acc.broker) if acc is not None else None
+        except Exception as exc:
+            logger.warning(f"[EngineLoop] Could not read the broker of Master {account_id} ({type(exc).__name__}); using the legacy key scope.")
+            return None
+
     async def _build_detector(self, account_id: str) -> MasterTradeDetector:
         """A Master's detector, seeded from its durable Order rows (moved
         unchanged from _run so every monitored Master is seeded the same
         way the single master always was)."""
         detector = MasterTradeDetector(master_account_id=account_id)
+        detector.master_broker = await self._master_broker_for(account_id)         # scopes this Master's event keys (identity.py)
 
         # Issue #5: seed detector state from durable Order rows so a
         # restart doesn't reset cumulative-fill tracking to zero (which

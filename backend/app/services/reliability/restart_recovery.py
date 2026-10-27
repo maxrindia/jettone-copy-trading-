@@ -46,6 +46,7 @@ from app.models.audit import AuditLog, SystemEvent
 from app.models.trades import CopyTrade, Order, OrderSource, OrderStatus
 from app.services import strategy_membership as membership
 from app.services.alice_blue.types import OrderRecord
+from app.services.brokers.identity import master_scope
 from app.services.copy_engine.child_outcomes import FANOUT_STARTED_EVENT_TYPE, RecoveryScope
 from app.services.copy_engine.events import MasterTradeEvent, derive_copy_event_id
 from app.services.live_trading import is_live_trading_enabled
@@ -313,7 +314,8 @@ class RestartRecovery:
         seq = meta.get("fill_sequence", 1)
         if not routed:
             return []
-        wanted = {derive_copy_event_id(master_order_id, cid, seq): cid for cid in routed}
+        wanted = {derive_copy_event_id(master_order_id, cid, seq, scope=master_scope(meta.get("master_broker"), meta.get("master_account_id"))): cid
+                  for cid in routed}
         have = set((await session.execute(
             select(CopyTrade.copy_event_id).where(CopyTrade.master_order_id == master_order_id,
                                                   CopyTrade.copy_event_id.in_(list(wanted))))).scalars().all())
@@ -373,7 +375,7 @@ class RestartRecovery:
             trigger_price=Decimal(str(meta["trigger_price"])), event_type=meta["event_type"],
             source=meta.get("source") or "BROKER_EXTERNAL", total_quantity=int(meta["quantity"]), filled_quantity=0,
             pending_quantity=int(meta["quantity"]), status=meta.get("status") or "OPEN",
-            instrument_id=meta.get("instrument_id"),
+            instrument_id=meta.get("instrument_id"), master_broker=meta.get("master_broker"),
         )
         # Under the same shared gate a normal order takes, so a Master switch cannot interleave with it.
         async with membership.account_order_gate(master_account_id):
