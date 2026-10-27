@@ -19,14 +19,23 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import pytest_asyncio
 
 from app.models.trades import Order, OrderSide, OrderSource, OrderStatus
 from app.services.alice_blue.types import OrderRecord, OrderSide as BrokerOrderSide
 from app.services.copy_engine.pipeline import CopyEnginePipeline
 from app.services.copy_engine.validator import EventValidator
 from app.services.reliability.master_order_poller import MasterOrderPoller
+from strategy_helpers import ensure_account
 
 MASTER_ID = "caf4726b-c48c-4e54-b899-ceb0f7259da8"
+
+
+@pytest_asyncio.fixture
+async def master_account(db_session):
+    """The Account row the module's Master orders belong to. PostgreSQL enforces orders.account_id -> accounts.id (SQLite does not),
+    so a test that writes orders for MASTER_ID needs a real account behind it."""
+    return await ensure_account(db_session, MASTER_ID)
 
 
 def _record(broker_order_id, status="COMPLETE", filled_quantity=1, quantity=1,
@@ -77,7 +86,7 @@ async def _order_rows(session, broker_order_id=None):
 
 
 @pytest.mark.asyncio
-async def test_first_poll_seeds_baseline_and_dispatches_nothing(db_session, mock_redis):
+async def test_first_poll_seeds_baseline_and_dispatches_nothing(db_session, master_account, mock_redis):
     """Rule 1: starting the poller mid-session must never replicate the
     orders that were already there - it would fire real follower orders for
     master activity that happened before the engine was watching."""
@@ -96,7 +105,7 @@ async def test_first_poll_seeds_baseline_and_dispatches_nothing(db_session, mock
 
 
 @pytest.mark.asyncio
-async def test_baseline_order_never_dispatches_even_after_status_change(db_session, mock_redis):
+async def test_baseline_order_never_dispatches_even_after_status_change(db_session, master_account, mock_redis):
     """A pre-existing order transitioning OPEN->COMPLETE after the baseline
     is still master activity that predates us: persist the change, never
     replicate it."""
@@ -121,7 +130,7 @@ async def test_baseline_order_never_dispatches_even_after_status_change(db_sessi
 
 
 @pytest.mark.asyncio
-async def test_new_external_order_after_baseline_is_dispatched(db_session, mock_redis):
+async def test_new_external_order_after_baseline_is_dispatched(db_session, master_account, mock_redis):
     """The actual bug this module fixes: a Mobile-placed master order that
     appears after the baseline must reach the copy pipeline."""
     dispatched = []
@@ -146,7 +155,7 @@ async def test_new_external_order_after_baseline_is_dispatched(db_session, mock_
 
 
 @pytest.mark.asyncio
-async def test_jettone_placed_order_is_persisted_but_never_dispatched(db_session, mock_redis):
+async def test_jettone_placed_order_is_persisted_but_never_dispatched(db_session, master_account, mock_redis):
     """Rule 2: broker.py already replicated INTERNAL_UI orders synchronously.
     Re-dispatching risks a second follower order, because the detector
     derives fill_sequence from cumulative filled quantity, which only
@@ -189,7 +198,7 @@ async def test_jettone_placed_order_is_persisted_but_never_dispatched(db_session
 
 
 @pytest.mark.asyncio
-async def test_unchanged_order_is_not_redispatched(db_session, mock_redis):
+async def test_unchanged_order_is_not_redispatched(db_session, master_account, mock_redis):
     dispatched = []
     poller = _build_poller([_record("00000000000001")], dispatched, mock_redis)
     await poller.poll_once()  # baseline
@@ -205,7 +214,7 @@ async def test_unchanged_order_is_not_redispatched(db_session, mock_redis):
 
 
 @pytest.mark.asyncio
-async def test_partial_then_complete_dispatches_each_change(db_session, mock_redis):
+async def test_partial_then_complete_dispatches_each_change(db_session, master_account, mock_redis):
     dispatched = []
     poller = _build_poller([], dispatched, mock_redis)
     await poller.poll_once()  # empty baseline
@@ -226,7 +235,7 @@ async def test_partial_then_complete_dispatches_each_change(db_session, mock_red
 
 
 @pytest.mark.asyncio
-async def test_broker_failure_does_not_raise_or_seed(db_session, mock_redis):
+async def test_broker_failure_does_not_raise_or_seed(db_session, master_account, mock_redis):
     """A failed fetch must not be mistaken for 'the account has no orders' -
     that would seed an empty baseline and make every existing order look new
     on the next successful poll."""
@@ -245,7 +254,7 @@ async def test_broker_failure_does_not_raise_or_seed(db_session, mock_redis):
 
 
 @pytest.mark.asyncio
-async def test_missing_client_does_not_seed(db_session, mock_redis):
+async def test_missing_client_does_not_seed(db_session, master_account, mock_redis):
     dispatched = []
     poller = _build_poller([_record("26090800085772")], dispatched, mock_redis)
     poller.client_provider = lambda _acc_id: None
@@ -255,7 +264,7 @@ async def test_missing_client_does_not_seed(db_session, mock_redis):
 
 
 @pytest.mark.asyncio
-async def test_unmapped_broker_status_is_not_dispatched(db_session, mock_redis):
+async def test_unmapped_broker_status_is_not_dispatched(db_session, master_account, mock_redis):
     """Fail closed on a status we don't understand rather than guessing at
     an order lifecycle state for a real-money copy."""
     dispatched = []
@@ -273,7 +282,7 @@ async def test_unmapped_broker_status_is_not_dispatched(db_session, mock_redis):
 # G. Existing normal statuses are unaffected --------------------------------
 
 @pytest.mark.asyncio
-async def test_ordinary_statuses_are_still_mapped_and_replicated_normally(db_session, mock_redis):
+async def test_ordinary_statuses_are_still_mapped_and_replicated_normally(db_session, master_account, mock_redis):
     """Regression guard: adding TRIGGER_PENDING must not perturb any
     already-understood status, including the broker's own literal "PENDING"
     string (a different thing entirely - it maps to OrderStatus.OPEN, not

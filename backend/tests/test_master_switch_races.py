@@ -41,7 +41,7 @@ from app.services.copy_engine.pipeline import CopyEnginePipeline
 from app.services.copy_engine.validator import EventValidator
 from app.services.reliability.master_order_poller import MasterOrderPoller
 from app.services.runtime.engine_loop import EngineLoop
-from strategy_helpers import link_strategy
+from strategy_helpers import ensure_account, link_strategy
 from test_strategy_master_switching import (
     _Broker,
     _FakePoller,
@@ -75,7 +75,7 @@ def _poller(account_id, book, dispatched, mock_redis, **activation):
 @pytest.mark.asyncio
 async def test_without_snapshot_first_poll_still_baselines_everything(db_session, mock_redis):
     """Unchanged startup behavior - and the gap: NEW_1 is never copied."""
-    acc = uuid.uuid4()
+    acc = (await ensure_account(db_session)).id
     dispatched = []
     poller = _poller(acc, [rec("HIST", "COMPLETE"), rec("NEW_1")], dispatched, mock_redis)
     await poller.poll_once()
@@ -84,7 +84,7 @@ async def test_without_snapshot_first_poll_still_baselines_everything(db_session
 
 @pytest.mark.asyncio
 async def test_fresh_snapshot_copies_only_orders_placed_after_it(db_session, mock_redis):
-    acc = uuid.uuid4()
+    acc = (await ensure_account(db_session)).id
     book = [rec("HIST_A", "COMPLETE", "MARKET", filled=1), rec("HIST_B", "CANCELLED"), rec("NEW_1")]
     dispatched = []
     poller = _poller(acc, book, dispatched, mock_redis,
@@ -102,7 +102,7 @@ async def test_fresh_snapshot_copies_only_orders_placed_after_it(db_session, moc
 
 @pytest.mark.asyncio
 async def test_fresh_snapshot_never_replays_jettone_originated_orders(db_session, mock_redis):
-    acc = uuid.uuid4()
+    acc = (await ensure_account(db_session)).id
     db_session.add(Order(
         id=uuid.uuid4(), internal_order_id="JT_MANUAL_1", broker_order_id="JT_1", account_id=acc,
         source=OrderSource.INTERNAL_UI, exchange="NSE", symbol="ITC", side=OrderSide.BUY, order_type="LIMIT",
@@ -120,7 +120,7 @@ async def test_fresh_snapshot_never_replays_jettone_originated_orders(db_session
 
 @pytest.mark.asyncio
 async def test_expired_snapshot_baselines_everything_and_reports_the_missed_orders(db_session, mock_redis):
-    acc = uuid.uuid4()
+    acc = (await ensure_account(db_session)).id
     dispatched = []
     poller = _poller(acc, [rec("HIST"), rec("LATE_1")], dispatched, mock_redis,
                      activation_baseline={"HIST"},
@@ -137,7 +137,7 @@ async def test_expired_snapshot_baselines_everything_and_reports_the_missed_orde
 async def test_a_replayed_order_is_never_copied_twice(db_session, mock_redis):
     """Replayed through the REAL detector: the first sighting is the
     creation, later sightings of the same order are its lifecycle."""
-    acc = str(uuid.uuid4())
+    acc = str((await ensure_account(db_session)).id)
     detector = MasterTradeDetector(master_account_id=acc)
     trade_events = []
 

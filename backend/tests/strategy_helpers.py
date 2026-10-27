@@ -11,7 +11,7 @@ import uuid
 from decimal import Decimal
 from typing import Iterable, Optional, Tuple, Union
 
-from app.models.accounts import Account
+from app.models.accounts import Account, AccountType
 from app.models.strategies import (
     STRATEGY_ROLE_CHILD,
     STRATEGY_ROLE_MASTER,
@@ -91,3 +91,19 @@ async def add_child(
 async def link_sample_accounts(session, sample_accounts: dict, **kwargs) -> Optional[GroupStrategy]:
     """Links conftest's sample_accounts master -> follower1 at 1.0x."""
     return await link_strategy(session, sample_accounts["master"], [sample_accounts["follower1"]], **kwargs)
+
+
+async def ensure_account(session, account_id=None, *, account_type=AccountType.MASTER, name=None) -> Account:
+    """The Account row an Order's `account_id` points at (test data only). PostgreSQL enforces orders.account_id -> accounts.id;
+    SQLite does not, so a test that invented an id for its orders passed there and failed on PostgreSQL. Idempotent: an existing row
+    with that id is returned unchanged. Uses the caller's session, so it lives in the same test database and lifecycle as the orders.
+    With no `account_id` a fresh one is generated."""
+    account_id = uuid.UUID(str(account_id)) if account_id else uuid.uuid4()
+    existing = await session.get(Account, account_id)
+    if existing is not None:
+        return existing
+    account = Account(id=account_id, account_type=account_type, display_name=name or f"Test account {account_id.hex[:8]}",
+                      alice_user_id=f"AB_{account_id.hex[:12]}", is_active=True)
+    session.add(account)
+    await session.commit()
+    return account

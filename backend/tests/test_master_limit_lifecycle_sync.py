@@ -51,6 +51,7 @@ from app.services.copy_engine.detector import MasterTradeDetector
 from app.services.copy_engine.pipeline import CopyEnginePipeline
 from app.services.copy_engine.validator import EventValidator
 from app.services.reliability.master_order_poller import MasterOrderPoller
+from strategy_helpers import ensure_account
 
 MASTER_ID = "caf4726b-c48c-4e54-b899-ceb0f7259da8"
 MASTER_ORDER_ID = "26090900064736"
@@ -288,6 +289,7 @@ async def test_13_restart_still_detects_later_modification(db_session, mock_redi
     """After a restart the detector seeds from Order rows, so a subsequent
     master MODIFY is still typed ORDER_MODIFIED (not a fresh LIMIT_CREATED,
     which would place a second child order)."""
+    await ensure_account(db_session, MASTER_ID)        # the seeded Master order's account must exist (PostgreSQL enforces the FK)
     seed_order = Order(
         id=uuid.uuid4(),
         internal_order_id=f"EXT_{MASTER_ORDER_ID}",

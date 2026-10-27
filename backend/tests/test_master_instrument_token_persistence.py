@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 
 from app.models.trades import Order, OrderSide, OrderSource, OrderStatus
@@ -28,9 +29,17 @@ from app.services.copy_engine.pipeline import CopyEnginePipeline
 from app.services.copy_engine.validator import EventValidator
 from app.services.reliability.master_order_poller import MasterOrderPoller
 from app.services.runtime.engine_loop import EngineLoop
+from strategy_helpers import ensure_account
 from test_engine_loop import _FakeMasterClient, _FakeWebSocketClient
 
 MASTER = str(uuid.uuid4())
+
+
+@pytest_asyncio.fixture
+async def master_account(db_session):
+    """The Account row the module's Master orders belong to. PostgreSQL enforces orders.account_id -> accounts.id (SQLite does not),
+    so a test that writes orders for MASTER needs a real account behind it."""
+    return await ensure_account(db_session, MASTER)
 
 
 def pipeline_for(mock_redis):
@@ -110,14 +119,14 @@ async def test_a_row_without_a_token_still_has_no_token(mock_redis):
 # ── the shared upsert ────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_a_new_order_stores_the_token_when_the_reported_exchange_matches(db_session, mock_redis):
+async def test_a_new_order_stores_the_token_when_the_reported_exchange_matches(db_session, master_account, mock_redis):
     await save(pipeline_for(mock_redis), token="10794", token_exchange="NSE")
     row = await stored(db_session)
     assert (row.exchange, row.instrument_token) == ("NSE", "10794")
 
 
 @pytest.mark.asyncio
-async def test_the_reported_exchange_is_compared_case_insensitively_and_the_token_trimmed(db_session, mock_redis):
+async def test_the_reported_exchange_is_compared_case_insensitively_and_the_token_trimmed(db_session, master_account, mock_redis):
     await save(pipeline_for(mock_redis), token="  10794 ", token_exchange=" nse ")
     assert (await stored(db_session)).instrument_token == "10794"
 
@@ -133,7 +142,7 @@ async def test_the_reported_exchange_is_compared_case_insensitively_and_the_toke
     (10794, "NSE", "a non-string token is not coerced"),
     ("9" * 51, "NSE", "a token that does not fit the column"),
 ])
-async def test_the_token_is_not_stored_without_trustworthy_evidence(db_session, mock_redis, token, token_exchange, why):
+async def test_the_token_is_not_stored_without_trustworthy_evidence(db_session, master_account, mock_redis, token, token_exchange, why):
     pipeline = pipeline_for(mock_redis)
     kwargs = dict(instrument_token=token, instrument_exchange=token_exchange)
     await pipeline.save_or_update_order(
@@ -144,7 +153,7 @@ async def test_the_token_is_not_stored_without_trustworthy_evidence(db_session, 
 
 
 @pytest.mark.asyncio
-async def test_a_later_report_fills_a_missing_token_but_never_erases_or_replaces_one(db_session, mock_redis, caplog):
+async def test_a_later_report_fills_a_missing_token_but_never_erases_or_replaces_one(db_session, master_account, mock_redis, caplog):
     pipeline = pipeline_for(mock_redis)
     await save(pipeline)                                                           # historical / WebSocket-style: no token
     assert (await stored(db_session)).instrument_token is None
@@ -162,7 +171,7 @@ async def test_a_later_report_fills_a_missing_token_but_never_erases_or_replaces
 
 
 @pytest.mark.asyncio
-async def test_a_token_is_not_attached_to_a_row_whose_persisted_exchange_differs(db_session, mock_redis):
+async def test_a_token_is_not_attached_to_a_row_whose_persisted_exchange_differs(db_session, master_account, mock_redis):
     pipeline = pipeline_for(mock_redis)
     await save(pipeline, exchange="NSE")
     await save(pipeline, exchange="NSE", token="74056", token_exchange="NFO")      # the broker now says NFO; the row says NSE
@@ -170,7 +179,7 @@ async def test_a_token_is_not_attached_to_a_row_whose_persisted_exchange_differs
 
 
 @pytest.mark.asyncio
-async def test_other_order_updates_are_unchanged_by_a_stored_token(db_session, mock_redis):
+async def test_other_order_updates_are_unchanged_by_a_stored_token(db_session, master_account, mock_redis):
     pipeline = pipeline_for(mock_redis)
     await save(pipeline, token="10794", token_exchange="NSE", price=Decimal("125.00"))
     await save(pipeline, token="10794", token_exchange="NSE", price=Decimal("124.00"), status=OrderStatus.PARTIAL, filled_quantity=1)
@@ -179,7 +188,7 @@ async def test_other_order_updates_are_unchanged_by_a_stored_token(db_session, m
 
 
 @pytest.mark.asyncio
-async def test_child_order_writes_never_carry_a_token(db_session, mock_redis):
+async def test_child_order_writes_never_carry_a_token(db_session, master_account, mock_redis):
     """Child orders are written without the new arguments, exactly as before."""
     await save(pipeline_for(mock_redis), broker_order_id="C1", source=OrderSource.SYSTEM, internal="JT_child1",
                master_broker_order_id="M1")
@@ -187,7 +196,7 @@ async def test_child_order_writes_never_carry_a_token(db_session, mock_redis):
 
 
 @pytest.mark.asyncio
-async def test_the_same_token_value_on_two_exchanges_stays_two_distinct_pairs(db_session, mock_redis):
+async def test_the_same_token_value_on_two_exchanges_stays_two_distinct_pairs(db_session, master_account, mock_redis):
     pipeline = pipeline_for(mock_redis)
     await save(pipeline, broker_order_id="N1", exchange="NSE", token="3045", token_exchange="NSE")
     await save(pipeline, broker_order_id="X1", exchange="BSE", token="3045", token_exchange="BSE")
@@ -216,7 +225,7 @@ def poller_for(book, dispatched, mock_redis):
 
 
 @pytest.mark.asyncio
-async def test_the_seed_pass_persists_the_token_and_exchange_without_dispatching(db_session, mock_redis):
+async def test_the_seed_pass_persists_the_token_and_exchange_without_dispatching(db_session, master_account, mock_redis):
     dispatched = []
     poller = poller_for([record("P1"), record("P2", instrument_id=None), record("P3", instrument_exchange=None)], dispatched, mock_redis)
     await poller.poll_once()
@@ -228,7 +237,7 @@ async def test_the_seed_pass_persists_the_token_and_exchange_without_dispatching
 
 
 @pytest.mark.asyncio
-async def test_a_new_order_after_the_baseline_is_persisted_with_its_token_and_the_event_carries_both(db_session, mock_redis):
+async def test_a_new_order_after_the_baseline_is_persisted_with_its_token_and_the_event_carries_both(db_session, master_account, mock_redis):
     dispatched = []
     book = [record("OLD")]
     poller = poller_for(book, dispatched, mock_redis)
@@ -241,7 +250,7 @@ async def test_a_new_order_after_the_baseline_is_persisted_with_its_token_and_th
 
 
 @pytest.mark.asyncio
-async def test_a_later_poll_that_loses_the_token_does_not_erase_it(db_session, mock_redis):
+async def test_a_later_poll_that_loses_the_token_does_not_erase_it(db_session, master_account, mock_redis):
     dispatched = []
     book = [record("P1", status="OPEN")]
     poller = poller_for(book, dispatched, mock_redis)
@@ -253,7 +262,7 @@ async def test_a_later_poll_that_loses_the_token_does_not_erase_it(db_session, m
 
 
 @pytest.mark.asyncio
-async def test_a_manual_ui_order_gets_its_token_when_the_poller_reads_it_back(db_session, mock_redis):
+async def test_a_manual_ui_order_gets_its_token_when_the_poller_reads_it_back(db_session, master_account, mock_redis):
     pipeline = pipeline_for(mock_redis)
     await save(pipeline, broker_order_id="UI1", internal="UI_manual_1", source=OrderSource.INTERNAL_UI)
     assert (await stored(db_session, "UI1")).instrument_token is None
@@ -313,14 +322,14 @@ def _event(**over):
 
 
 @pytest.mark.asyncio
-async def test_the_engine_loop_passes_a_rest_events_token_and_reported_exchange_to_the_upsert(mock_redis, db_session):
+async def test_the_engine_loop_passes_a_rest_events_token_and_reported_exchange_to_the_upsert(mock_redis, db_session, master_account):
     save_mock = await drive_engine_loop(mock_redis, _event(instrument_id="10794", instrument_exchange="NSE"))
     kwargs = save_mock.await_args.kwargs
     assert (kwargs["instrument_token"], kwargs["instrument_exchange"], kwargs["exchange"]) == ("10794", "NSE", "NSE")
 
 
 @pytest.mark.asyncio
-async def test_a_websocket_event_passes_no_token(mock_redis, db_session):
+async def test_a_websocket_event_passes_no_token(mock_redis, db_session, master_account):
     """WebSocket events carry no instrument token and no reported instrument exchange."""
     save_mock = await drive_engine_loop(mock_redis, _event())
     kwargs = save_mock.await_args.kwargs

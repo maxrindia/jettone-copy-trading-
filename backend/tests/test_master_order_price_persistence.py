@@ -29,13 +29,22 @@ import uuid
 from decimal import Decimal
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import select
 
 from app.models.trades import Order, OrderSide, OrderSource, OrderStatus
 from app.services.copy_engine.pipeline import CopyEnginePipeline
 from app.services.copy_engine.validator import EventValidator
+from strategy_helpers import ensure_account
 
 MASTER_ACCOUNT = uuid.uuid4()
+
+
+@pytest_asyncio.fixture
+async def master_account(db_session):
+    """The Account row the module's Master orders belong to. PostgreSQL enforces orders.account_id -> accounts.id (SQLite does not),
+    so a test that writes orders for MASTER_ACCOUNT needs a real account behind it."""
+    return await ensure_account(db_session, MASTER_ACCOUNT)
 BROKER_ORDER_ID = "26090900100077"
 INTERNAL_ID = f"EXT_{BROKER_ORDER_ID}"
 
@@ -76,7 +85,7 @@ async def _row(db_session):
 
 # ── 1 & 2: the reported bug ───────────────────────────────────────────────
 @pytest.mark.asyncio
-async def test_1_2_modified_master_limit_price_is_persisted(db_session, mock_redis):
+async def test_1_2_modified_master_limit_price_is_persisted(db_session, master_account, mock_redis):
     """125.00 -> broker reports 124.00 -> the row must read 124.00."""
     pipeline = _pipeline(mock_redis)
     await _seed_limit_order(pipeline)
@@ -109,7 +118,7 @@ async def test_1_2_modified_master_limit_price_is_persisted(db_session, mock_red
 
 
 @pytest.mark.asyncio
-async def test_modified_master_quantity_is_persisted(db_session, mock_redis):
+async def test_modified_master_quantity_is_persisted(db_session, master_account, mock_redis):
     pipeline = _pipeline(mock_redis)
     await _seed_limit_order(pipeline, quantity=10)
     row = await _row(db_session)
@@ -141,7 +150,7 @@ async def test_modified_master_quantity_is_persisted(db_session, mock_redis):
 # ── 3 & 5: requested price vs fill price stay distinct ───────────────────
 @pytest.mark.asyncio
 async def test_3_5_fill_does_not_replace_limit_price_with_average_price(
-    db_session, mock_redis
+    db_session, master_account, mock_redis
 ):
     """THE dangerous case: a LIMIT order fills at a different average price.
     price must remain the LIMIT price; average_price carries the fill."""
@@ -175,7 +184,7 @@ async def test_3_5_fill_does_not_replace_limit_price_with_average_price(
 
 
 @pytest.mark.asyncio
-async def test_zero_price_event_does_not_wipe_the_limit_price(db_session, mock_redis):
+async def test_zero_price_event_does_not_wipe_the_limit_price(db_session, master_account, mock_redis):
     """A payload that does not report a price (0) must leave price intact."""
     pipeline = _pipeline(mock_redis)
     await _seed_limit_order(pipeline, price=Decimal("125.00"))
@@ -207,7 +216,7 @@ async def test_zero_price_event_does_not_wipe_the_limit_price(db_session, mock_r
 
 # ── 4: everything else keeps its existing behaviour ──────────────────────
 @pytest.mark.asyncio
-async def test_4_unrelated_lifecycle_fields_unchanged(db_session, mock_redis):
+async def test_4_unrelated_lifecycle_fields_unchanged(db_session, master_account, mock_redis):
     """The fill/status fields must still update exactly as before, and
     identity fields must not move."""
     pipeline = _pipeline(mock_redis)

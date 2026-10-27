@@ -41,7 +41,7 @@ from app.services.alice_blue.types import OrderResult, OrderResultCategory, Orde
 from app.services.copy_engine.detector import MasterTradeDetector
 from app.services.copy_engine.pipeline import CopyEnginePipeline
 from app.services.copy_engine.validator import EventValidator
-from strategy_helpers import SAMPLE_MASTER_ACCOUNT_ID
+from strategy_helpers import SAMPLE_MASTER_ACCOUNT_ID, ensure_account
 
 # The sample_accounts master, so events from MASTER_ID route to sample_strategy.
 MASTER_ID = SAMPLE_MASTER_ACCOUNT_ID
@@ -54,7 +54,7 @@ MASTER_ID = SAMPLE_MASTER_ACCOUNT_ID
 @pytest.mark.asyncio
 async def test_limit_to_market_conversion_updates_persisted_order_type(db_session, mock_redis):
     pipeline = CopyEnginePipeline(validator=EventValidator(redis=mock_redis))
-    master_acc_id = uuid.uuid4()
+    master_acc_id = (await ensure_account(db_session)).id
 
     created = await pipeline.save_or_update_order(
         internal_order_id="EXT_ORD_OT_1_M_OT_", broker_order_id="ORD_OT_1",
@@ -88,7 +88,7 @@ async def test_native_sl_trigger_updates_persisted_order_type_to_limit(db_sessio
     once triggered - all other fields (trigger_price, price, status) must be
     preserved exactly as the existing guards already ensure."""
     pipeline = CopyEnginePipeline(validator=EventValidator(redis=mock_redis))
-    master_acc_id = uuid.uuid4()
+    master_acc_id = (await ensure_account(db_session)).id
 
     await pipeline.save_or_update_order(
         internal_order_id="EXT_ORD_OT_SL_M_OT_", broker_order_id="ORD_OT_SL",
@@ -137,6 +137,7 @@ async def test_sl_trigger_still_does_not_create_duplicate_child_with_order_type_
 
     pipeline = CopyEnginePipeline(validator=EventValidator(redis=mock_redis))
     detector = MasterTradeDetector(master_account_id=MASTER_ID)
+    await ensure_account(db_session, uuid.uuid5(uuid.NAMESPACE_DNS, MASTER_ID))   # persist() stores the Master row under this id
 
     async def persist(event):
         status_mapped = {
@@ -244,7 +245,7 @@ async def test_plain_limit_order_type_unaffected_through_its_lifecycle(db_sessio
     """A LIMIT order that is never converted keeps order_type == "LIMIT"
     through OPEN -> PARTIAL -> COMPLETE, exactly as before the fix."""
     pipeline = CopyEnginePipeline(validator=EventValidator(redis=mock_redis))
-    master_acc_id = uuid.uuid4()
+    master_acc_id = (await ensure_account(db_session)).id
 
     for status, filled in [(OrderStatus.OPEN, 0), (OrderStatus.PARTIAL, 40), (OrderStatus.COMPLETE, 100)]:
         row = await pipeline.save_or_update_order(

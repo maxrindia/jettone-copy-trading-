@@ -40,6 +40,7 @@ from app.services.copy_engine.events import MasterTradeEvent
 from app.services.copy_engine.pipeline import CopyEnginePipeline
 from app.services.copy_engine.validator import EventValidator
 from app.services.reliability.master_order_poller import MasterOrderPoller
+from strategy_helpers import ensure_account
 
 MASTER_ID = "caf4726b-c48c-4e54-b899-ceb0f7259da8"
 
@@ -136,6 +137,7 @@ def _rejected_record(broker_order_id, quantity=10, price=Decimal("265.00")):
 
 @pytest.mark.asyncio
 async def test_first_observed_rejected_master_order_never_reaches_follower_broker(db_session, mock_redis, sample_accounts):
+    await ensure_account(db_session, MASTER_ID)        # the persisted Master row needs a real account (PostgreSQL enforces the FK)
     follower = sample_accounts["follower1"]
     follower_client = _rejected_follower_client()
 

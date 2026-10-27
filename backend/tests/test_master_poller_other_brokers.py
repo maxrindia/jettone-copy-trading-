@@ -22,8 +22,16 @@ from app.services.reliability.master_order_poller import MasterOrderPoller
 from conftest import TestingSessionLocal
 import angel_helpers as A
 import groww_helpers as G
+from strategy_helpers import ensure_account
 
 MASTER_ID = "caf4726b-c48c-4e54-b899-ceb0f7259da8"
+
+
+@pytest_asyncio.fixture
+async def master_account(db_session):
+    """The Account row the module's Master orders belong to. PostgreSQL enforces orders.account_id -> accounts.id (SQLite does not),
+    so a test that writes orders for MASTER_ID needs a real account behind it."""
+    return await ensure_account(db_session, MASTER_ID)
 GROWW_STATUS = {"open": "OPEN", "partial": "OPEN", "complete": "EXECUTED", "rejected": "REJECTED", "cancelled": "CANCELLED"}
 ANGEL_STATUS = {"open": "syn_open", "partial": "syn_part", "complete": "syn_done", "rejected": "syn_rej", "cancelled": "syn_can"}
 
@@ -87,7 +95,7 @@ async def master_rows():
 
 
 @pytest.mark.asyncio
-async def test_first_poll_is_a_baseline_and_dispatches_nothing(db_session, mock_redis, drv):
+async def test_first_poll_is_a_baseline_and_dispatches_nothing(db_session, master_account, mock_redis, drv):
     drv.set_book([drv.row("1001", "complete"), drv.row("1002", "open")])
     dispatched = []
     poller = make_poller(drv, mock_redis, dispatched)
@@ -98,7 +106,7 @@ async def test_first_poll_is_a_baseline_and_dispatches_nothing(db_session, mock_
 
 
 @pytest.mark.asyncio
-async def test_a_new_order_after_the_baseline_is_dispatched_once_with_normalised_fields(db_session, mock_redis, drv):
+async def test_a_new_order_after_the_baseline_is_dispatched_once_with_normalised_fields(db_session, master_account, mock_redis, drv):
     drv.set_book([drv.row("1001", "complete")])
     dispatched = []
     poller = make_poller(drv, mock_redis, dispatched)
@@ -112,7 +120,7 @@ async def test_a_new_order_after_the_baseline_is_dispatched_once_with_normalised
 
 
 @pytest.mark.asyncio
-async def test_repeated_identical_polls_never_redispatch(db_session, mock_redis, drv):
+async def test_repeated_identical_polls_never_redispatch(db_session, master_account, mock_redis, drv):
     drv.set_book([])
     dispatched = []
     poller = make_poller(drv, mock_redis, dispatched)
@@ -124,7 +132,7 @@ async def test_repeated_identical_polls_never_redispatch(db_session, mock_redis,
 
 
 @pytest.mark.asyncio
-async def test_partial_then_complete_dispatches_each_genuine_change_once(db_session, mock_redis, drv):
+async def test_partial_then_complete_dispatches_each_genuine_change_once(db_session, master_account, mock_redis, drv):
     drv.set_book([])
     dispatched = []
     poller = make_poller(drv, mock_redis, dispatched)
@@ -136,7 +144,7 @@ async def test_partial_then_complete_dispatches_each_genuine_change_once(db_sess
 
 
 @pytest.mark.asyncio
-async def test_a_duplicate_row_in_one_response_dispatches_once(db_session, mock_redis, drv):
+async def test_a_duplicate_row_in_one_response_dispatches_once(db_session, master_account, mock_redis, drv):
     drv.set_book([])
     dispatched = []
     poller = make_poller(drv, mock_redis, dispatched)
@@ -148,7 +156,7 @@ async def test_a_duplicate_row_in_one_response_dispatches_once(db_session, mock_
 
 
 @pytest.mark.asyncio
-async def test_a_restart_rebaselines_and_never_replays_earlier_orders(db_session, mock_redis, drv):
+async def test_a_restart_rebaselines_and_never_replays_earlier_orders(db_session, master_account, mock_redis, drv):
     drv.set_book([])
     first_run = []
     p1 = make_poller(drv, mock_redis, first_run)
@@ -166,7 +174,7 @@ async def test_a_restart_rebaselines_and_never_replays_earlier_orders(db_session
 
 
 @pytest.mark.asyncio
-async def test_a_jettone_originated_order_is_persisted_but_never_dispatched(db_session, mock_redis, drv):
+async def test_a_jettone_originated_order_is_persisted_but_never_dispatched(db_session, master_account, mock_redis, drv):
     drv.set_book([])
     dispatched = []
     poller = make_poller(drv, mock_redis, dispatched)
@@ -191,7 +199,7 @@ MALFORMED = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name,status,body", MALFORMED, ids=[m[0] for m in MALFORMED])
-async def test_an_unreadable_first_response_does_not_seed_and_old_orders_are_still_not_replicated(db_session, mock_redis, drv, name, status, body):
+async def test_an_unreadable_first_response_does_not_seed_and_old_orders_are_still_not_replicated(db_session, master_account, mock_redis, drv, name, status, body):
     if drv.name == "angel":
         body = {"status": False, "message": "x"} if isinstance(body, dict) else body
     drv.set_raw(status, body)
@@ -203,7 +211,7 @@ async def test_an_unreadable_first_response_does_not_seed_and_old_orders_are_sti
 
 
 @pytest.mark.asyncio
-async def test_a_mid_session_failure_loses_nothing_and_a_late_order_is_still_copied(db_session, mock_redis, drv):
+async def test_a_mid_session_failure_loses_nothing_and_a_late_order_is_still_copied(db_session, master_account, mock_redis, drv):
     drv.set_book([drv.row("9001", "complete")])
     dispatched = []
     poller = make_poller(drv, mock_redis, dispatched)
@@ -216,7 +224,7 @@ async def test_a_mid_session_failure_loses_nothing_and_a_late_order_is_still_cop
 
 
 @pytest.mark.asyncio
-async def test_one_unrecognised_status_makes_the_whole_poll_a_miss_not_a_partial_book(db_session, mock_redis, drv):
+async def test_one_unrecognised_status_makes_the_whole_poll_a_miss_not_a_partial_book(db_session, master_account, mock_redis, drv):
     drv.set_book([])
     dispatched = []
     poller = make_poller(drv, mock_redis, dispatched)
@@ -234,7 +242,7 @@ async def test_one_unrecognised_status_makes_the_whole_poll_a_miss_not_a_partial
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("raw_type,expected", [("SL", "SL"), ("SL_M", "SLM"), ("LIMIT", "LIMIT"), ("MARKET", "MARKET")])
-async def test_order_types_use_the_common_vocabulary(db_session, mock_redis, drv, raw_type, expected):
+async def test_order_types_use_the_common_vocabulary(db_session, master_account, mock_redis, drv, raw_type, expected):
     drv.set_book([])
     dispatched = []
     poller = make_poller(drv, mock_redis, dispatched)
@@ -252,7 +260,7 @@ async def test_order_types_use_the_common_vocabulary(db_session, mock_redis, drv
 # ── Groww order-list paging boundary (the page base is NOT verified; a full page is never trusted) ──
 
 @pytest.mark.asyncio
-async def test_a_full_groww_page_is_a_missed_poll_not_a_complete_book(db_session, mock_redis):
+async def test_a_full_groww_page_is_a_missed_poll_not_a_complete_book(db_session, master_account, mock_redis):
     d = await Driver("groww").start(mock_redis)
     page = lambda n: [d.row(str(20000 + i), "complete") for i in range(n)]       # noqa: E731
     d.set_book(page(99))                                                          # just under a page: readable

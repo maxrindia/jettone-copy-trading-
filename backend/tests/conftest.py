@@ -6,7 +6,24 @@ os.environ.setdefault("MASTER_CAPITAL", "500000")
 os.environ.setdefault("ALICE_BLUE_ENCRYPTION_KEY", TestFernet.generate_key().decode())
 os.environ.setdefault("INTERNAL_API_TOKEN", "test-internal-token")
 
-TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+import atexit
+import shutil
+import tempfile
+from pathlib import Path
+
+
+def _default_test_database_url() -> str:
+    """A throwaway SQLite FILE, not ":memory:". An in-memory aiosqlite database gets a StaticPool, i.e. ONE connection shared by every
+    session, so two concurrent tasks (a pipeline fanout to several Children, each with its own session) interleave statements on a
+    single connection and intermittently fail with "cannot commit transaction - SQL statements in progress". That is a test-harness
+    artefact: PostgreSQL gives each session its own connection and never does this. A file database gets a real pool, one connection
+    per session, and the same tests pass deterministically. Override with TEST_DATABASE_URL to use another database."""
+    directory = tempfile.mkdtemp(prefix="jettone-test-db-")
+    atexit.register(shutil.rmtree, directory, ignore_errors=True)
+    return "sqlite+aiosqlite:///" + Path(directory, "test.db").as_posix()
+
+
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL") or _default_test_database_url()
 
 import pytest
 import pytest_asyncio
@@ -17,11 +34,25 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from app.models.base import Base
 from app.models.accounts import Account, AccountType, CopySetting, QuantityMode
 
+_sqlite = TEST_DATABASE_URL.startswith("sqlite")
 test_engine = create_async_engine(
     TEST_DATABASE_URL,
     echo=False,
     pool_pre_ping=True,
+    **({"connect_args": {"timeout": 30}} if _sqlite else {}),      # wait for a competing writer instead of failing at once
 )
+
+if _sqlite:
+    from sqlalchemy import event
+
+    @event.listens_for(test_engine.sync_engine, "connect")
+    def _fast_throwaway_sqlite(dbapi_connection, _record):
+        """The database is deleted after the run, so durability is pointless: skip the fsyncs. WAL lets readers and the one writer
+        proceed together."""
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=OFF")
+        cursor.close()
 
 TestingSessionLocal = async_sessionmaker(
     bind=test_engine,
@@ -208,3 +239,21 @@ def cross_broker_pairs_enabled(monkeypatch):
     monkeypatch.setattr(pairs, "_feature_gap", lambda *args, **kwargs: None)
     monkeypatch.setattr(pairs, "can_be_master", lambda *args, **kwargs: True)
     monkeypatch.setattr(pairs, "can_be_child", lambda *args, **kwargs: True)
+
+
+def pytest_collection_modifyitems(items):
+    """
+    Run every async TEST in the same event loop as the async FIXTURES.
+
+    pytest.ini puts async fixtures on one session-scoped loop (asyncio_default_fixture_loop_scope = session), but pytest-asyncio 0.24
+    runs each async test in its own function-scoped loop. The two differ, and an asyncpg connection is bound to the loop that created
+    it. The shared `db_session` fixture is used in both: fixtures such as `sample_accounts` leave it holding an open transaction on a
+    connection made in the fixture loop, and a test that then passes the session to application code uses that connection from a
+    different loop ("Future attached to a different loop"). On PostgreSQL that made the Live Trading read fail closed (HTTP 409), left
+    the connection `idle in transaction`, and deadlocked the next fixture teardown (`DROP TABLE` waiting on it). SQLite (aiosqlite)
+    does not care which loop calls it, so only PostgreSQL showed it. A test that sets its own loop_scope is left alone.
+    """
+    for item in items:
+        marker = item.get_closest_marker("asyncio")
+        if marker is not None and "loop_scope" not in marker.kwargs and "scope" not in marker.kwargs:
+            item.add_marker(pytest.mark.asyncio(loop_scope="session"), append=False)
