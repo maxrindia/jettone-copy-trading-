@@ -353,8 +353,10 @@ async def add_member(
     # Verify strategy exists
     strat_result = await db.execute(
         select(GroupStrategy).where(GroupStrategy.id == strategy_id, GroupStrategy.deleted_at.is_(None))
+        .options(selectinload(GroupStrategy.master_account))
     )
-    if not strat_result.scalar_one_or_none():
+    strategy = strat_result.scalar_one_or_none()
+    if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
 
     # Verify account exists
@@ -369,6 +371,8 @@ async def add_member(
     # UI's disabled "Add" button only mirrors this.
     try:
         membership.assert_broker_can_be_child(account.broker)
+        # R5 pair gate: a Child whose broker pair with this strategy's Master is unsupported is refused (409).
+        membership.assert_pair_supported(strategy.master_account, account.broker)
     except membership.MembershipConflict as exc:
         raise _conflict(exc)
 
@@ -425,6 +429,16 @@ async def update_member(
         raise HTTPException(status_code=404, detail="Member not found in this strategy")
 
     changes = payload.model_dump(exclude_unset=True)
+    if changes.get("trading_enabled") is True and not member.trading_enabled:
+        # Turning copying ON for a Child is an activation: refuse it for an unsupported pair. Turning it off, and changing the
+        # multiplier of an existing (even unsupported) member, stay allowed - existing memberships are preserved.
+        strategy = (await db.execute(
+            select(GroupStrategy).where(GroupStrategy.id == strategy_id).options(selectinload(GroupStrategy.master_account))
+        )).scalar_one_or_none()
+        try:
+            membership.assert_pair_supported(strategy.master_account if strategy else None, member.account.broker)
+        except membership.MembershipConflict as exc:
+            raise _conflict(exc)
     for field, value in changes.items():
         setattr(member, field, value)
     if "trading_enabled" in changes and changes["trading_enabled"] is not None:

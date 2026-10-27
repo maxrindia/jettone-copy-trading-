@@ -214,12 +214,23 @@ def strategy_readiness(strategy: Any) -> Dict[str, Any]:
     }
 
 
-def switch_pair_warnings(new_master_broker: Optional[str], children: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Non-blocking Master-switch warnings: Children whose pair would be unsupported under the NEW Master's broker. `children`
-    are {"name": str, "role": str, "broker": str|None}."""
+def switch_pair_findings(
+    new_master_broker: Optional[str], children: Sequence[Dict[str, Any]], *, current_master_broker: Optional[str] = None,
+    has_current_master: bool = False,
+) -> List[Dict[str, Any]]:
+    """Children whose pair would be unsupported under the NEW Master's broker, each classified. `children` are
+    {"name", "role", "broker", "trading_enabled"}.
+
+    `blocking` is True only for a trading-enabled Child (role CHILD) whose pair is unsupported under the new Master but was not
+    already unsupported under the current one: the switch would newly route orders to a pair that cannot be copied. A pair that was
+    already unsupported (`preexisting`) is preserved and reported, never a reason to trap the strategy; a Child that is not trading
+    (including a kept old Master, which stays off until enabled) is reported only, because enabling it later is itself refused."""
     out = []
     for child in children:
         pair = pair_readiness(new_master_broker, child.get("broker"))
-        if pair["supported"] is not True:
-            out.append({**child, "pair": pair})
+        if pair["supported"] is True:
+            continue
+        preexisting = bool(has_current_master) and pair_readiness(current_master_broker, child.get("broker"))["supported"] is not True
+        blocking = child.get("role") == "CHILD" and bool(child.get("trading_enabled")) and not preexisting
+        out.append({**child, "pair": pair, "preexisting": preexisting, "blocking": blocking})
     return out

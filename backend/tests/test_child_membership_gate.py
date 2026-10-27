@@ -86,13 +86,20 @@ async def test_a_groww_child_is_rejected_while_the_child_gate_is_off(api_client,
 
 
 @pytest.mark.asyncio
-async def test_a_groww_child_is_accepted_only_when_the_catalog_allows_it(api_client, db_session, monkeypatch):
+async def test_a_groww_child_passes_the_role_gate_but_the_pair_gate_still_refuses_it(api_client, db_session, monkeypatch):
+    """Role gate (catalog) and pair gate (R5) are separate. With every Groww flag on the ROLE gate opens, yet an Alice -> Groww
+    membership is refused with BROKER_PAIR_NOT_SUPPORTED because that pair is not on the allowlist."""
     monkeypatch.setattr(settings, "GROWW_ENABLED", True)
     monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", True)
+    from app.services.brokers.registry import can_be_child
+    assert can_be_child("groww") is True                                              # the role gate follows the catalog
     sid, _ = await strategy_with_master(api_client, db_session)
     child = await _account(db_session, "groww_ok")
     await set_broker(child, "groww")
-    assert (await add(api_client, sid, child)).status_code == 201                    # the gate follows the catalog, not a hard-coded name
+    before = await snapshot()
+    resp = await add(api_client, sid, child)
+    assert resp.status_code == 409 and resp.json()["detail"].startswith("BROKER_PAIR_NOT_SUPPORTED")
+    assert await snapshot() == before                                                 # nothing was written
 
 
 # ── 3. Angel One ──────────────────────────────────────────────────────────────────────────────
@@ -125,14 +132,17 @@ async def test_angel_one_stays_rejected_with_every_flag_on_while_its_contract_is
 
 
 @pytest.mark.asyncio
-async def test_angel_one_is_accepted_when_flag_and_verified_contract_both_allow_it(api_client, db_session, monkeypatch):
+async def test_angel_one_passes_the_role_gate_with_flag_and_verified_contract_but_not_the_pair_gate(api_client, db_session, monkeypatch):
     monkeypatch.setattr(settings, "ANGEL_ONE_ENABLED", True)
     monkeypatch.setattr(settings, "ANGEL_ONE_CHILD_TRADING_ENABLED", True)
     monkeypatch.setattr("app.services.brokers.registry.ANGEL_CONTRACT", SYNTHETIC_CONTRACT)
     sid, _ = await strategy_with_master(api_client, db_session)
     child = await _account(db_session, "angel_ok")
     await set_broker(child, "angelone")
-    assert (await add(api_client, sid, child)).status_code == 201
+    from app.services.brokers.registry import can_be_child
+    assert can_be_child("angelone") is True                                           # the role gate opens ...
+    resp = await add(api_client, sid, child)                                          # ... and the pair gate still refuses
+    assert resp.status_code == 409 and resp.json()["detail"].startswith("BROKER_PAIR_NOT_SUPPORTED")
 
 
 # ── 4. unknown / missing capability fails closed ──────────────────────────────────────────────

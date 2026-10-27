@@ -521,25 +521,43 @@ async def run_preflight(
                     "the old Master after the switch.",
                     len(intraday_pos), [_pos_label(p) for p in intraday_pos])
 
-    # R6: Children whose broker pair would be unsupported under the NEW Master's broker. Informational only: it never blocks,
-    # never changes `allowed` or `can_override`, and reuses the R5 pair gate through strategy_readiness (no second policy).
+    # Broker pairs under the NEW Master (the R5 gate through strategy_readiness: no second policy). A trading-enabled Child whose
+    # pair would newly be unsupported BLOCKS the switch; a pair that was already unsupported, or a Child that is not trading, is
+    # preserved and reported as a warning. Nothing is removed or disabled here.
     pair_scope = [
-        {"name": m.account.display_name, "role": "CHILD", "broker": m.account.broker}
+        {"name": m.account.display_name, "role": "CHILD", "broker": m.account.broker, "trading_enabled": bool(m.trading_enabled)}
         for m in strategy.members if m.account_id != new_master_id and m.account is not None
     ]
-    if old_master_action == "CHILD" and strategy.master_account_id and strategy.master_account_id != new_master_id:
-        old_master = next((a for a in (await db.execute(
-            select(Account).where(Account.id == strategy.master_account_id))).scalars().all()), None)
-        if old_master is not None:
-            pair_scope.append({"name": old_master.display_name, "role": "CURRENT_MASTER", "broker": old_master.broker})
-    new_master_broker = readiness.master_broker_for(new_master)
-    for item in readiness.switch_pair_warnings(new_master_broker, pair_scope):
+    current_master = None
+    if strategy.master_account_id and strategy.master_account_id != new_master_id:
+        current_master = (await db.execute(select(Account).where(Account.id == strategy.master_account_id))).scalars().first()
+    if old_master_action == "CHILD" and current_master is not None:
+        pair_scope.append({"name": current_master.display_name, "role": "CURRENT_MASTER", "broker": current_master.broker,
+                           "trading_enabled": False})
+    pair_findings = readiness.switch_pair_findings(
+        readiness.master_broker_for(new_master), pair_scope,
+        current_master_broker=readiness.master_broker_for(current_master), has_current_master=current_master is not None,
+    )
+    for item in pair_findings:
         pair = item["pair"]
-        warnings.append(SwitchBlocker(
-            code="BROKER_PAIR_NOT_SUPPORTED",
-            message=f"{item['name']} would not receive copied orders under the new Master: {pair['message']}",
-            account_name=item["name"], role=item["role"], items=[pair["detail"]],
-        ))
+        if item["blocking"]:
+            blockers.append(SwitchBlocker(
+                code="BROKER_PAIR_NOT_SUPPORTED",
+                message=(f"{item['name']}: {pair['message']} Disable or remove this Child before switching, or choose a "
+                         "Master whose broker pair is supported."),
+                account_name=item["name"], role=item["role"], items=[pair["detail"]],
+            ))
+        else:
+            why = "already unsupported with the current Master" if item["preexisting"] else "not trading"
+            warnings.append(SwitchBlocker(
+                code="BROKER_PAIR_NOT_SUPPORTED",
+                message=f"{item['name']} would not receive copied orders under the new Master ({why}): {pair['message']}",
+                account_name=item["name"], role=item["role"], items=[pair["detail"]],
+            ))
+    pair_findings_for_audit = [
+        {"child": i["name"], "role": i["role"], "detail": i["pair"]["detail"], "preexisting": i["preexisting"]}
+        for i in pair_findings if not i["blocking"]
+    ]
 
     result = SwitchPreflight(
         strategy_id=str(strategy.id),
@@ -559,6 +577,7 @@ async def run_preflight(
     )
     # Kept off the dataclass fields so they never reach the API response.
     result.new_master_order_ids = new_master_snapshot
+    result.pair_findings = pair_findings_for_audit
     result.snapshot_at = snapshot_at
     return result
 
@@ -659,6 +678,8 @@ async def execute_switch(
                 "old_master_copy_setting_created": created_copy_setting,
                 "unverified_override": override_used,
                 "unverified_accounts": [b.account_name for b in preflight.blockers] if override_used else [],
+                # Members kept although their broker pair is unsupported under the new Master (preserved, not copied).
+                "unsupported_pairs_preserved": list(getattr(preflight, "pair_findings", []) or []),
             },
         )  # commits
 

@@ -67,6 +67,27 @@ def assert_broker_can_be_child(broker: Optional[str]) -> None:
     )
 
 
+PAIR_NOT_SUPPORTED = "BROKER_PAIR_NOT_SUPPORTED"
+
+
+def assert_pair_supported(master_account, child_broker: Optional[str]) -> None:
+    """Raises MembershipConflict(BROKER_PAIR_NOT_SUPPORTED) unless this strategy Master -> Child broker pair passes the R5 gate
+    (brokers/pairs.check_pair, through strategy_readiness: one policy, no second list). Fails closed, including a Master whose
+    broker cannot be established. With NO Master assigned yet the pair is unknown and this returns: the pair is then checked at
+    the Master switch, which refuses a trading Child whose pair would be unsupported. Existing members are never touched here."""
+    if master_account is None:
+        return
+    from app.services import strategy_readiness
+
+    pair = strategy_readiness.pair_readiness(strategy_readiness.master_broker_for(master_account), child_broker)
+    if pair["supported"] is not True:
+        raise MembershipConflict(
+            PAIR_NOT_SUPPORTED, pair["message"],
+            {"master_broker": pair["master_broker"], "child_broker": pair["child_broker"], "requirement": pair["requirement"],
+             "detail": pair["detail"]},
+        )
+
+
 async def get_assignment(db: AsyncSession, account_id: uuid.UUID) -> Optional[StrategyAccountRole]:
     return (
         await db.execute(select(StrategyAccountRole).where(StrategyAccountRole.account_id == account_id))
