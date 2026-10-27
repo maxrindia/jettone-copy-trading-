@@ -347,3 +347,35 @@ def test_no_default_was_changed():
     s = Settings(_env_file=None)
     assert s.ENGINE_LIVE_TRADING_ENABLED is False and s.SELL_POSITION_SAFETY_BYPASS is False
     assert s.CANONICAL_MAPPING_ENFORCED is False and s.INSTRUMENT_SHADOW_ENABLED is False
+
+
+# ── GET /brokers/matrix (the 4 x 4 view) ─────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_the_four_by_four_matrix_supports_only_alice_to_alice(api_client, db_session):
+    data = (await api_client.get("/api/v1/brokers/matrix", headers=AUTH)).json()["data"]
+    assert [b["id"] for b in data["brokers"]] == ["alicebluenew", "groww", "angelone", "zerodha"]
+    assert len(data["matrix"]) == 16
+    assert [(c["master"], c["child"]) for c in data["supported"]] == [(ALICE, ALICE)]
+    by = {b["id"]: b for b in data["brokers"]}
+    assert by[ALICE]["master_detection"]["external_orders_verified"] is True
+    for b in ("groww", "angelone", "zerodha"):
+        d = by[b]["master_detection"]
+        assert d["external_orders_verified"] is False and d["blocker"]
+        assert by[b]["master"]["gate_open"] is False and by[b]["child"]["gate_open"] is False       # default flags
+    assert (await api_client.get("/api/v1/brokers/matrix")).status_code in (401, 503)
+
+
+@pytest.mark.asyncio
+async def test_opening_every_zerodha_gate_still_leaves_the_matrix_unchanged(api_client, db_session, monkeypatch):
+    from app.services.brokers import registry
+    from app.services.zerodha.contract import ZerodhaContract
+    for name in ("ZERODHA_ENABLED", "ZERODHA_CHILD_TRADING_ENABLED", "ZERODHA_MASTER_ENABLED"):
+        monkeypatch.setattr(settings, name, True)
+    monkeypatch.setattr(registry, "ZERODHA_CONTRACT", ZerodhaContract(master_verified=True, live_verified=True))
+    data = (await api_client.get("/api/v1/brokers/matrix", headers=AUTH)).json()["data"]
+    z = {b["id"]: b for b in data["brokers"]}["zerodha"]
+    assert z["child"]["gate_open"] is True and z["master"]["gate_open"] is True                 # the role gates really are open ...
+    assert [(c["master"], c["child"]) for c in data["supported"]] == [(ALICE, ALICE)]            # ... and no Zerodha pair is supported
+    cell = {(c["master"], c["child"]): c for c in data["matrix"]}[("zerodha", "zerodha")]
+    assert cell["supported"] is False and cell["requirement"] == "PAIR_NOT_ALLOWLISTED"

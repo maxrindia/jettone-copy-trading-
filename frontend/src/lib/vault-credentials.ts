@@ -6,8 +6,9 @@
  *
  *   angelone: api_key, pin, totp_secret
  *   groww:    api_key, api_secret
+ *   zerodha:  api_key, api_secret (Kite's login is interactive: a request_token from the browser, never stored)
  */
-export type VaultBroker = "angelone" | "groww";
+export type VaultBroker = "angelone" | "groww" | "zerodha";
 
 export interface VaultFields {
   /** SmartAPI key (Angel One) or API key (Groww). */
@@ -19,7 +20,7 @@ export interface VaultFields {
 }
 
 export function usesVault(broker: string | null | undefined): broker is VaultBroker {
-  return broker === "angelone" || broker === "groww";
+  return broker === "angelone" || broker === "groww" || broker === "zerodha";
 }
 
 function required(broker: VaultBroker, f: VaultFields): string[] {
@@ -41,12 +42,21 @@ export function vaultCredentialBody(broker: VaultBroker, f: VaultFields): Record
 export function vaultCredentialProblem(broker: VaultBroker, f: VaultFields, isNewAccount: boolean): string | null {
   if (!(isNewAccount || hasAnyVaultCredential(broker, f))) return null;
   if (required(broker, f).every((v) => v.trim())) return null;
-  return broker === "angelone"
-    ? "Angel One needs the SmartAPI key, PIN and TOTP secret."
-    : "Groww needs the API key and API secret.";
+  if (broker === "angelone") return "Angel One needs the SmartAPI key, PIN and TOTP secret.";
+  return broker === "zerodha" ? "Zerodha needs the Kite API key and API secret." : "Groww needs the API key and API secret.";
 }
 
 /** The engine route that logs the account in with its stored credentials. */
 export function brokerLoginPath(accountId: string): string {
   return `/api/v1/accounts/${accountId}/broker-login`;
+}
+
+/** Zerodha only: the engine route that returns the Kite login URL (nothing is sent to Zerodha by this call). */
+export function zerodhaLoginUrlPath(accountId: string): string {
+  return `/api/v1/accounts/${accountId}/broker-login-url`;
+}
+
+/** Zerodha only: exchanges the request_token Kite redirected with for today's session. */
+export function zerodhaLoginCompletePath(accountId: string): string {
+  return `/api/v1/accounts/${accountId}/broker-login-complete`;
 }

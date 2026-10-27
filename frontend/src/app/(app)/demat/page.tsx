@@ -10,7 +10,7 @@ import RenewStaticIpDialog from "@/components/demat/RenewStaticIpDialog";
 import AccountCard from "@/components/accounts/AccountCard";
 import AccountsTable, { type AccountsTableRow } from "@/components/accounts/AccountsTable";
 import { confirmAliceBlueLogin, recordReconnectIntent, setReconnectTarget } from "@/lib/alice-blue-login";
-import { reloginRoute, serverBrokerLogin, serverLoginPrompt, UNSUPPORTED_RELOGIN } from "@/lib/relogin";
+import { reloginRoute, serverBrokerLogin, serverLoginPrompt, UNSUPPORTED_RELOGIN, zerodhaInteractiveLogin } from "@/lib/relogin";
 import { useInFlight } from "@/lib/use-in-flight";
 import { accountHistoryPath } from "@/lib/account-history";
 import { emptyMetrics, type AccountMetrics, type AllMetrics } from "@/lib/account-metrics";
@@ -220,6 +220,22 @@ export default function DematPage() {
         else setReloginError(`${card.display_name}: ${result.message}`);
         refresh();
         refreshMetrics();
+      });
+      return;
+    }
+    if (route === "interactive-login") {
+      // Zerodha: Kite's login needs the owner's browser. Open the Kite login URL, then ask for the request_token it redirects with.
+      if (reloginGuard.isBusy(card.id)) return;
+      setReloginError(null);
+      await reloginGuard.run(card.id, async () => {
+        const result = await zerodhaInteractiveLogin(
+          card.id,
+          (url) => { window.open(url, "_blank", "noopener,noreferrer"); },
+          () => window.prompt("After signing in to Kite, paste the request_token (or the full redirect URL) here:"),
+        );
+        if (result.ok) setSavedNotice(`${card.display_name} is logged in.`);
+        else if (result.status !== 0 || !result.message.includes("cancelled")) setReloginError(`${card.display_name}: ${result.message}`);
+        refresh();refreshMetrics();
       });
       return;
     }

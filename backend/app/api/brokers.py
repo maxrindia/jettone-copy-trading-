@@ -11,8 +11,11 @@ from typing import Any, Dict, List
 from fastapi import APIRouter
 
 from app.services import strategy_readiness
+from app.services.brokers.capabilities import Role
+from app.services.brokers.master_source import detection_info
 from app.services.brokers.pairs import SUPPORTED_PAIRS
-from app.services.brokers.registry import all_broker_specs
+from app.services.brokers.profiles import build_profile
+from app.services.brokers.registry import all_broker_specs, get_broker_spec
 
 router = APIRouter(prefix="/brokers", tags=["Brokers (read-only)"])
 
@@ -49,3 +52,48 @@ async def get_broker_pairs() -> Dict[str, Any]:
                      "the Master switch, and skipped at order time as BROKER_PAIR_NOT_SUPPORTED."),
         },
     }
+
+
+# The four brokers the multi-broker architecture covers, in a fixed order for the UI.
+MATRIX_BROKERS = ("alicebluenew", "groww", "angelone", "zerodha")
+
+
+def _role_view(broker: str, role: Role) -> Dict[str, Any]:
+    profile = build_profile(broker)
+    spec = get_broker_spec(broker)
+    return {
+        "gate_open": bool(profile and profile.gate_open(role)),
+        "evidence": profile.role_verification(role).value if profile else "NOT_SUPPORTED",
+        "missing_for_design_bar": [f.value for f in profile.missing_for_design_bar(role)] if profile else [],
+        "registry_reason": spec.reason if spec else "",
+    }
+
+
+@router.get("/matrix")
+async def get_broker_matrix() -> Dict[str, Any]:
+    """The 4 x 4 Master -> Child compatibility matrix with per-role evidence and the recorded Master-detection blocker of each broker.
+    Read-only; reflects the CURRENT flags and evidence; enables nothing."""
+    brokers: List[Dict[str, Any]] = []
+    for b in MATRIX_BROKERS:
+        info = detection_info(b)
+        spec = get_broker_spec(b)
+        brokers.append({
+            "id": b,
+            "support": spec.support.value if spec else "NOT_SUPPORTED",
+            "master": _role_view(b, Role.MASTER),
+            "child": _role_view(b, Role.CHILD),
+            "master_detection": None if info is None else {
+                "mode": info.mode.value, "external_orders_verified": info.external_orders_verified, "blocker": info.blocker,
+            },
+        })
+    cells: List[Dict[str, Any]] = []
+    for master in MATRIX_BROKERS:
+        for child in MATRIX_BROKERS:
+            p = strategy_readiness.pair_readiness(master, child)
+            cells.append({
+                "master": master, "child": child, "supported": p["supported"] is True, "requirement": p["requirement"],
+                "detail": p["detail"], "message": p["message"],
+            })
+    return {"success": True, "data": {"brokers": brokers, "matrix": cells,
+                                      "supported": [c for c in cells if c["supported"]],
+                                      "note": "Only allowlisted pairs with live-verified evidence on both roles are supported."}}

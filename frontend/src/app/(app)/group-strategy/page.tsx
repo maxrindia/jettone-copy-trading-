@@ -32,6 +32,7 @@ import {
 } from "@/lib/dashboard";
 import { formatInr, moneyToneClass } from "@/lib/money";
 import Tooltip from "@/components/ui/Tooltip";
+import BrokerMatrixPanel from "@/components/group-strategy/BrokerMatrixPanel";
 
 interface Account {
   id: string;
@@ -914,6 +915,8 @@ export default function GroupStrategyPage() {
           className="w-full pl-10 pr-4 h-8 py-0 rounded-lg bg-white border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#111111]"
         />
       </div>
+
+      <BrokerMatrixPanel />
 
       {/* Strategies Cards Grid */}
       {stratLoading ? (

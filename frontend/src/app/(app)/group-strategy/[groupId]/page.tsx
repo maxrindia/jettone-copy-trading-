@@ -6,7 +6,7 @@ import { createPortal } from "react-dom";
 import { Plus, Search, RotateCw, X, Play, ArrowLeft, Trash2, Check, ChevronDown, UserPlus } from "lucide-react";
 import { useEngineData, extractError } from "@/lib/use-engine-data";
 import { confirmAliceBlueLogin, recordReconnectIntent, setReconnectTarget } from "@/lib/alice-blue-login";
-import { reloginRoute, serverBrokerLogin, serverLoginPrompt, UNSUPPORTED_RELOGIN } from "@/lib/relogin";
+import { reloginRoute, serverBrokerLogin, serverLoginPrompt, UNSUPPORTED_RELOGIN, zerodhaInteractiveLogin } from "@/lib/relogin";
 import { useInFlight } from "@/lib/use-in-flight";
 import { accountHistoryPath } from "@/lib/account-history";
 import { emptyMetrics, type AccountMetrics, type AllMetrics } from "@/lib/account-metrics";
@@ -304,6 +304,22 @@ export default function GroupStrategyDetailPage() {
         const result = await serverBrokerLogin(acc.id);
         if (result.ok) setMasterNotice(`${acc.display_name} is logged in.`);
         else setMemberError(`${acc.display_name}: ${result.message}`);
+        refreshAccounts();
+      });
+      return;
+    }
+    if (route === "interactive-login") {
+      // Zerodha: Kite's login needs the owner's browser. Open the Kite login URL, then ask for the request_token it redirects with.
+      if (reloginGuard.isBusy(acc.id)) return;
+      setMemberError(null);
+      await reloginGuard.run(acc.id, async () => {
+        const result = await zerodhaInteractiveLogin(
+          acc.id,
+          (url) => { window.open(url, "_blank", "noopener,noreferrer"); },
+          () => window.prompt("After signing in to Kite, paste the request_token (or the full redirect URL) here:"),
+        );
+        if (result.ok) setMasterNotice(`${acc.display_name} is logged in.`);
+        else if (result.status !== 0 || !result.message.includes("cancelled")) setMemberError(`${acc.display_name}: ${result.message}`);
         refreshAccounts();
       });
       return;

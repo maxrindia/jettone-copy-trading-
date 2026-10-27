@@ -414,6 +414,8 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
         // Step 2 - only reached after the save succeeded: the broker login.
         async (saved) => {
           if (isVault) {
+            // Zerodha's login is interactive (a request_token from the browser): it is done from the account card, not here.
+            if (broker === "zerodha") return;
             // Angel One and Groww log in server-side with the stored credentials; no redirect.
             // (Groww also needs today's approval of the API key on Groww Cloud first.)
             if (!saved.id) return;
@@ -674,7 +676,7 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
                   </div>
                 )}
 
-                {/* 3. Zerodha */}
+                {/* 3. Zerodha: Kite Connect API key/secret go to the encrypted vault; the login itself is interactive (Re-login on the card) */}
                 {broker === "zerodha" && (
                   <div className="space-y-2.5">
                     <input
@@ -686,25 +688,22 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
                     />
                     <input
                       type="text"
-                      placeholder="API Key"
+                      placeholder={editingVault ? "API Key (leave blank to keep the stored one)" : "API Key"}
                       value={apiKey}
                       onChange={(e) => setApiKey(e.target.value)}
                       className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#111111]"
                     />
                     <input
                       type="password"
-                      placeholder="API Secret"
+                      autoComplete="off"
+                      placeholder={editingVault ? "API Secret (leave blank to keep the stored one)" : "API Secret (stored encrypted, never shown again)"}
                       value={apiSecret}
                       onChange={(e) => setApiSecret(e.target.value)}
                       className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] font-mono focus:outline-none focus:ring-2 focus:ring-[#111111]"
                     />
-                    <input
-                      type="text"
-                      placeholder="TOTP Key (Optional)"
-                      value={totpKey}
-                      onChange={(e) => setTotpKey(e.target.value)}
-                      className="w-full px-3.5 py-2.5 rounded-lg bg-[#F7F7F7] border border-[#E5E7EB] text-xs text-[#111111] placeholder-[#9CA3AF] focus:outline-none focus:ring-2 focus:ring-[#111111]"
-                    />
+                    <p className="text-[11px] leading-4 text-[#6B7280]">
+                      Kite sign-in is interactive and valid until 6 AM the next day. After saving, use Re-login on the account card to sign in to Kite.
+                    </p>
                   </div>
                 )}
 

@@ -21,6 +21,7 @@ an explicit verification status; anything unverified fails closed.
 | [06-data-model-and-migration.md](06-data-model-and-migration.md) | Additive schema proposal, idempotency keys, migration plan (not run) |
 | [07-risk-testing-rollout.md](07-risk-testing-rollout.md) | Invariants, failure analysis, test plan, staged rollout and rollback |
 | [08-order-book-read-contract.md](08-order-book-read-contract.md) | Explicit order-book read result (ORDERS / EMPTY / UNKNOWN / FAILED) with raw-rows and single-response readers; migrated call sites (poller, sweeper, Master-switch preflight, crash recovery), remaining Alice-specific assumptions, next stages |
+| [09-multi-broker-implementation.md](09-multi-broker-implementation.md) | Implementation record: Zerodha adapter, Master-source contract, broker-aware identity, canonical contracts, 4x4 compatibility matrix, per-broker status, unverified items and blockers |
 
 All diagrams are Mermaid source inside the Markdown files.
 

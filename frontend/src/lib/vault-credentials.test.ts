@@ -8,6 +8,8 @@ import {
   usesVault,
   vaultCredentialBody,
   vaultCredentialProblem,
+  zerodhaLoginCompletePath,
+  zerodhaLoginUrlPath,
 } from "./vault-credentials";
 
 const read = (rel: string) => readFileSync(join(__dirname, "..", rel), "utf8");
@@ -17,16 +19,27 @@ const GROWW_OFF: CatalogEntry = { id: "groww", support: "NOT_SUPPORTED", selecta
 const GROWW_ON: CatalogEntry = { id: "groww", support: "PARTIAL", selectable: true };
 
 describe("vault brokers", () => {
-  it("only Angel One and Groww use the credential vault", () => {
+  it("only Angel One, Groww and Zerodha use the credential vault", () => {
     expect(usesVault("angelone")).toBe(true);
     expect(usesVault("groww")).toBe(true);
-    for (const v of ["alicebluenew", "zerodha", "", null, undefined]) expect(usesVault(v as string)).toBe(false);
+    expect(usesVault("zerodha")).toBe(true);
+    for (const v of ["alicebluenew", "dhan", "", null, undefined]) expect(usesVault(v as string)).toBe(false);
   });
 
   it("builds each broker's vault body from trimmed values", () => {
     const f = { apiKey: " KEY ", secret: " SEC ", totpSecret: " TOTP " };
     expect(vaultCredentialBody("groww", f)).toEqual({ api_key: "KEY", api_secret: "SEC" });
     expect(vaultCredentialBody("angelone", f)).toEqual({ api_key: "KEY", pin: "SEC", totp_secret: "TOTP" });
+    expect(vaultCredentialBody("zerodha", f)).toEqual({ api_key: "KEY", api_secret: "SEC" });
+  });
+
+  it("Zerodha needs the Kite API key and secret, and has its own interactive-login routes", () => {
+    const blank = { apiKey: "", secret: "", totpSecret: "" };
+    expect(vaultCredentialProblem("zerodha", blank, true)).toMatch(/Kite API key and API secret/);
+    expect(vaultCredentialProblem("zerodha", { ...blank, apiKey: "K" }, false)).toMatch(/Kite API key and API secret/);
+    expect(vaultCredentialProblem("zerodha", blank, false)).toBeNull();
+    expect(zerodhaLoginUrlPath("a1")).toBe("/api/v1/accounts/a1/broker-login-url");
+    expect(zerodhaLoginCompletePath("a1")).toBe("/api/v1/accounts/a1/broker-login-complete");
   });
 
   it("requires both Groww fields for a new account and all-or-nothing when editing", () => {
