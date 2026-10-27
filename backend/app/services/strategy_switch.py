@@ -72,6 +72,12 @@ from app.models.strategies import (
 from app.models.trades import CopyTrade, CopyTradeStatus, Order, OrderSide, OrderSource, OrderStatus
 from app.services import strategy_membership as membership
 from app.services.alice_blue.client import order_book_row_id
+from app.services.brokers.order_book_read import (
+    NO_CLIENT as ORDER_BOOK_NO_CLIENT,
+    RAW_READ_NOT_SUPPORTED as ORDER_BOOK_RAW_READ_NOT_SUPPORTED,
+    OrderBookState,
+    read_order_book_rows,
+)
 from app.services import strategy_readiness as readiness
 from app.services.brokers.registry import can_be_master
 from app.services.copy_engine.risk_inputs import (
@@ -440,13 +446,16 @@ async def run_preflight(
     snapshot_at: Optional[datetime] = None
     for acc in scope_ids:
         client = client_provider(str(acc))
-        if client is None:
+        # One raw read, classified explicitly (brokers/order_book_read): ORDERS / EMPTY are a book that was PROVEN read; UNKNOWN and
+        # FAILED are never "nothing open". The blocker codes and messages below are the ones this check has always used.
+        read = await read_order_book_rows(client)
+        if read.reason == ORDER_BOOK_NO_CLIENT:
             add(blockers, "BROKER_VERIFICATION_UNAVAILABLE", acc,
                 "The engine has no active broker session for this account, so its orders and positions "
                 "cannot be verified. Log the account in and try again.")
             continue
 
-        if not callable(getattr(client, "get_order_book_raw", None)):
+        if read.reason == ORDER_BOOK_RAW_READ_NOT_SUPPORTED:
             # This broker's client cannot supply the raw order book the preflight verifies against. Say so, and block:
             # never treat "cannot read" as "nothing open".
             add(blockers, "BROKER_VERIFICATION_UNAVAILABLE", acc,
@@ -454,15 +463,13 @@ async def run_preflight(
                 "working orders cannot be ruled out.")
             continue
 
-        try:
-            book = await client.get_order_book_raw()
-        except Exception as exc:  # never let a broker error read as "nothing open"
-            logger.warning(f"[MasterSwitch] Order book fetch raised for {acc}: {exc}")
-            book = None
-        if book is None:
+        if not read.is_known:  # never let a broker error (FAILED) or an unproven read (UNKNOWN) read as "nothing open"
+            if read.state is OrderBookState.FAILED:
+                logger.warning(f"[MasterSwitch] Order book fetch raised for {acc}: {read.detail}")
             add(blockers, "BROKER_VERIFICATION_UNAVAILABLE", acc,
                 "Alice Blue order book could not be fetched, so working orders cannot be ruled out.")
         else:
+            book = read.rows
             if scope[acc] == "NEW_MASTER":
                 new_master_snapshot = {i for i in (order_book_row_id(r) for r in book) if i}
                 snapshot_at = datetime.now(timezone.utc)

@@ -1,4 +1,3 @@
-import inspect
 import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -14,6 +13,7 @@ from app.models.strategies import GroupStrategy, StrategyMember
 from app.models.audit import SystemEvent, EventSeverity
 from app.services.alice_blue.client import AliceBlueClient, order_book_row_id
 from app.services.alice_blue.types import Position
+from app.services.brokers.order_book_read import OrderBookState, read_order_book_rows
 
 logger = logging.getLogger(__name__)
 
@@ -262,15 +262,14 @@ class ReconciliationEngine:
         if key not in cache:
             ids: Optional[Set[str]] = None
             client = client_provider(key) if client_provider else None
-            raw_fn = getattr(client, "get_order_book_raw", None) if client is not None else None
-            if callable(raw_fn):
-                try:
-                    probe = raw_fn()
-                    rows = await probe if inspect.isawaitable(probe) else None
-                    if isinstance(rows, list):
-                        ids = {order_book_row_id(r) for r in rows if isinstance(r, dict)}
-                except Exception as exc:
-                    logger.warning(f"Crash recovery could not read the order book for {key}: {exc}")
+            # One raw read, classified explicitly (brokers/order_book_read): ids exist only for a book that was PROVEN read - ORDERS,
+            # or EMPTY (an empty list is the broker's own answer). An absent client, a client without the raw read, a None / non-list
+            # result and a raise are all "cannot verify" (ids stays None -> UNVERIFIABLE): never "the order is missing".
+            read = await read_order_book_rows(client)
+            if read.is_known:
+                ids = {order_book_row_id(r) for r in read.rows if isinstance(r, dict)}
+            elif read.state is OrderBookState.FAILED:
+                logger.warning(f"Crash recovery could not read the order book for {key}: {read.detail}")
             cache[key] = ids
         ids = cache[key]
         if ids is None:

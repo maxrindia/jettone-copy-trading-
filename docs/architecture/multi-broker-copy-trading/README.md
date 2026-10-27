@@ -20,6 +20,7 @@ an explicit verification status; anything unverified fails closed.
 | [05-capability-and-compatibility.md](05-capability-and-compatibility.md) | Broker capability matrix, Master → Child compatibility, fail-closed error codes |
 | [06-data-model-and-migration.md](06-data-model-and-migration.md) | Additive schema proposal, idempotency keys, migration plan (not run) |
 | [07-risk-testing-rollout.md](07-risk-testing-rollout.md) | Invariants, failure analysis, test plan, staged rollout and rollback |
+| [08-order-book-read-contract.md](08-order-book-read-contract.md) | Explicit order-book read result (ORDERS / EMPTY / UNKNOWN / FAILED) with raw-rows and single-response readers; migrated call sites (poller, sweeper, Master-switch preflight, crash recovery), remaining Alice-specific assumptions, next stages |
 
 All diagrams are Mermaid source inside the Markdown files.
 

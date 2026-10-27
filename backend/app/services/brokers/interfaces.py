@@ -31,7 +31,9 @@ Known, unavoidable client differences (documented, not "fixed" in R1)
 * `get_funds`: Alice Blue has an extra optional `max_cache_age_sec` (default 10).
 * Failed reads: `get_positions_or_none` returns None on failure (an empty list is a successful empty book);
   `get_order_book` has no explicit "unknown" result and relies on exceptions or the client's own conventions.
-  Treating a failed read as "no orders" is what the design forbids; the poller skips on exceptions.
+  Treating a failed read as "no orders" is what the design forbids. The explicit result is the adapter
+  `brokers/order_book_read.read_order_book` (ORDERS / EMPTY / UNKNOWN / FAILED) over this Protocol; the Master poller
+  and the stale-order sweeper read through it (docs/architecture/multi-broker-copy-trading/08).
 
 Order book versus order lookup
 ------------------------------

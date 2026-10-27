@@ -46,6 +46,7 @@ from app.services.reliability.emergency_stop import (
 )
 from app.services.reliability.follower_fill_syncer import FollowerFillSyncer
 from app.services.reliability.master_order_poller import MasterOrderPoller
+from app.services.brokers.order_book_read import read_order_book_single
 from app.services.reliability.reconciliation import ReconciliationEngine
 from app.services.reliability.restart_recovery import RestartRecovery
 from app.services.reliability.stale_order_sweeper import StaleOrderSweeper
@@ -648,7 +649,15 @@ class EngineLoop:
 
     @staticmethod
     async def _fetch_order_book_for_account(account_id: str):
-        client = account_manager.get_client(account_id)
-        if client is None:
-            return []
-        return await client.get_order_book()
+        """The StaleOrderSweeper's order book for one Child account: the rows when the book was PROVABLY read, else None.
+
+        None is the sweeper's existing "unavailable, leave the trade as it is" answer. Before, a missing client and Alice Blue's
+        failed read (which returns []) both arrived as [], so every TIMEOUT trade of that account was reported CRITICAL
+        "not found in broker order book" although nothing had been read. A genuinely empty book still returns [] and is still
+        treated as a real absence."""
+        read = await read_order_book_single(account_manager.get_client(account_id))      # one broker call for a real Alice client
+        if not read.is_known:
+            logger.warning(f"[EngineLoop] Order book for {account_id} not available to the sweeper ({read.reason}"
+                           f"{': ' + read.detail if read.detail else ''}); its TIMEOUT trades are left for the next run.")
+            return None
+        return list(read.records)

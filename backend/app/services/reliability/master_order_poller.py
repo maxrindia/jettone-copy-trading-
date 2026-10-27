@@ -50,7 +50,6 @@ Two safety rules this module enforces, both deliberately fail-closed
    they are simply never handed to the copy engine.
 """
 import asyncio
-import inspect
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -63,6 +62,7 @@ from app.core.database import AsyncSessionLocal
 from app.models.trades import Order, OrderSide, OrderSource, OrderStatus
 from app.services.alice_blue.client import AliceBlueClient
 from app.services.alice_blue.types import OrderRecord, OrderUpdateEvent
+from app.services.brokers.order_book_read import OrderBookState, read_order_book
 from app.services.copy_engine.pipeline import CopyEnginePipeline
 from app.services.reliability.restart_recovery import DISPATCH_ACTIONS
 from app.services.monitoring.notifier import emit_system_event
@@ -212,17 +212,20 @@ class MasterOrderPoller:
             return 0
 
         is_seed_pass = not self._seeded
-        try:
-            book = await self._fetch_book(client, checked=is_seed_pass)
-        except Exception as exc:
-            logger.warning(f"[MasterOrderPoller] Order book fetch failed: {exc}")
+        read = await read_order_book(client, checked=is_seed_pass)
+        if read.state is OrderBookState.FAILED:
+            logger.warning(f"[MasterOrderPoller] Order book fetch failed: {read.detail}")
             return 0
-        if book is None:
-            # The seed pass must be built on a book that was PROVABLY read. get_order_book() turns a network error or a
-            # non-200 into an empty list, and an empty baseline would make the next poll treat every existing order as
-            # new. Not seeded: the next poll tries again.
-            logger.warning("[MasterOrderPoller] Seed-pass order book could not be read reliably; not seeding, will retry.")
+        if not read.is_known:
+            if is_seed_pass:
+                # The seed pass must be built on a book that was PROVABLY read. get_order_book() turns a network error or a
+                # non-200 into an empty list, and an empty baseline would make the next poll treat every existing order as
+                # new. Not seeded: the next poll tries again.
+                logger.warning("[MasterOrderPoller] Seed-pass order book could not be read reliably; not seeding, will retry.")
+            # A later poll whose read cannot be shown to have succeeded (e.g. Alice Blue's [] on failure) changes nothing:
+            # exactly what processing that empty list did before. Nothing is removed from the seen state.
             return 0
+        book = read.records
 
         dispatched = 0
 
@@ -318,25 +321,6 @@ class MasterOrderPoller:
                 logger.error(f"[MasterOrderPoller] Restart-recovery resume failed closed: {exc}", exc_info=True)
 
         return dispatched
-
-    async def _fetch_book(self, client: Any, *, checked: bool):
-        """
-        The order book, or None when `checked` and it cannot be shown to have been read. A client that offers
-        get_order_book_raw() (None on any failure) is asked first; one without it is read as before.
-        """
-        raw: Any = None
-        if checked:
-            probe_fn = getattr(client, "get_order_book_raw", None)
-            if callable(probe_fn):
-                probe = probe_fn()
-                if inspect.isawaitable(probe):
-                    raw = await probe
-                    if raw is None:
-                        return None
-        book = await client.get_order_book()
-        if checked and isinstance(raw, list) and raw and not book:
-            return None                      # the raw read saw orders but the parsed read found none: inconsistent
-        return book
 
     async def _report_missed_activation_orders(self, records) -> None:
         """Orders placed after the switch snapshot that the expired-snapshot
