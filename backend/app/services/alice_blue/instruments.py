@@ -170,6 +170,14 @@ async def load_and_cache_contract_master(redis: Optional[aioredis.Redis], exchan
                 logger.error(f"Failed to download contract master: HTTP {resp.status_code}")
                 return 0
 
+            # OBSERVE foundation: also retain lot size / expiry / strike from the same response text. Guarded so a terms
+            # problem can never affect the symbol->token cache below.
+            try:
+                from app.services.instruments.terms import store as terms_store
+                terms_store.load_alice(exchange, resp.text)
+            except Exception as terms_err:
+                logger.warning(f"Instrument terms not loaded for {exchange}: {type(terms_err).__name__}")
+
             reader = csv.DictReader(io.StringIO(resp.text))
             for row in reader:
                 sym = row.get("Symbol", "").strip().upper()

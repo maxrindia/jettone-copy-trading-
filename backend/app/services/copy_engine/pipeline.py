@@ -45,6 +45,7 @@ from app.services.alice_blue.instruments import InstrumentResolutionError
 from app.services.brokers.pairs import check_pair
 from app.services.brokers.registry import can_be_child, normalize_broker_id, persisted_order_label
 from app.services.instruments.planner import PlannerSkip, check_child_order
+from app.services.instruments.terms import Outcome, observation_counts, observe_quantity
 from app.services.copy_engine.risk import RiskCheckResult, RiskEngine
 from app.services.copy_engine.risk_inputs import (
     PositionSafetyError,
@@ -268,6 +269,37 @@ class CopyEnginePipeline:
                    "product_type": str(event.product_type)},
         )
         return {"status": "SKIPPED", "reason": decision.code, "detail": decision.detail}
+
+    async def _observe_child_quantity(
+        self, *, point: str, master_account_id: Any, child_broker: Any, child_account_id: Any, master_order_id: Any,
+        symbol: str, exchange: Any, token: Any, quantity: Any,
+    ) -> None:
+        """
+        OBSERVE only. Asks the pure lot / freeze validator what it would say about the FINAL Child quantity at this decision point
+        and logs / counts the answer. It returns nothing, changes no allow / skip / send decision and no broker payload, writes no
+        row, and never raises: every failure is swallowed so a metadata problem can never affect an order. UNKNOWN is logged as
+        unverified, never as safe. No network call: terms come from the in-memory store loaded from the contract master.
+        """
+        try:
+            master_broker = await self._master_broker_id(master_account_id)
+            verdict = observe_quantity(
+                child_broker=normalize_broker_id(child_broker) if child_broker else None,
+                master_broker=master_broker, exchange=exchange, token=token, quantity=quantity,
+                now=datetime.now(timezone.utc),
+            )
+            observation_counts[(point, verdict.outcome.value)] += 1
+            for code in verdict.codes:
+                observation_counts[(point, code)] += 1
+            level = logging.INFO if verdict.outcome is Outcome.ALLOW else logging.WARNING
+            logger.log(
+                level,
+                f"[Pipeline] QUANTITY_OBSERVE[{point}] {verdict.outcome.value} ({','.join(verdict.codes)}) "
+                f"verified_safe={verdict.verified_safe} master_order={master_order_id} child={child_account_id} "
+                f"child_broker={child_broker} {exchange}:{token} {symbol} qty={quantity} freshness={verdict.freshness} "
+                f"(OBSERVE only; the decision is unchanged)",
+            )
+        except Exception as exc:
+            logger.warning(f"[Pipeline] QUANTITY_OBSERVE[{point}] could not run ({type(exc).__name__}); decision unchanged")
 
     def _get_lot_size(self, symbol: str) -> int:
         for prefix, lot in self.lot_sizes.items():
@@ -987,6 +1019,12 @@ class CopyEnginePipeline:
         if target_qty <= 0:
             return {"status": "SKIPPED", "reason": "ZERO_LOT_RESULT"}
 
+        await self._observe_child_quantity(
+            point="PLACE_LIMIT", master_account_id=event.account_id, child_broker=follower.broker, child_account_id=acc_id,
+            master_order_id=event.master_order_id, symbol=event.symbol, exchange=event.exchange, token=event.instrument_id,
+            quantity=target_qty,
+        )
+
         if settings_obj:
             try:
                 daily_loss = await get_daily_loss_today(acc_id)
@@ -1611,6 +1649,12 @@ class CopyEnginePipeline:
         if target_qty <= 0:
             return {"status": "SKIPPED", "reason": "ZERO_LOT_RESULT"}
 
+        await self._observe_child_quantity(
+            point="PLACE_SL", master_account_id=event.account_id, child_broker=follower.broker, child_account_id=acc_id,
+            master_order_id=event.master_order_id, symbol=event.symbol, exchange=event.exchange, token=event.instrument_id,
+            quantity=target_qty,
+        )
+
         if settings_obj:
             try:
                 daily_loss = await get_daily_loss_today(acc_id)
@@ -1930,6 +1974,13 @@ class CopyEnginePipeline:
             base_qty = int(event.quantity * float(multiplier))
             target_qty = (base_qty // lot_size) * lot_size if lot_size > 1 else max(1, base_qty)
 
+            await self._observe_child_quantity(
+                point="MODIFY_PENDING_SL", master_account_id=event.account_id,
+                child_broker=next((a.broker for a, _ in eligible_followers if str(a.id) == acc_id_str), None),
+                child_account_id=acc_id_str, master_order_id=event.master_order_id, symbol=ord_rec.symbol,
+                exchange=ord_rec.exchange, token=ord_rec.instrument_token, quantity=target_qty,
+            )
+
             try:
                 res = await client.modify_order(
                     broker_order_id=ord_rec.broker_order_id,
@@ -2193,6 +2244,12 @@ class CopyEnginePipeline:
             )
             if not risk_res.passed:
                 return await _risk_reject(",".join(risk_res.failures), remaining_qty)
+
+        await self._observe_child_quantity(
+            point="SL_TRIGGER_CONVERSION", master_account_id=event.account_id, child_broker=getattr(account, "broker", None),
+            child_account_id=acc_id_str, master_order_id=master_order_id, symbol=ord_rec.symbol, exchange=ord_rec.exchange,
+            token=ord_rec.instrument_token, quantity=remaining_qty,
+        )
 
         # --- The single broker call: modify the SAME order in place.
         try:
@@ -2998,6 +3055,13 @@ class CopyEnginePipeline:
                     results[acc_id_str] = "SELL_REPRICE_BLOCKED: INSUFFICIENT_LONG_POSITION"
                     continue
 
+            await self._observe_child_quantity(
+                point="MODIFY_MASTER", master_account_id=master_account_id,
+                child_broker=getattr(follower_info.get(acc_id_str, (None,))[0], "broker", None), child_account_id=acc_id_str,
+                master_order_id=master_order_id, symbol=ord_rec.symbol, exchange=ord_rec.exchange,
+                token=ord_rec.instrument_token, quantity=remaining_qty,
+            )
+
             try:
                 res = await client.modify_order(
                     broker_order_id=ord_rec.broker_order_id,
@@ -3784,6 +3848,12 @@ class CopyEnginePipeline:
                 session.add(audit)
                 await session.commit()
             return {"status": "SKIPPED", "reason": "ZERO_LOT_RESULT"}
+
+        await self._observe_child_quantity(
+            point="PLACE_MARKET", master_account_id=event.account_id, child_broker=follower.broker, child_account_id=acc_id,
+            master_order_id=event.master_order_id, symbol=event.symbol, exchange=event.exchange, token=event.instrument_id,
+            quantity=target_qty,
+        )
 
         # Risk Evaluation
         if settings_obj:

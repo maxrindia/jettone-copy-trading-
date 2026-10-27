@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     # has been reviewed. It is not a pair gate and enables no broker.
     CANONICAL_MAPPING_ENFORCED: bool = False
 
+    # Lot / freeze quantity validation. OBSERVE is the only implemented mode: at each Child final-quantity point the pipeline
+    # logs and counts what a validator would say (services/instruments/terms.py) and changes NO allow / skip / send decision.
+    # Any other value is treated as OBSERVE; enforcement does not exist yet.
+    QUANTITY_VALIDATION_MODE: str = "OBSERVE"
+
     # TEMPORARY test switch: true skips the follower SELL position checks in
     # both places - initial SELL placement (_enforce_sell_position_safety) and
     # the SELL child LIMIT->MARKET reprice (handle_master_modification) - so a
