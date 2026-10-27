@@ -102,6 +102,32 @@ def compute_marketable_limit_price(side: str, reference_price: Optional[Decimal]
     return (reference_price * (Decimal("1") - buffer_fraction)).quantize(Decimal("0.01"))
 
 
+# The persisted product of a Child order is the Master event's product string (what placement derived the broker product from).
+# Only the values on which ALL THREE placement paths (LIMIT, SL, MARKET) agree are mapped here. DELIVERY, CARRYFORWARD and MARGIN are
+# deliberately absent: the LIMIT and SL paths send them as CNC / NRML / NRML but the MARKET path sends all three as MIS, and which path
+# placed a Child order is not persisted (a MARKET copy is stored as a LIMIT), so the product actually sent cannot be established. An
+# unknown value is likewise NOT defaulted to MIS: a modify must never guess which holding it touches. Alice Blue itself reports
+# INTRADAY / LONGTERM / MTF, so real Alice Masters never produce the absent values.
+_MODIFY_CNC_PRODUCTS = frozenset({"CNC", "LONGTERM"})
+_MODIFY_NRML_PRODUCTS = frozenset({"NRML", "MTF"})
+_MODIFY_MIS_PRODUCTS = frozenset({"MIS", "INTRADAY"})
+
+
+def broker_product_for_modify(stored_product: Any) -> Optional[ProductType]:
+    """The broker product of an already-placed Child order, from its persisted `product_type`; None when it is missing or not one
+    of the known values. The pipeline passes this to `modify_order` so a client that needs the product (Angel One) gets the order's
+    own, and one that does not (Alice Blue, Groww) ignores it. None is passed through, never replaced by a default: a client that
+    requires a product then refuses the modify before anything is sent."""
+    value = str(stored_product).upper() if stored_product is not None else ""
+    if value in _MODIFY_CNC_PRODUCTS:
+        return ProductType.CNC
+    if value in _MODIFY_NRML_PRODUCTS:
+        return ProductType.NRML
+    if value in _MODIFY_MIS_PRODUCTS:
+        return ProductType.MIS
+    return None
+
+
 class CopyEnginePipeline:
     """
     Main trade & limit order replication coordinator:
@@ -1890,6 +1916,7 @@ class CopyEnginePipeline:
                     symbol=ord_rec.symbol,
                     exchange=ord_rec.exchange,
                     order_type=modify_order_type,
+                    product_type=broker_product_for_modify(ord_rec.product_type),
                 )
                 if res.category == OrderResultCategory.SUCCESS:
                     async with AsyncSessionLocal() as session:
@@ -2154,6 +2181,7 @@ class CopyEnginePipeline:
                 order_type=OrderType.LIMIT,
                 symbol=ord_rec.symbol,
                 exchange=ord_rec.exchange,
+                product_type=broker_product_for_modify(ord_rec.product_type),
             )
             modify_note = f"modify {res.category.value}: {res.message}"
         except Exception as exc:
@@ -2955,6 +2983,7 @@ class CopyEnginePipeline:
                     symbol=ord_rec.symbol,
                     exchange=ord_rec.exchange,
                     order_type=modify_order_type,
+                    product_type=broker_product_for_modify(ord_rec.product_type),
                 )
                 if res.category == OrderResultCategory.SUCCESS:
                     try:

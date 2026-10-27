@@ -95,10 +95,12 @@ Master Alice; Children: Alice A, Groww B, Zerodha C, Angel D.
   `VERIFIED_DOCS`; Master detection at `UNVERIFIED`. A contract boolean cannot raise a rating past its ceiling.
 - **Angel One.** Nothing is rated above `UNVERIFIED`. `ANGEL_CONTRACT.verified` only records that the response
   keys are filled in, not whether they came from documentation or a capture, so it is not rated `VERIFIED_DOCS`.
-- **Angel One modify limitation (blocks enabling it).** The pipeline's modify calls never pass `product_type`.
-  Alice Blue's and Groww's modify bodies do not use a product, but `AngelOneClient.modify_order` requires one and
-  raises without it, so an Angel One Child order cannot currently be modified through the pipeline. This must be
-  resolved and tested before Angel One can be enabled (see 07 §7.2); it is not an R1 change.
+- **Angel One modify product (resolved in code; Angel One stays blocked for other reasons).** `AngelOneClient.modify_order`
+  requires a product and refuses without one. The pipeline's three modify calls now pass `broker_product_for_modify(order.product_type)`:
+  the product derived from the Child order's persisted Master product, mapped only for the values on which the LIMIT, SL and MARKET
+  placement paths agree (MIS / INTRADAY, CNC / LONGTERM, NRML / MTF). Any other value (including DELIVERY, CARRYFORWARD and MARGIN, which
+  the MARKET path sends as MIS but the other paths do not) is passed as None, so Angel One refuses before sending. Alice Blue and Groww
+  ignore the argument and their wire payloads are unchanged. Tests: `test_modify_product_propagation.py`.
 - **Segments.** A segment's rating applies to all of its listed products and order types; per-cell evidence is not
   recorded. `supports()` refuses unverified and documentation-only segments unless the caller states the weaker
   level it accepts.

@@ -276,12 +276,12 @@ def test_every_pipeline_call_binds_on_every_real_client(cls):
         signature.bind(None, *([None] * n_positional), **{k: None for k in keywords})   # TypeError = mismatch
 
 
-def test_pipeline_omits_product_type_when_modifying_and_alice_blue_ignores_it():
-    """No pipeline modify call supplies product_type, and Alice Blue's modify_order body never reads the
-    parameter (its MIS default is signature-only; no product field is sent). So the omission changes nothing for
-    Alice. It is a different matter for Angel One, whose body requires a product (see the next test)."""
+def test_pipeline_supplies_product_type_when_modifying_and_alice_blue_ignores_it():
+    """Every pipeline modify call supplies product_type (from the Child order's persisted product), and Alice Blue's
+    modify_order body never reads the parameter (its MIS default is signature-only; no product field is sent). So supplying it
+    changes nothing for Alice; Angel One, whose body requires a product (see the next test), now receives the order's own."""
     modify_calls = [kw for m, _, kw in pipeline_calls() if m == "modify_order"]
-    assert modify_calls and all("product_type" not in kw for kw in modify_calls)
+    assert len(modify_calls) == 3 and all("product_type" in kw for kw in modify_calls)
 
     tree = ast.parse(textwrap.dedent(inspect.getsource(AliceBlueClient.modify_order)))
     (func,) = [n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)]
@@ -289,11 +289,12 @@ def test_pipeline_omits_product_type_when_modifying_and_alice_blue_ignores_it():
     assert reads == []
 
 
-def test_angel_one_modify_requires_a_product_the_pipeline_never_supplies():
-    """Known limitation, recorded in the architecture documents (07 §7.2, 05 §5.5): Angel One's modify raises
-    without a product and the pipeline never passes one, so an Angel One order cannot be modified through the
-    current pipeline. It must be resolved and tested before Angel One can be enabled."""
+def test_angel_one_modify_requires_a_product_and_the_pipeline_now_supplies_it():
+    """Angel One's modify refuses without a product (it never defaults one), and the pipeline now passes the Child order's
+    own persisted product at all three modify call sites (broker_product_for_modify; behaviour in
+    test_modify_product_propagation.py). This was a recorded blocker (architecture documents 07 §7.2, 05 §5.5); the other Angel
+    One blockers are unchanged."""
     src = inspect.getsource(AngelOneClient.modify_order)
     assert "product type is required to modify an Angel One order" in src
     assert sig_params(AngelOneClient, "modify_order")[-1].default is None
-    assert all("product_type" not in kw for m, _, kw in pipeline_calls() if m == "modify_order")
+    assert all("product_type" in kw for m, _, kw in pipeline_calls() if m == "modify_order")
