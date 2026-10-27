@@ -33,6 +33,18 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 
 from app.models.base import Base
 from app.models.accounts import Account, AccountType, CopySetting, QuantityMode
+from sqlalchemy.dialects.postgresql import UUID as _PGUUID
+from sqlalchemy.ext.compiler import compiles
+
+
+@compiles(_PGUUID, "sqlite")
+def _uuid_is_text_on_sqlite(type_, compiler, **kw):
+    """The models declare PostgreSQL's UUID. SQLite renders that as the bare declared type "UUID", which has NUMERIC affinity, so a
+    uuid4 whose 32 hex digits look like a number (about one in a million: all digits, or digits + 'e' + digits) is silently converted to
+    INTEGER / REAL on insert and read back as e.g. `inf` ("UUID(hex=inf)" in the full suite, never in an isolated rerun). CHAR(32) has TEXT
+    affinity, which stores the hex string untouched. Test-process, SQLite-only: PostgreSQL keeps its native UUID and production is unchanged."""
+    return "CHAR(32)"
+
 
 _sqlite = TEST_DATABASE_URL.startswith("sqlite")
 test_engine = create_async_engine(
