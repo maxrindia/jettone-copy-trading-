@@ -354,6 +354,11 @@ def _audit_issue_message(row: AuditLog) -> str:
         parts.append(detail)
     if row.reason_code:
         parts.append(row.reason_code)
+    # For these two stable codes the readable text lives in the audit row's metadata (see audit_reason_fields in the pipeline).
+    if row.reason_code in ("ORDER_OUTCOME_UNKNOWN", "ORDER_FAILED_SEE_DETAIL") and isinstance(row.metadata_payload, dict):
+        detail = row.metadata_payload.get("detail")
+        if detail:
+            parts.append(str(detail))
     return " — ".join(parts)
 
 

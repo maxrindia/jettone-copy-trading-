@@ -81,6 +81,30 @@ def unresolved_reason(order_res) -> str:
     return (order_res.message or "Order submission timed out without confirmation")[:300]
 
 
+# audit_logs.reason_code is varchar(100): PostgreSQL rejects a longer value (SQLite does not), which made the audit write of an
+# ambiguous-send outcome fail. The code stays short and machine-readable; the full text goes to the audit row's metadata.
+AUDIT_REASON_CODE_MAX = 100
+AUDIT_CODE_OUTCOME_UNKNOWN = "ORDER_OUTCOME_UNKNOWN"
+AUDIT_CODE_FAILED_SEE_DETAIL = "ORDER_FAILED_SEE_DETAIL"
+
+
+def audit_reason_fields(order_res, unresolved: bool):
+    """(reason_code, metadata) for the COPY_EXECUTED / COPY_FAILED audit row of one Child send. Success -> (None, None).
+    An ambiguous send always gets the stable code ORDER_OUTCOME_UNKNOWN with the full sanitized text in metadata. A definite
+    failure keeps its broker message as the code when it fits the column (unchanged behaviour), otherwise a stable code with
+    the message in metadata. Pure: it neither sends nor resends anything and does not decide the outcome."""
+    if unresolved:
+        return AUDIT_CODE_OUTCOME_UNKNOWN, {"detail": unresolved_reason(order_res), "category": order_res.category.value}
+    if order_res.category == OrderResultCategory.SUCCESS:
+        return None, None
+    message = order_res.message
+    if message and len(message) <= AUDIT_REASON_CODE_MAX:
+        return message, None
+    if not message:
+        return None, None
+    return AUDIT_CODE_FAILED_SEE_DETAIL, {"detail": message[:300], "category": order_res.category.value}
+
+
 def compute_marketable_limit_price(side: str, reference_price: Optional[Decimal]) -> Optional[Decimal]:
     """
     The marketable-LIMIT price for a given side, from a confirmed reference
@@ -1232,6 +1256,7 @@ class CopyEnginePipeline:
         # change (already finalized above), never consulted by any
         # dashboard/reconciliation code today (grepped: nothing reads
         # AuditLog.event_type == "COPY_EXECUTED" anywhere).
+        audit_code, audit_meta = audit_reason_fields(order_res, unresolved)
         async with AsyncSessionLocal() as session:
             session.add(
                 AuditLog(
@@ -1243,10 +1268,8 @@ class CopyEnginePipeline:
                     side=event.side,
                     quantity=target_qty,
                     price=limit_price,
-                    reason_code=(
-                        unresolved_reason(order_res) if unresolved
-                        else order_res.message if order_res.category != OrderResultCategory.SUCCESS else None
-                    ),
+                    reason_code=audit_code,
+                    metadata_payload=audit_meta,
                 )
             )
             await session.commit()
@@ -3960,6 +3983,7 @@ class CopyEnginePipeline:
                 if not unresolved:
                     saved_trade.completed_at = datetime.now(timezone.utc)   # an unresolved send is not complete
 
+                audit_code, audit_meta = audit_reason_fields(order_res, unresolved)
                 audit = AuditLog(
                     # Keyed off order_res.category (the broker's actual
                     # outcome), not ct_status/ord_status - SUBMITTED/OPEN is
@@ -3973,10 +3997,8 @@ class CopyEnginePipeline:
                     side=event.side,
                     quantity=target_qty,
                     price=event.price,
-                    reason_code=(
-                        unresolved_reason(order_res) if unresolved
-                        else order_res.message if order_res.category != OrderResultCategory.SUCCESS else None
-                    ),
+                    reason_code=audit_code,
+                    metadata_payload=audit_meta,
                 )
                 session.add(audit)
                 await session.commit()
