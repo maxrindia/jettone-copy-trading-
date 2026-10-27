@@ -6,6 +6,7 @@ JSON blob in `broker_credentials`:
 
   angelone: api_key, pin, totp_secret
   groww:    api_key, api_secret
+  zerodha:  api_key, api_secret
 
 Entries are write-only: `describe()` reports which fields are configured, never
 their values. Plaintext exists only inside `decrypt_payload()` callers (client
@@ -22,9 +23,11 @@ from app.services.angel_one.client import totp_now
 VAULT_FIELDS: Dict[str, Tuple[str, ...]] = {
     "angelone": ("api_key", "pin", "totp_secret"),
     "groww": ("api_key", "api_secret"),
+    "zerodha": ("api_key", "api_secret"),
 }
 ANGEL_FIELDS = VAULT_FIELDS["angelone"]
 GROWW_FIELDS = VAULT_FIELDS["groww"]
+ZERODHA_FIELDS = VAULT_FIELDS["zerodha"]
 
 
 class CredentialError(ValueError):
@@ -61,7 +64,11 @@ class GrowwCredentials(_Creds):
     _fields = GROWW_FIELDS
 
 
-_TYPES = {"angelone": AngelCredentials, "groww": GrowwCredentials}
+class ZerodhaCredentials(_Creds):
+    _fields = ZERODHA_FIELDS
+
+
+_TYPES = {"angelone": AngelCredentials, "groww": GrowwCredentials, "zerodha": ZerodhaCredentials}
 
 
 def _clean(broker: str, raw: Dict[str, Any]) -> Dict[str, str]:
@@ -124,6 +131,15 @@ def validate_groww_payload(raw: Dict[str, Any]) -> GrowwCredentials:
 
 def decrypt_groww(ciphertext: str) -> GrowwCredentials:
     return decrypt_payload("groww", ciphertext)  # type: ignore[return-value]
+
+
+# Zerodha entry points.
+def validate_zerodha_payload(raw: Dict[str, Any]) -> ZerodhaCredentials:
+    return validate_payload("zerodha", raw)  # type: ignore[return-value]
+
+
+def decrypt_zerodha(ciphertext: str) -> ZerodhaCredentials:
+    return decrypt_payload("zerodha", ciphertext)  # type: ignore[return-value]
 
 
 def describe(row: Optional[Any], broker: Optional[str] = None) -> Dict[str, Any]:

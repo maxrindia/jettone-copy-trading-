@@ -20,8 +20,10 @@ from app.services.alice_blue.exceptions import AuthenticationError, IPNotWhiteli
 from app.models.accounts import Account, ApiCredential, BrokerCredential, CopySetting, AccountType
 from app.services.angel_one.client import AngelAuthError
 from app.services.groww.client import GrowwAuthError
+from app.services.zerodha.client import ZerodhaAuthError
 from app.services.brokers.angel_builder import build_angel_client
 from app.services.brokers.groww_builder import build_groww_client
+from app.services.brokers.zerodha_builder import build_zerodha_client
 from app.services.brokers import credential_vault
 from app.services.brokers.login_guard import LoginThrottled
 from app.models.trades import CopyTrade, CopyTradeStatus, Order, OrderStatus
@@ -882,7 +884,8 @@ async def get_broker_credentials_status(account_id: uuid.UUID, db: AsyncSession 
 
 
 _VAULT_BUILDERS = {"angelone": (build_angel_client, "Angel One", AngelAuthError),
-                   "groww": (build_groww_client, "Groww", GrowwAuthError)}
+                   "groww": (build_groww_client, "Groww", GrowwAuthError),
+                   "zerodha": (build_zerodha_client, "Zerodha", ZerodhaAuthError)}
 
 
 async def _vault_login(account_id: uuid.UUID, db: AsyncSession, redis: Any, manager) -> Account:
@@ -891,8 +894,15 @@ async def _vault_login(account_id: uuid.UUID, db: AsyncSession, redis: Any, mana
     account = await _load_vault_account(account_id, db)
     broker = require_engine_broker(account.broker).id
     # Looked up at call time so the module-level builders stay patchable in tests.
-    builder = {"angelone": build_angel_client, "groww": build_groww_client}[broker]
+    builder = {"angelone": build_angel_client, "groww": build_groww_client, "zerodha": build_zerodha_client}[broker]
     _, name, auth_error = _VAULT_BUILDERS[broker]
+    if broker == "zerodha":
+        # Kite's login needs the owner's browser (a request_token): there is no server-side login to run.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Zerodha login is interactive: GET /accounts/{id}/broker-login-url, sign in, then POST the request_token to "
+                   "/accounts/{id}/broker-login-complete.",
+        )
     try:
         client = builder(account, redis)
     except credential_vault.CredentialError as exc:
@@ -930,6 +940,60 @@ async def broker_login(
     manager=Depends(get_runtime_client_manager),
 ):
     return await _vault_login(account_id, db, redis, manager)
+
+
+async def _zerodha_account_and_client(account_id: uuid.UUID, db: AsyncSession, redis: Any):
+    account = await _load_vault_account(account_id, db)
+    if require_engine_broker(account.broker).id != "zerodha":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This operation is for Zerodha accounts only.")
+    try:
+        return account, build_zerodha_client(account, redis)
+    except credential_vault.CredentialError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.get("/{account_id}/broker-login-url")
+async def zerodha_login_url(account_id: uuid.UUID, db: AsyncSession = Depends(get_db), redis: Any = Depends(get_redis)):
+    """The Kite login URL for this account's api_key. Nothing is sent to Zerodha; the owner opens it in a browser."""
+    _, client = await _zerodha_account_and_client(account_id, db, redis)
+    try:
+        return {"login_url": client.login_url()}
+    finally:
+        await client.aclose()
+
+
+@router.post("/{account_id}/broker-login-complete", response_model=AccountResponse)
+async def zerodha_login_complete(
+    account_id: uuid.UUID,
+    payload: Dict[str, Any] = Body(...),     # parsed by hand: the request_token must not be echoed back by a validation error
+    db: AsyncSession = Depends(get_db),
+    redis: Any = Depends(get_redis),
+    manager=Depends(get_runtime_client_manager),
+):
+    """Exchanges the single-use request_token Kite redirected with for an access token (valid until 6 AM the next day)."""
+    account, client = await _zerodha_account_and_client(account_id, db, redis)
+    token = payload.get("request_token") if isinstance(payload, dict) else None
+    if not isinstance(token, str):
+        await client.aclose()
+        raise HTTPException(status_code=400, detail="request_token is required.")
+    try:
+        await client.complete_login(token)
+    except LoginThrottled as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=exc.message,
+                            headers={"Retry-After": str(exc.retry_after)}) from None
+    except ZerodhaAuthError as exc:
+        account.session_valid = False
+        await db.commit()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Zerodha login failed: {exc}") from exc
+    finally:
+        await client.aclose()
+    account.session_valid = True
+    account.last_authenticated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(account)
+    account.runtime_client_status = await _sync_runtime_client(manager, account, db, redis, report_failure=True)
+    await db.refresh(account)
+    return account
 
 
 @router.post("/{account_id}/angel-login", response_model=AccountResponse)

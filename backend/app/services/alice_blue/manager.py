@@ -89,6 +89,9 @@ class AliceBlueAccountManager:
         if spec.id == "groww":
             from app.services.brokers.groww_builder import build_groww_client
             return build_groww_client(acc, redis)
+        if spec.id == "zerodha":
+            from app.services.brokers.zerodha_builder import build_zerodha_client
+            return build_zerodha_client(acc, redis)
         require_alice_blue(acc.broker)
         # Parse optional proxy URL from notes field
         proxy_url: Optional[str] = None
@@ -229,7 +232,7 @@ class AliceBlueAccountManager:
 
     @staticmethod
     def _auto_login_ok(client: Any) -> bool:
-        """False for clients (Angel One, Groww) whose login contacts the broker and
+        """False for clients (Angel One, Groww, Zerodha) whose login contacts the broker and
         must only ever happen on an explicit request, never at engine start. Looked
         up on the class so a mock client cannot masquerade as one."""
         return getattr(type(client), "AUTO_LOGIN_ON_STARTUP", True) is not False

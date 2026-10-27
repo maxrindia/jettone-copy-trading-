@@ -94,7 +94,7 @@ def test_a_missing_or_unknown_exchange_fails_closed(exchange, detail):
     assert code(check(exchange=exchange)) == ("SEGMENT_NOT_SUPPORTED", detail)
 
 
-@pytest.mark.parametrize("broker", ["zerodha", "5paisa", "", "nonsense"])
+@pytest.mark.parametrize("broker", ["dhan", "5paisa", "", "nonsense"])
 def test_an_unknown_or_unsupported_child_broker_fails_closed_without_a_profile(broker):
     skip = check(child_broker=broker)
     if broker == "":                                  # an empty stored broker is the historical Alice Blue default
@@ -448,3 +448,8 @@ async def test_the_master_broker_is_read_once_and_a_failure_fails_closed(db_sess
 async def test_an_unknown_master_account_has_no_broker(db_session):
     assert await pipeline()._master_broker_id(uuid.uuid4()) is None
     assert await pipeline()._master_broker_id("not-a-uuid") is None
+
+
+def test_zerodha_now_has_a_profile_but_a_copy_to_it_still_fails_closed():
+    skip = check(child_broker="zerodha")
+    assert skip is not None and skip.code == "INSTRUMENT_UNMAPPED"

@@ -131,7 +131,7 @@ def test_vault_entries_are_broker_specific():
     assert vault.describe(type("R", (), {"encrypted_payload": blob, "broker": "groww"})()) == \
         {"configured": True, "fields": ["api_key", "api_secret"]}
     with pytest.raises(vault.CredentialError):
-        vault.validate_payload("zerodha", SECRETS)
+        vault.validate_payload("dhan", SECRETS)
 
 
 def test_angel_vault_behaviour_is_unchanged():

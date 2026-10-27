@@ -116,6 +116,15 @@ class Settings(BaseSettings):
     # in Groww's instruments documentation, or load a downloaded file instead.
     GROWW_INSTRUMENT_MASTER_URL: str = ""
 
+    # Zerodha Kite Connect support, built from the official v3 documentation only (nothing observed live). Default false
+    # = Zerodha accounts cannot be added, logged in or traded and no request is ever sent to api.kite.trade.
+    ZERODHA_ENABLED: bool = False
+    # Independent gates, as for Groww: ENABLED alone allows setup and the interactive login only.
+    ZERODHA_CHILD_TRADING_ENABLED: bool = False
+    # Has no effect until ZerodhaContract.master_verified is set in code: Zerodha's pages do not say whether orders placed
+    # outside the API key appear in GET /orders, so that needs a supervised capture.
+    ZERODHA_MASTER_ENABLED: bool = False
+
     # VPS public IP — must be whitelisted on Alice Blue Developer Portal for each account's App.
     # All API/WebSocket calls to Alice Blue originate from this IP.
     STATIC_VPS_IP: str = ""

@@ -25,6 +25,7 @@ from typing import Dict, FrozenSet, Optional
 from app.core.config import settings
 from app.services.angel_one.contract import ANGEL_CONTRACT, contract_is_usable
 from app.services.groww.contract import GROWW_CONTRACT, contract_is_usable as groww_contract_is_usable
+from app.services.zerodha.contract import ZERODHA_CONTRACT, contract_is_usable as zerodha_contract_is_usable
 
 
 class BrokerSupport(str, Enum):
@@ -171,8 +172,49 @@ def _groww_spec() -> BrokerSpec:
     )
 
 
+_ZERODHA_ID = "zerodha"
+_ZERODHA_ALIASES = frozenset({"kite", "kite connect", "kiteconnect", "zerodha kite"})
+_ZERODHA_OFF = (
+    "Zerodha Kite Connect support is built from the documentation only and disabled (ZERODHA_ENABLED=false)."
+)
+_ZERODHA_SETUP_ONLY = (
+    "Credential setup and interactive login only: Zerodha cannot be a strategy Child or Master "
+    "(ZERODHA_CHILD_TRADING_ENABLED / ZERODHA_MASTER_ENABLED are false)."
+)
+_ZERODHA_NO_CONTRACT = "Zerodha login is enabled, but its response contract is not usable, so it cannot be used as a Child."
+
+
+def _zerodha_spec() -> BrokerSpec:
+    if not settings.ZERODHA_ENABLED:
+        return BrokerSpec(
+            id=_ZERODHA_ID, support=BrokerSupport.NOT_SUPPORTED, capabilities=BrokerCapabilities(),
+            order_label="ZERODHA", aliases=_ZERODHA_ALIASES, reason=_ZERODHA_OFF,
+            session_prefix="zerodha:session:", uses_vault=True,
+        )
+    contract_ok = zerodha_contract_is_usable(ZERODHA_CONTRACT)
+    child_ready = bool(settings.ZERODHA_CHILD_TRADING_ENABLED) and contract_ok
+    master_ready = bool(settings.ZERODHA_MASTER_ENABLED) and contract_ok and ZERODHA_CONTRACT.master_verified
+    if master_ready:
+        reason = "Master" + (" and Child" if child_ready else " only") + " (equity and F&O, NSE/BSE/NFO)."
+    elif child_ready:
+        reason = "Child only (NSE/BSE/NFO). Master order detection is not verified."
+    elif not settings.ZERODHA_CHILD_TRADING_ENABLED and not settings.ZERODHA_MASTER_ENABLED:
+        reason = _ZERODHA_SETUP_ONLY
+    else:
+        reason = _ZERODHA_NO_CONTRACT if not contract_ok else (
+            "Zerodha Master detection is not verified: Kite's documentation does not say whether orders placed outside the API key "
+            "appear in the order book."
+        )
+    return BrokerSpec(
+        id=_ZERODHA_ID, support=BrokerSupport.PARTIAL,
+        capabilities=BrokerCapabilities(login=True, as_master=master_ready, as_child=child_ready),
+        order_label="ZERODHA", aliases=_ZERODHA_ALIASES, reason=reason,
+        session_prefix="zerodha:session:", uses_vault=True,
+    )
+
+
 _NOT_YET = (
-    "flattrade", "zerodha", "dhan", "fyers", "shoonya", "upstox",
+    "flattrade", "dhan", "fyers", "shoonya", "upstox",
     "kotakneo", "5paisa", "icicidirect", "hdfcsky",
 )
 
@@ -185,11 +227,13 @@ for _bid in _NOT_YET:
         reason="No adapter is implemented for this broker yet.",
     )
 
-_ALIASES: Dict[str, str] = {_ANGEL_ID: _ANGEL_ID, _GROWW_ID: _GROWW_ID}
+_ALIASES: Dict[str, str] = {_ANGEL_ID: _ANGEL_ID, _GROWW_ID: _GROWW_ID, _ZERODHA_ID: _ZERODHA_ID}
 for _a in _ANGEL_ALIASES:
     _ALIASES[_a] = _ANGEL_ID
 for _a in _GROWW_ALIASES:
     _ALIASES[_a] = _GROWW_ID
+for _a in _ZERODHA_ALIASES:
+    _ALIASES[_a] = _ZERODHA_ID
 for _spec in _STATIC.values():
     _ALIASES[_spec.id] = _spec.id
     for _a in _spec.aliases:
@@ -214,6 +258,8 @@ def get_broker_spec(broker_id: Optional[str]) -> Optional[BrokerSpec]:
         return _angel_spec()
     if canonical == _GROWW_ID:
         return _groww_spec()
+    if canonical == _ZERODHA_ID:
+        return _zerodha_spec()
     return _STATIC.get(canonical)
 
 
@@ -221,6 +267,7 @@ def all_broker_specs() -> Dict[str, BrokerSpec]:
     out = dict(_STATIC)
     out[_ANGEL_ID] = _angel_spec()
     out[_GROWW_ID] = _groww_spec()
+    out[_ZERODHA_ID] = _zerodha_spec()
     return out
 
 

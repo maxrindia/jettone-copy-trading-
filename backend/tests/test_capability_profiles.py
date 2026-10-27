@@ -324,7 +324,7 @@ def test_angel_one_is_never_rated_above_unverified(monkeypatch, contract_verifie
 
 # ── brokers without an adapter ─────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("broker", ["zerodha", "5paisa", "dhan", "fyers"])
+@pytest.mark.parametrize("broker", ["5paisa", "dhan", "fyers"])
 def test_brokers_without_an_adapter_support_nothing(broker):
     p = build_profile(broker)
     assert p is not None and p.segments == ()

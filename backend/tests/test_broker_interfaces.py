@@ -126,10 +126,12 @@ def test_alice_and_angel_expose_no_public_per_order_query(mock_redis, name):
     assert not {n for n in public if "lookup" in n or "by_reference" in n or n in ("get_order", "get_order_status")}
 
 
-def test_groww_exposes_the_documented_per_order_query(mock_redis):
-    """Groww (GET /v1/order/detail + status-by-reference) has public, read-only per-order queries built from its documentation.
-    They have not been observed live (profile ORDER_LOOKUP = VERIFIED_DOCS)."""
+def test_groww_and_zerodha_expose_the_documented_per_order_query(mock_redis):
+    """Groww (GET /v1/order/detail + status-by-reference) and Zerodha (GET /orders/:id + the `tag` lookup) have public, read-only
+    per-order queries built from their documentation. Neither has been observed live (profile ORDER_LOOKUP = VERIFIED_DOCS)."""
+    from zerodha_helpers import FakeKite, make_client as make_zerodha
     assert isinstance(groww(mock_redis), OrderStatusProvider)
+    assert isinstance(make_zerodha(mock_redis, FakeKite()), OrderStatusProvider)
 
 
 def test_groww_private_reference_lookup_still_backs_ambiguous_create_resolution(mock_redis):

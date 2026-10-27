@@ -16,7 +16,10 @@ and the tests pin the table.
 * Angel One     - adapter exists, but `ANGEL_CONTRACT.verified` only records that the response keys are filled
                   in, not whether they came from documentation or a capture, so nothing is rated above
                   UNVERIFIED.
-* Everything else in the catalog (Zerodha, 5paisa, ...) has no adapter: every feature NOT_SUPPORTED, no segments.
+* Zerodha       - adapter built from the official Kite Connect v3 documentation only (`docs_verified`); nothing has
+                  been observed on a real account, so nothing is rated above VERIFIED_DOCS and Master detection (whether
+                  orders placed outside the API key appear in the order book is undocumented) stays UNVERIFIED.
+* Everything else in the catalog (5paisa, ...) has no adapter: every feature NOT_SUPPORTED, no segments.
 
 A profile's `gates` always mirror the CURRENT registry capabilities, so flipping `GROWW_CHILD_TRADING_ENABLED`
 changes `gate_open` but never the evidence.
@@ -152,12 +155,53 @@ def _angel_profile(spec: BrokerSpec) -> CapabilityProfile:
     )
 
 
+# ── Zerodha ────────────────────────────────────────────────────────────────────────────────
+
+# Nothing is live: every feature is capped at VERIFIED_DOCS. LOGIN is interactive (a browser request_token).
+ZERODHA_FEATURE_CEILING: Mapping[Feature, Verification] = {
+    F.LOGIN: V.VERIFIED_DOCS,
+    F.MASTER_DETECTION: V.UNVERIFIED,
+    F.CHILD_PLACEMENT: V.VERIFIED_DOCS,
+    F.MODIFY: V.VERIFIED_DOCS,
+    F.CANCEL: V.VERIFIED_DOCS,
+    F.ORDER_STATUS: V.VERIFIED_DOCS,
+    F.ORDER_LOOKUP: V.VERIFIED_DOCS,         # GET /orders/:order_id and the `tag` lookup are public client methods
+    F.POSITIONS: V.VERIFIED_DOCS,
+    F.FUNDS: V.VERIFIED_DOCS,
+    F.HOLDINGS: V.NOT_SUPPORTED,
+    F.CLIENT_REFERENCE: V.VERIFIED_DOCS,     # `tag`
+}
+ZERODHA_SEGMENT_CEILING: Mapping[Tuple[str, str], Tuple[Verification, frozenset]] = {
+    ("NSE", "CASH"): (V.VERIFIED_DOCS, frozenset({"MIS", "CNC"})),
+    ("BSE", "CASH"): (V.VERIFIED_DOCS, frozenset({"MIS", "CNC"})),
+    ("NFO", "OPT"): (V.UNVERIFIED, frozenset({"MIS", "NRML"})),     # derivative symbol mapping is unverified (see zerodha/instruments.py)
+    ("NFO", "FUT"): (V.UNVERIFIED, frozenset({"MIS", "NRML"})),
+}
+
+
+def _zerodha_profile(spec: BrokerSpec) -> CapabilityProfile:
+    contract = registry.ZERODHA_CONTRACT
+    base = V.VERIFIED_LIVE if contract.live_verified else (V.VERIFIED_DOCS if contract.docs_verified else V.UNVERIFIED)
+    derived = {feature: base for feature in ZERODHA_FEATURE_CEILING}
+    derived[F.MASTER_DETECTION] = base if contract.master_verified else V.UNVERIFIED
+    derived[F.HOLDINGS] = V.NOT_SUPPORTED
+    return CapabilityProfile(
+        broker_id=spec.id,
+        features=_capped(derived, ZERODHA_FEATURE_CEILING),
+        segments=tuple(
+            SegmentCaps(ex, seg, products, _ALL_ORDER_TYPES, V.lowest(base, ceiling))
+            for (ex, seg), (ceiling, products) in ZERODHA_SEGMENT_CEILING.items()
+        ),
+        gates=_gates(spec),
+    )
+
+
 def _empty_profile(spec: BrokerSpec) -> CapabilityProfile:
     """No adapter: nothing is evidenced and nothing is supported."""
     return CapabilityProfile(broker_id=spec.id, features={}, segments=(), gates=_gates(spec))
 
 
-_BUILDERS = {"alicebluenew": _alice_profile, "groww": _groww_profile, "angelone": _angel_profile}
+_BUILDERS = {"alicebluenew": _alice_profile, "groww": _groww_profile, "angelone": _angel_profile, "zerodha": _zerodha_profile}
 
 
 def build_profile(broker_id: Optional[str]) -> Optional[CapabilityProfile]:
