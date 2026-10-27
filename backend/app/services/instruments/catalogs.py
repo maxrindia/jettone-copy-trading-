@@ -11,7 +11,8 @@ Honesty rules
 * `loaded_at` is the store's COMPLETE-snapshot time, or None when completeness cannot be established (rows added
   directly, repeated loads, an empty load). None makes the comparator report MASTER_DATA_STALE, never "fresh".
 * Only fields the store really holds are mapped. Everything else stays None (unverified): Angel One has no ISIN, lot or
-  tick; Groww has no tick size, and its lot size is mapped only when the CSV actually stated one.
+  tick; Groww has no tick size, and its lot size is mapped only when the CSV actually stated one; Zerodha has no ISIN in its
+  instruments dump (so a Zerodha row can only be SYMBOL_ONLY), and its lot size is mapped only when the dump stated one.
 * Duplicate rows are passed through as separate candidates so the comparator can answer AMBIGUOUS.
 * Alice Blue is a deliberate NOT-LOADED stub: its in-process table mixes contract-master rows with hand-written
   placeholders, keeps no ISIN, and records no provenance. It is not used as catalog data.
@@ -24,7 +25,7 @@ from typing import Iterable, Optional, Protocol, Tuple
 from app.services.instruments.model import BrokerInstrument, BrokerView, CanonicalInstrument
 from app.services.instruments.normalizer import normalize_exchange, normalize_isin, normalize_symbol
 
-ALICE_ID, GROWW_ID, ANGEL_ID = "alicebluenew", "groww", "angelone"
+ALICE_ID, GROWW_ID, ANGEL_ID, ZERODHA_ID = "alicebluenew", "groww", "angelone", "zerodha"
 
 
 class InstrumentCatalog(Protocol):
@@ -97,6 +98,35 @@ class AngelCatalog:
         return BrokerView(self.broker_id, _relevant(master, rows), store.snapshot_loaded_at)
 
 
+class ZerodhaCatalog:
+    """Equity rows of Zerodha's instruments dump. The dump has no ISIN column, so a Zerodha row is matched by exchange + tradingsymbol
+    only and can never be a definitive (ISIN) MATCH. Derivative rows are not exposed here: see instruments/contracts.py."""
+    broker_id = ZERODHA_ID
+
+    def __init__(self, store: Optional[object] = None) -> None:
+        self._store = store
+
+    def _resolve_store(self):
+        if self._store is not None:
+            return self._store
+        from app.services.zerodha import instruments as zerodha_instruments
+        return zerodha_instruments.store
+
+    def view_for(self, master: CanonicalInstrument) -> BrokerView:
+        store = self._resolve_store()
+        if not getattr(store, "size", 0):
+            return BrokerView(self.broker_id, None, None)
+        rows = (
+            BrokerInstrument(
+                broker_id=self.broker_id, exchange=i.exchange, trading_symbol=i.tradingsymbol, token=i.instrument_token or None,
+                lot_size=i.lot_size if i.lot_size_stated else None, tick_size=i.tick_size,
+            )
+            for i in store.iter_instruments()
+            if not i.is_derivative
+        )
+        return BrokerView(self.broker_id, _relevant(master, rows), store.snapshot_loaded_at)
+
+
 class AliceCatalog:
     """Always NOT LOADED in R4b (see the module docstring). It reads nothing."""
     broker_id = ALICE_ID
@@ -106,5 +136,5 @@ class AliceCatalog:
 
 
 def default_catalogs() -> Tuple[InstrumentCatalog, ...]:
-    """The three adapters bound to the live process-wide stores, ordered by broker id."""
-    return (AliceCatalog(), AngelCatalog(), GrowwCatalog())
+    """The four adapters bound to the live process-wide stores, ordered by broker id."""
+    return (AliceCatalog(), AngelCatalog(), GrowwCatalog(), ZerodhaCatalog())

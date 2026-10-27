@@ -366,7 +366,7 @@ def test_the_default_catalogs_use_the_live_process_wide_stores(monkeypatch):
     live = groww_store(groww_row())
     monkeypatch.setattr(groww_instruments, "store", live)
     by_id = {c.broker_id: c for c in default_catalogs()}
-    assert list(by_id) == ["alicebluenew", "angelone", "groww"] and [c.broker_id for c in default_catalogs()] == sorted(by_id)
+    assert list(by_id) == ["alicebluenew", "angelone", "groww", "zerodha"] and [c.broker_id for c in default_catalogs()] == sorted(by_id)
     assert by_id["groww"].view_for(master().instrument).candidates is not None
     assert by_id["alicebluenew"].view_for(master().instrument).candidates is None
 

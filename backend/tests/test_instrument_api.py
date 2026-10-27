@@ -108,7 +108,7 @@ async def test_an_explicit_isin_can_produce_a_real_match_and_writes_nothing(clie
     assert data["input"] == {"exchange": "NSE", "symbol": "RELIANCE-EQ", "isin": REL}
     assert data["normalization"]["key"] == f"EQ|NSE|ISIN|{REL}" and data["min_evidence"] == "VERIFIED_DOCS"
     res = {x["broker_id"]: x for x in data["results"]}
-    assert list(res) == ["alicebluenew", "angelone", "groww"]
+    assert list(res) == ["alicebluenew", "angelone", "groww", "zerodha"]
     assert res["groww"]["verdict"] == "MATCH" and res["groww"]["group"] == "matched"
     assert res["groww"]["matched"]["isin"] == REL and "token" not in res["groww"]["matched"]
     assert res["alicebluenew"]["verdict"] == "CATALOG_NOT_LOADED"
@@ -165,7 +165,7 @@ async def test_an_empty_report_is_honest_about_coverage(client, groww_loaded):
     assert states["angelone"]["loaded"] is False and "no production loader" in states["angelone"]["note"].lower()
     assert states["groww"]["loaded"] is True and "equity" in states["groww"]["note"].lower()
     assert any("no ISIN" in n and "MATCH" in n for n in data["notes"])
-    assert set(data["by_broker"]) == {"alicebluenew", "angelone", "groww"}
+    assert set(data["by_broker"]) == {"alicebluenew", "angelone", "groww", "zerodha"}
 
 
 @pytest.mark.asyncio

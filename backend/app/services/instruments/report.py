@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from app.core.config import settings
 from app.services.brokers.profiles import build_profile
 from app.services.instruments import crosswalk_evidence
-from app.services.instruments.catalogs import ALICE_ID, ANGEL_ID, GROWW_ID, InstrumentCatalog, default_catalogs
+from app.services.instruments.catalogs import ALICE_ID, ANGEL_ID, GROWW_ID, ZERODHA_ID, InstrumentCatalog, default_catalogs
 from app.services.instruments.comparator import compare_instrument
 from app.services.instruments.model import BrokerView, CanonicalInstrument
 from app.services.instruments.normalizer import normalize_equity
@@ -26,6 +26,8 @@ COVERAGE_NOTES = {
     ANGEL_ID: "Angel One: no production loader populates its catalog, and its data has no ISIN, lot or tick size.",
     GROWW_ID: "Groww: equity (CASH/EQ) rows on NSE and BSE only; an instrument that is missing may simply have been "
               "filtered out when the master was loaded.",
+    ZERODHA_ID: "Zerodha: equity rows (NSE/BSE) only, loaded from Kite's instruments dump when enabled; the dump has no ISIN, so a "
+                "Zerodha row can only be matched by symbol and is never a definitive MATCH.",
 }
 MASTER_NOTE = ("Persisted Master orders carry no ISIN, so their identity is symbol-only and can never be a definitive "
                "MATCH. Candidate counts show catalog presence, not parity.")
