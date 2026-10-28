@@ -385,7 +385,9 @@ def test_the_migration_is_one_idempotent_additive_step_after_the_previous_head()
     cfg = Config(str(backend / "alembic.ini"))
     cfg.set_main_option("script_location", str(backend / "alembic"))
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["0013_orders_instrument_token"]
+    # 0013 is no longer the head (later migrations build on it), but the chain must still be a single line that contains it.
+    assert len(script.get_heads()) == 1
+    assert "0013_orders_instrument_token" in {r.revision for r in script.walk_revisions()}
     rev = script.get_revision("0013_orders_instrument_token")
     assert rev.down_revision == "0012_broker_credentials"
     text = (backend / "alembic" / "versions" / "0013_orders_instrument_token.py").read_text(encoding="utf-8")

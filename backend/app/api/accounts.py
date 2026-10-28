@@ -130,6 +130,53 @@ async def _sync_static_ip_expiry(db: AsyncSession, account: Account) -> None:
             other.proxy_expires_on = account.proxy_expires_on
 
 
+async def _find_account_by_identity(db: AsyncSession, broker: Optional[str], external_id: str) -> Optional[Account]:
+    """The account (deleted or not) with this broker AND this external user id, compared case-insensitively. The same id string
+    on another broker is a different account. Stored broker values are compared through the registry, so legacy aliases
+    ('aliceblue', NULL) resolve to the same broker."""
+    wanted = normalize_broker_id(broker)
+    rows = (await db.execute(select(Account).where(func.lower(Account.alice_user_id) == external_id.strip().lower()))).scalars().all()
+    for row in rows:
+        if normalize_broker_id(row.broker) == wanted:
+            return row
+    return None
+
+
+def _identity_secret(broker: str, creds: credential_vault._Creds) -> Optional[str]:
+    """The credential field that can only belong to ONE broker account, used to refuse registering the same real account twice.
+
+    Groww: the API key + secret pair. Angel One: the TOTP secret (unique per client). Zerodha: none. A Kite app (API key) can serve
+    several Kite users, so it does not identify an account; the signed-in Kite user id is checked at login instead."""
+    if broker == "groww":
+        return f"{creds.api_key}\n{creds.api_secret}"
+    if broker == "angelone":
+        return str(creds.totp_secret).strip().upper()
+    return None
+
+
+async def _find_duplicate_credentials(db: AsyncSession, account: Account, broker: str, creds: credential_vault._Creds) -> Optional[Account]:
+    """Another live account of the same broker that already holds this identity secret, or None. Reads the stored vault entries
+    in memory only (an unreadable one is skipped); nothing is logged or returned except the other account's own display name."""
+    mine = _identity_secret(broker, creds)
+    if mine is None:
+        return None
+    rows = (
+        await db.execute(
+            select(Account, BrokerCredential)
+            .join(BrokerCredential, BrokerCredential.account_id == Account.id)
+            .where(Account.deleted_at.is_(None), Account.id != account.id, BrokerCredential.broker == broker)
+        )
+    ).all()
+    for other, row in rows:
+        try:
+            theirs = _identity_secret(broker, credential_vault.decrypt_payload(broker, row.encrypted_payload))
+        except Exception:
+            continue
+        if theirs is not None and theirs == mine:
+            return other
+    return None
+
+
 @router.get("", response_model=List[AccountResponse])
 async def list_accounts(
     db: AsyncSession = Depends(get_db),
@@ -420,29 +467,23 @@ async def create_account(
             detail=f"Broker '{payload.broker}' can only be a Child account; it cannot be created as a Master.",
         )
 
-    # Check if an account with this alice_user_id already exists (including soft-deleted)
-    query = select(Account).where(func.lower(Account.alice_user_id) == clean_user_id.lower())
-    res = await db.execute(query)
-    existing_acc = res.scalar_one_or_none()
+    # An account is its broker plus the broker's own user id (case-insensitive). The same id string on another broker is a
+    # different account; the same id on the same broker (including a soft-deleted one) is this account.
+    canonical_broker = normalize_broker_id(payload.broker) or "alicebluenew"
+    existing_acc = await _find_account_by_identity(db, canonical_broker, clean_user_id)
 
     if existing_acc:
         if existing_acc.deleted_at is None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Account with this Alice Blue user ID already exists",
+                detail="An account with this user ID already exists for this broker.",
             )
-        # Restore soft-deleted account with new details. It keeps the credentials of the broker it was
-        # created with, so it can only come back on that same broker.
-        if normalize_broker_id(payload.broker) != normalize_broker_id(existing_acc.broker):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="This account was previously registered with a different broker and cannot be re-added with another.",
-            )
+        # Restore the soft-deleted account of THIS broker with the new details; it keeps its own stored credentials.
         account = existing_acc
         account.deleted_at = None
         account.account_type = payload.account_type
         account.display_name = payload.display_name
-        account.broker = payload.broker or "alicebluenew"
+        account.broker = canonical_broker
         account.is_active = payload.is_active
         account.session_valid = False
         account.last_authenticated_at = None
@@ -454,7 +495,7 @@ async def create_account(
             account_type=payload.account_type,
             display_name=payload.display_name,
             alice_user_id=clean_user_id,
-            broker=payload.broker or "alicebluenew",
+            broker=canonical_broker,
             is_active=payload.is_active,
             session_valid=False,
             last_authenticated_at=None,
@@ -498,10 +539,10 @@ async def create_account(
     except IntegrityError as exc:
         await db.rollback()
         err_text = str(exc).lower()
-        if "unique" in err_text and "alice_user_id" in err_text:
+        if "unique" in err_text and ("alice_user_id" in err_text or "uq_accounts_broker_external_id" in err_text):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="Account with this Alice Blue user ID already exists",
+                detail="An account with this user ID already exists for this broker.",
             )
         logger.error(f"Account creation failed with unexpected integrity error: {exc}")
         raise HTTPException(
@@ -558,6 +599,8 @@ async def record_reconnect_intent(
     account = res.scalar_one_or_none()
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
+    # The intent is Alice Blue's redirect bookkeeping, keyed by the Alice user id; another broker's account must never write it.
+    ensure_alice_blue_account(account)
 
     if redis:
         await redis.set(
@@ -639,15 +682,15 @@ async def handle_demat_callback(
         except ValueError:
             pass
 
+    # Looked up by Alice Blue user id: only an Alice Blue account can match, so another broker's account that happens to
+    # share the id string is never picked up by this Alice Blue login.
     if not target_account and payload.target_user_id:
-        query = select(Account).where(func.lower(Account.alice_user_id) == payload.target_user_id.strip().lower(), Account.deleted_at.is_(None))
-        res = await db.execute(query)
-        target_account = res.scalar_one_or_none()
+        candidate = await _find_account_by_identity(db, "alicebluenew", payload.target_user_id)
+        target_account = candidate if candidate is not None and candidate.deleted_at is None else None
 
     if not target_account and payload.returned_user_id:
-        query = select(Account).where(func.lower(Account.alice_user_id) == payload.returned_user_id.strip().lower(), Account.deleted_at.is_(None))
-        res = await db.execute(query)
-        target_account = res.scalar_one_or_none()
+        candidate = await _find_account_by_identity(db, "alicebluenew", payload.returned_user_id)
+        target_account = candidate if candidate is not None and candidate.deleted_at is None else None
 
     if not target_account:
         raise HTTPException(status_code=404, detail="No matching account found for this session")
@@ -809,11 +852,12 @@ async def sign_out_account(
 
     if redis:
         await redis.delete(session_key_for(account.broker, account.id))
-        await redis.delete(f"alice:reconnect_intent:{account.alice_user_id.strip().upper()}")
+        if is_alice_blue(account.broker):
+            await redis.delete(f"alice:reconnect_intent:{account.alice_user_id.strip().upper()}")
 
     await db.commit()
     await db.refresh(account)
-    logger.info(f"[{account.id}] Signed out of Alice Blue session on Jettone's side (manual).")
+    logger.info(f"[{account.id}] Signed out on Jettone's side (manual).")
     return account
 
 
@@ -862,6 +906,13 @@ async def set_broker_credentials(
         creds = credential_vault.validate_payload(broker, payload)
     except credential_vault.CredentialError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    duplicate = await _find_duplicate_credentials(db, account, broker, creds)
+    if duplicate is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"These credentials already belong to another {broker} account ({duplicate.display_name}). "
+                   "Each broker account can be added only once.",
+        )
     ciphertext = credential_vault.encrypt_payload(broker, creds)
     row = account.broker_credential
     if row is None:
@@ -1120,7 +1171,13 @@ async def delete_account(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
 
     account.deleted_at = datetime.now(timezone.utc)
+    account.session_valid = False
+    account.last_authenticated_at = None
     await db.commit()
+    # Drop only THIS account's cached session (keyed by its own id); no other account's session is touched. The stored
+    # credentials stay, so the account can be restored on the same broker.
+    if redis:
+        await redis.delete(session_key_for(account.broker, account.id))
     await _sync_runtime_client(manager, account, db, redis, report_failure=False)
 
 

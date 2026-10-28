@@ -115,12 +115,14 @@ async def test_a_rejected_change_leaves_the_runtime_client_registered(db_session
 
 
 @pytest.mark.asyncio
-async def test_a_deleted_account_can_only_come_back_on_its_original_broker(client, db_session, flag_on):
+async def test_a_deleted_account_only_ever_comes_back_on_its_original_broker(client, db_session, flag_on):
+    """Identity is (broker, user id). The same id string on ANOTHER broker is a different account: it is created separately and
+    never revives, re-brokers or touches the deleted Alice Blue record. Only the same broker + id restores the original."""
     created = (await client.post("/api/v1/accounts", json=alice_payload("ALC-DEL"), headers=TOKEN)).json()
     assert (await client.delete(f"/api/v1/accounts/{created['id']}", headers=TOKEN)).status_code == 204
-    wrong = await client.post("/api/v1/accounts", json=alice_payload("ALC-DEL", broker="groww"), headers=TOKEN)
-    assert wrong.status_code == 409 and "different broker" in wrong.json()["detail"]
-    async with TestingSessionLocal() as s:                                    # still deleted, still Alice Blue
+    other = await client.post("/api/v1/accounts", json=alice_payload("ALC-DEL", broker="groww"), headers=TOKEN)
+    assert other.status_code == 201 and other.json()["id"] != created["id"] and other.json()["broker"] == "groww"
+    async with TestingSessionLocal() as s:                                    # the deleted record is untouched: still deleted, still Alice Blue
         row = (await s.execute(select(Account).where(Account.id == uuid.UUID(created["id"])))).scalar_one()
         assert row.deleted_at is not None and row.broker == "alicebluenew"
     same = await client.post("/api/v1/accounts", json=alice_payload("ALC-DEL"), headers=TOKEN)

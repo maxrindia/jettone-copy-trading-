@@ -8,10 +8,12 @@ from sqlalchemy import (
     DateTime,
     Enum as SQLEnum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
+    func,
 )
 from sqlalchemy import JSON
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
@@ -49,7 +51,9 @@ class Account(Base, TimestampMixin):
         nullable=False,
     )
     display_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    alice_user_id: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    # The broker's own user / client id. Not unique by itself: identity is (broker, this id, case-insensitive), enforced by
+    # the uq_accounts_broker_external_id index below (migration 0014).
+    alice_user_id: Mapped[str] = mapped_column(String(50), nullable=False)
     broker: Mapped[Optional[str]] = mapped_column(String(50), default="alicebluenew", nullable=True)
     visibility: Mapped[str] = mapped_column(String(10), default="PRIVATE", nullable=False)
 
@@ -85,6 +89,17 @@ class Account(Base, TimestampMixin):
         uselist=False,
         cascade="all, delete-orphan",
     )
+
+
+# One account per (broker, external user id). A NULL broker is Alice Blue, as everywhere else in the registry, and the id is
+# compared case-insensitively, so "AB1234" and "ab1234" on the same broker are the same account while the same string on two
+# different brokers are two accounts.
+Index(
+    "uq_accounts_broker_external_id",
+    func.coalesce(Account.broker, "alicebluenew"),
+    func.lower(Account.alice_user_id),
+    unique=True,
+)
 
 
 class ApiCredential(Base, TimestampMixin):
