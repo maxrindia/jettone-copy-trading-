@@ -89,7 +89,7 @@ Key facts:
 
 | Table | Role today |
 |---|---|
-| `accounts` | `account_type` (MASTER/FOLLOWER), `broker` (string, default `alicebluenew`), session flags |
+| `accounts` | `account_type` (MASTER/FOLLOWER), `broker` (string, default `alicebluenew`), `alice_user_id` (the broker's own user id), session flags; `uq(coalesce(broker,'alicebluenew'), lower(alice_user_id))`: one account per broker and external user id (migration 0014) |
 | `api_credentials` / `broker_credentials` | Alice secret / encrypted vault for Groww & Angel |
 | `group_strategies` | `master_account_id`, `trading_enabled` |
 | `strategy_members` | Child links: `multiplier`, `trading_enabled`; `uq(strategy_id, account_id)` |
@@ -99,7 +99,7 @@ Key facts:
 | `copy_trades` | per-Child execution record; `status ∈ {PENDING, SUBMITTED, SUCCESS, REJECTED, TIMEOUT, FAILED, SKIPPED, RECONCILIATION_REQUIRED}` |
 | `audit_logs` / `system_events` | reason codes (`RISK_REJECTED`, `INSUFFICIENT_LONG_POSITION`, `CHILD_BROKER_NOT_READY`, …) |
 
-Migrations: `0001`–`0012`, latest `0012_broker_credentials`.
+Migrations: `0001`–`0014`, latest `0014_account_identity_by_broker` (broker-scoped account identity; see `09-multi-broker-implementation.md` section 7).
 
 ## 1.6 Test and deployment constraints
 

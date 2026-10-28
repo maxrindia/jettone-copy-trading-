@@ -93,3 +93,46 @@ Unverified (each is a recorded blocker, none is assumed):
 
 The twelve acceptance criteria in the README apply unchanged. In addition, for Zerodha: a supervised capture of an externally placed order
 in `GET /orders`; confirmation of the static-IP rule; the modify-semantics capture; and owner approval recorded against a specific pair.
+
+## 7. Multi-account setup, status and migration 0014
+
+Setting an account up is separate from copy trading with it. Everything below concerns onboarding and account management; it adds no
+supported pair, opens no Master or Child gate, and changes no trading setting.
+
+**Account identity.** An account is its broker plus the broker's own user id (`accounts.alice_user_id`), compared case-insensitively. The
+same id string on two brokers is two accounts; the same broker and id (including a soft-deleted one) is one account, and re-registering
+it restores that record instead of creating another. A NULL broker means Alice Blue. The database enforces this with the unique index
+`uq_accounts_broker_external_id`. The Alice Blue OAuth callback and the reconnect-intent bookkeeping only ever match Alice Blue accounts.
+
+**Credentials.** Each account has its own credential row (Alice Blue `api_credentials`, the others the encrypted vault). Registering the
+same real account twice is refused: the same Groww key and secret, or the same Angel One TOTP secret, on another account returns 409
+without storing anything. Zerodha is not checked this way because one Kite app key can serve several users; its signed-in Kite user id is
+checked at login instead. A login, a failed login, a relogin or a delete changes only the account it was for.
+
+**Status and capability fields.** Every account response carries, from the server:
+
+* `connection_status`: `CONNECTED`, `DISCONNECTED`, `STATUS_UNKNOWN`, `NEEDS_CREDENTIALS`, `BROKER_NOT_ENABLED` or `UNSUPPORTED_BROKER`,
+  with a plain-language `connection_detail` and `credentials_configured`.
+* `broker_capabilities`: whether the broker can be set up and signed in, whether it may be a Master or a Child, the reason each blocked
+  role is blocked, and an `identity` block (below). These come straight from the registry; the UI only displays them.
+
+**Identity assurance.** A successful login proves the credentials worked, not which broker account they belong to. `identity.level` is
+`CONFIRMED` (Zerodha: Kite returns the signed-in user id and Jettone requires it to match), `CREDENTIAL_BOUND` (Alice Blue and Angel One:
+the login is made with the account's own id and secrets, and Jettone does not use the response to confirm the identity independently) or
+`NOT_AVAILABLE` (Groww: the token response Jettone uses carries no account identity, so the name entered for the account is a label, not
+a verified identity). A connected Groww account says so in `connection_detail` and shows "Identity not confirmed". This is informational
+and never grants or removes a role.
+
+**Session store outage.** If Redis cannot be reached while the accounts list is built, the list still loads and the affected accounts
+report `STATUS_UNKNOWN`. Nothing is written to the database, so no account is falsely signed out and none needs a new login when Redis
+returns. The list also no longer invents a latency figure.
+
+**Migration `0014_account_identity_by_broker`.** It drops the single-column unique constraint on `alice_user_id` and creates the
+broker-scoped unique index. It also adds `accounts.broker` if missing (the same idempotent statement the engine runs at startup), because
+no earlier migration creates that column. It deletes and rewrites no row, and it refuses to run if existing rows would collide. The
+downgrade refuses while two accounts share an id across brokers. **Back up the database and review this migration before deploying it;
+it has been run only on disposable local databases and has not been applied to production.**
+
+**Not verified.** No real login has been performed for any non-Alice broker; the flows are tested with fake transports. Groww's identity
+cannot be confirmed at login (above). Whether Angel One treats a shared SmartAPI key as one identity is unknown, so its duplicate check
+uses the TOTP secret.
