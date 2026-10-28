@@ -1,9 +1,11 @@
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 from app.models.accounts import AccountType, QuantityMode
+from app.services.brokers.account_status import broker_capabilities as _broker_capabilities
+from app.services.brokers.account_status import connection_status as _connection_status
 from app.services.static_ip import account_static_ip_host, normalize_ip_address, static_ip_status
 
 
@@ -103,8 +105,31 @@ class AccountResponse(AccountBase):
     strategy_role: Optional[Literal["MASTER", "CHILD"]] = None
     strategy_name: Optional[str] = None
     copy_settings: Optional[CopySettingResponse] = None
+    # Whether this account has the credentials its broker needs (api_credentials for Alice Blue, the encrypted vault for the
+    # others). None = the endpoint did not look it up; it is never read as "missing".
+    credentials_configured: Optional[bool] = None
+    # False = the session store could not be reached when this response was built, so the connection state is unknown.
+    session_store_available: Optional[bool] = None
     created_at: datetime
     updated_at: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def broker_capabilities(self) -> Dict[str, Any]:
+        """What the server says this account's broker can do: setup/login, Master, Child, and why a blocked role is blocked."""
+        return _broker_capabilities(self.broker)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def connection_status(self) -> str:
+        """CONNECTED / DISCONNECTED / STATUS_UNKNOWN / NEEDS_CREDENTIALS / BROKER_NOT_ENABLED / UNSUPPORTED_BROKER."""
+        return _connection_status(self.broker, self.session_valid, self.credentials_configured, self.session_store_available)[0]
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def connection_detail(self) -> str:
+        """A plain-language explanation of connection_status, including what to do next."""
+        return _connection_status(self.broker, self.session_valid, self.credentials_configured, self.session_store_available)[1]
 
     @computed_field  # type: ignore[prop-decorator]
     @property

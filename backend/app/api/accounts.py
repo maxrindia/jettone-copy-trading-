@@ -10,6 +10,7 @@ from sqlalchemy import func, select, case
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.database import get_db
@@ -130,6 +131,19 @@ async def _sync_static_ip_expiry(db: AsyncSession, account: Account) -> None:
             other.proxy_expires_on = account.proxy_expires_on
 
 
+async def _annotate_credentials(db: AsyncSession, accounts: List[Account]) -> None:
+    """Sets `credentials_configured` on each account: whether it holds the credentials its broker needs (api_credentials for
+    Alice Blue, the encrypted vault for the others). Two id-only queries; no secret is read or decrypted."""
+    accounts = [a for a in accounts if a is not None]
+    if not accounts:
+        return
+    ids = [a.id for a in accounts]
+    alice_ids = set((await db.execute(select(ApiCredential.account_id).where(ApiCredential.account_id.in_(ids)))).scalars().all())
+    vault_ids = set((await db.execute(select(BrokerCredential.account_id).where(BrokerCredential.account_id.in_(ids)))).scalars().all())
+    for a in accounts:
+        a.credentials_configured = (a.id in alice_ids) if is_alice_blue(a.broker) else (a.id in vault_ids)
+
+
 async def _find_account_by_identity(db: AsyncSession, broker: Optional[str], external_id: str) -> Optional[Account]:
     """The account (deleted or not) with this broker AND this external user id, compared case-insensitively. The same id string
     on another broker is a different account. Stored broker values are compared through the registry, so legacy aliases
@@ -193,10 +207,12 @@ async def list_accounts(
 
     now_utc = datetime.now(timezone.utc)
     db_changed = False
+    corrected: List[Account] = []
 
     for acc in accounts:
         # Check if session is valid for TODAY (same calendar date & within 18h TTL)
         is_live = False
+        session_store_ok = True
         if acc.session_valid and acc.last_authenticated_at:
             auth_dt = acc.last_authenticated_at
             # Ensure auth_dt is timezone-aware for comparison
@@ -209,24 +225,42 @@ async def list_accounts(
             # Check if token exists in Redis
             has_redis_token = True
             if redis:
-                cached_token = await redis.get(session_key_for(acc.broker, acc.id))
-                if not cached_token:
+                try:
+                    cached_token = await redis.get(session_key_for(acc.broker, acc.id))
+                except Exception as exc:
+                    # Cannot tell whether the session exists. Do not claim it is live, and do NOT record it as signed out either:
+                    # the sessions are still there, and clearing the flag here would force a re-login after a Redis blip.
+                    logger.warning(f"[{acc.id}] Session store unreachable while checking connection state ({type(exc).__name__}).")
+                    session_store_ok = False
+                    cached_token = None
+                if session_store_ok and not cached_token:
                     has_redis_token = False
 
             is_live = is_same_day and is_within_ttl and has_redis_token
 
+        if not session_store_ok:
+            # Report it for this response only: set_committed_value changes the in-memory value without marking the row dirty,
+            # so nothing is written to the database.
+            set_committed_value(acc, "session_valid", False)
+            acc.session_store_available = False
+            acc.ping_ms = None
+            continue
+
         if acc.session_valid != is_live:
             acc.session_valid = is_live
             db_changed = True
+            corrected.append(acc)
 
-        if is_live:
-            ms_val = 28 + (int(abs(hash(acc.id)) + now_utc.second) % 20)
-            acc.ping_ms = ms_val
-        else:
-            acc.ping_ms = None
+        # No latency is measured here, so none is reported (this used to invent a number for every live account).
+        acc.ping_ms = None
 
     if db_changed:
         await db.commit()
+        # The UPDATE re-stamps updated_at in SQL, which expires it on the instance; reload the corrected rows now (as the other
+        # endpoints do) so serializing the response never has to do IO. Without this, the one request that corrects a stale
+        # "connected" flag fails.
+        for acc in corrected:
+            await db.refresh(acc)
 
     # Current role per account (strategy_account_roles) - the same source the
     # Dashboard's strategy rows use. Never derived from `account_type`.
@@ -239,6 +273,7 @@ async def list_accounts(
     for acc in accounts:
         acc.strategy_role, acc.strategy_name = roles.get(acc.id, (None, None))
 
+    await _annotate_credentials(db, accounts)
     return accounts
 
 
@@ -561,6 +596,7 @@ async def create_account(
     )
     created = res.scalar_one()
     created.runtime_client_status = runtime_status
+    await _annotate_credentials(db, [created])
     return created
 
 
@@ -858,6 +894,7 @@ async def sign_out_account(
     await db.commit()
     await db.refresh(account)
     logger.info(f"[{account.id}] Signed out on Jettone's side (manual).")
+    await _annotate_credentials(db, [account])
     return account
 
 
@@ -980,6 +1017,7 @@ async def _vault_login(account_id: uuid.UUID, db: AsyncSession, redis: Any, mana
     await db.refresh(account)
     account.runtime_client_status = await _sync_runtime_client(manager, account, db, redis, report_failure=True)
     await db.refresh(account)
+    await _annotate_credentials(db, [account])
     return account
 
 
@@ -1044,6 +1082,7 @@ async def zerodha_login_complete(
     await db.refresh(account)
     account.runtime_client_status = await _sync_runtime_client(manager, account, db, redis, report_failure=True)
     await db.refresh(account)
+    await _annotate_credentials(db, [account])
     return account
 
 
@@ -1065,6 +1104,7 @@ async def get_account(account_id: uuid.UUID, db: AsyncSession = Depends(get_db))
     account = res.scalar_one_or_none()
     if not account:
         raise HTTPException(status_code=404, detail="Account not found")
+    await _annotate_credentials(db, [account])
     return account
 
 
@@ -1153,6 +1193,7 @@ async def update_account(
         )
         await db.refresh(account)
         account.runtime_client_status = runtime_status
+    await _annotate_credentials(db, [account])
     return account
 
 
@@ -1244,6 +1285,7 @@ async def renew_account_session(
     runtime_status = await _sync_runtime_client(manager, account, db, redis, report_failure=True)
     await db.refresh(account)
     account.runtime_client_status = runtime_status
+    await _annotate_credentials(db, [account])
     return account
 
 
