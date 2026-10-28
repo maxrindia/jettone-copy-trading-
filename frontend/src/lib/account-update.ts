@@ -27,6 +27,27 @@ export function buildAccountUpdateBody(f: AccountUpdateFields): Record<string, u
   };
 }
 
+/**
+ * The broker a dialog opened on an existing account should show. The ACCOUNT's own stored broker wins; the "Broker:" line in its
+ * notes (which only dialogs written by this app add) is a fallback for older rows, and Alice Blue is the last resort. Reading the
+ * notes alone made a Groww / Angel One / Zerodha account without that line open as Alice Blue, and saving it was then refused.
+ */
+export function brokerForEdit(account: { broker?: string | null; notes?: string | null }): string {
+  const stored = (account.broker || "").trim().toLowerCase();
+  if (stored) return stored;
+  const fromNotes = account.notes?.match(/Broker:\s*([^\s,]+)/i)?.[1];
+  return (fromNotes || "alicebluenew").trim().toLowerCase();
+}
+
+/**
+ * Which account step 1 of the dialog should write to. An account being edited, or one this dialog already created in an earlier
+ * attempt (its credentials or login then failed), is UPDATED; creating it again would only hit "already exists". Only a dialog
+ * with neither creates a new account.
+ */
+export function saveTargetId(editingId: string | null | undefined, createdId: string | null | undefined): string | null {
+  return editingId || createdId || null;
+}
+
 export type SubmitMode = "save" | "reconnect";
 
 export type SubmitOutcome =

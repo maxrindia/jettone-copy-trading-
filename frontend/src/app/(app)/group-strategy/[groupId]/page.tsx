@@ -855,7 +855,7 @@ export default function GroupStrategyDetailPage() {
             const displayName = acc?.display_name ?? member.account?.display_name ?? "Child Account";
             const aliceUserId = acc?.alice_user_id ?? member.account?.alice_user_id ?? "";
             const isSessionValid = acc?.session_valid ?? member.account?.session_valid ?? false;
-            const pingMs = acc?.ping_ms ?? 40;
+            const pingMs = acc?.ping_ms ?? null; // the engine measures no latency, so none is shown
             const lastAuth = acc?.last_authenticated_at;
             // How this Child's copy quantity is derived. Unknown until the
             // accounts list has loaded - never guessed.

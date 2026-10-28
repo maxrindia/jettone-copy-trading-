@@ -8,6 +8,8 @@ import { EmptyState, ErrorPanel, LoadingPanel } from "@/components/ui/DataStates
 import AddAccountModal from "@/components/demat/AddAccountModal";
 import RenewStaticIpDialog from "@/components/demat/RenewStaticIpDialog";
 import AccountCard from "@/components/accounts/AccountCard";
+import AccountBrokerBadges from "@/components/accounts/AccountBrokerBadges";
+import type { ServerBrokerCapabilities } from "@/lib/account-status";
 import AccountsTable, { type AccountsTableRow } from "@/components/accounts/AccountsTable";
 import { confirmAliceBlueLogin, recordReconnectIntent, setReconnectTarget } from "@/lib/alice-blue-login";
 import { reloginRoute, serverBrokerLogin, serverLoginPrompt, UNSUPPORTED_RELOGIN, zerodhaInteractiveLogin } from "@/lib/relogin";
@@ -27,6 +29,11 @@ interface DematCardItem {
   id: string;
   display_name: string;
   broker?: string | null;
+  /** Reported by the engine for every account: see lib/account-status.ts. */
+  connection_status?: string | null;
+  connection_detail?: string | null;
+  credentials_configured?: boolean | null;
+  broker_capabilities?: ServerBrokerCapabilities | null;
   alice_user_id: string;
   account_type: "MASTER" | "FOLLOWER";
   /** Current role from the strategy membership; null = in no strategy. `account_type` is only the creation-time label. */
@@ -52,6 +59,7 @@ interface DematCardItem {
 function AccountBadges({ card }: { card: DematCardItem }) {
   return (
     <>
+      <AccountBrokerBadges account={card} />
       <span
         className={`px-2 py-0.5 rounded-lg text-[10px] font-bold border ${
           card.strategy_role === "MASTER"

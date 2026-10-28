@@ -15,6 +15,7 @@ import { confirmAliceBlueLogin, recordReconnectIntent, setReconnectTarget } from
 import Tooltip from "@/components/ui/Tooltip";
 import { isBrokerSelectable, withBrokerSupport, type CatalogEntry } from "@/lib/broker-support";
 import BrokerCapabilityStrip from "@/components/demat/BrokerCapabilityStrip";
+import { brokerForEdit, saveTargetId } from "@/lib/account-update";
 import { brokerLoginPath, hasAnyVaultCredential, usesVault, vaultCredentialBody, vaultCredentialProblem } from "@/lib/vault-credentials";
 
 export interface AddDematPayload {
@@ -31,6 +32,8 @@ export interface AddDematPayload {
 
 export interface EditDematAccountData {
   id?: string;
+  /** The account's stored broker. Preferred over the "Broker:" line in notes, which not every account has. */
+  broker?: string | null;
   display_name: string;
   alice_user_id: string;
   notes?: string | null;
@@ -114,6 +117,9 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
   const [submitMode, setSubmitMode] = useState<SubmitMode>("reconnect");
   // Synchronous re-entry guard: at most one save/reconnect runs at a time.
   const submitGuard = useRef(createSubmitGuard());
+  // The account this dialog created on an earlier attempt, if its credentials or login then failed: a retry updates it instead of
+  // trying to create the same account again.
+  const createdAccountId = useRef<string | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -161,6 +167,7 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
     if (open) {
       setError(null);
       setCopied(false);
+      createdAccountId.current = null; // a freshly opened dialog has created nothing yet
       if (typeof window !== "undefined") {
         setRedirectUrl(`${window.location.origin}/platform/dematconnected`);
       }
@@ -169,14 +176,12 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
         setNickname(accountToEdit.display_name || "");
         setBrokerUserId(accountToEdit.alice_user_id || "");
 
-        let brokerVal = "alicebluenew";
+        const brokerVal = brokerForEdit(accountToEdit);
         let key = "";
         let sec = "";
         let mob = "";
         let em = "";
         if (accountToEdit.notes) {
-          const brokerMatch = accountToEdit.notes.match(/Broker:\s*([^\s,]+)/i);
-          if (brokerMatch) brokerVal = brokerMatch[1];
           const keyMatch = accountToEdit.notes.match(/APIKey:\s*([^\s,]+)/);
           if (keyMatch) key = keyMatch[1];
           const secMatch = accountToEdit.notes.match(/APISecret:\s*([^\s,]+)/);
@@ -355,8 +360,9 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
         // Step 1 - save the latest edited details (existing update / create API).
         async () => {
           let resp;
-          if (accountToEdit && accountToEdit.id) {
-            resp = await fetch(`/api/v1/accounts/${accountToEdit.id}`, {
+          const targetId = saveTargetId(accountToEdit?.id, createdAccountId.current);
+          if (targetId) {
+            resp = await fetch(`/api/v1/accounts/${targetId}`, {
               method: "PUT",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(
@@ -393,6 +399,7 @@ export default function AddAccountModal({ open, onClose, onCreated, onSaved, acc
           }
 
           const resData = await resp.json().catch(() => null);
+          if (!targetId && typeof resData?.id === "string") createdAccountId.current = resData.id;
           const savedAccount = {
             id: (resData?.id as string | undefined) ?? accountToEdit?.id,
             userId: (resData?.alice_user_id as string | undefined) ?? (brokerUserId.trim() || accountToEdit?.alice_user_id),
