@@ -31,10 +31,17 @@ MAX_ROWS = 50
 # Non-sensitive paging counters/flags: their integer/boolean VALUES are kept, because the page base and the
 # full-page behaviour can only be learned from them. Absent keys record nothing; no name here is a claim
 # about any broker's API.
-PAGING_KEYS = frozenset({
-    "page", "page_no", "page_number", "pagenumber", "page_size", "pagesize", "total", "total_count", "totalcount",
-    "total_pages", "totalpages", "count", "limit", "offset", "has_more", "has_next", "next_page",
-})
+PAGING_BOOL_KEYS = frozenset({"has_more", "has_next"})
+# Integer paging counters with the largest value each may plausibly carry. The ambiguous names (total, count, limit,
+# offset) are also used for money/quantity elsewhere, so they are kept only in a paged-collection context (see
+# _paging_values) and only while small.
+PAGING_INT_MAX = {
+    "page": 10_000, "page_no": 10_000, "page_number": 10_000, "pagenumber": 10_000, "next_page": 10_000,
+    "page_size": 1_000, "pagesize": 1_000, "limit": 1_000,
+    "total_pages": 10_000, "totalpages": 10_000,
+    "total": 100_000, "total_count": 100_000, "totalcount": 100_000, "count": 100_000, "offset": 100_000,
+}
+PAGING_KEYS = PAGING_BOOL_KEYS | frozenset(PAGING_INT_MAX)
 
 
 def _type_name(value: Any) -> str:
@@ -75,11 +82,20 @@ def _redact_rows(rows: List[Any]) -> Dict[str, Any]:
     return {"row_count": len(rows), "rows": described, "observed_vocabulary": {k: sorted(v) for k, v in vocab.items()}}
 
 
-def _paging_values(container: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        k: v for k, v in container.items()
-        if str(k).lower() in PAGING_KEYS and isinstance(v, (bool, int)) and not isinstance(v, float) and abs(int(v)) <= 1_000_000
-    }
+def _paging_values(container: Dict[str, Any], paged: bool = False) -> Dict[str, Any]:
+    """Paging metadata of a paged collection only: `container` must itself hold a list (the page), or `paged` says the
+    response's data does, so a flat object such as a margin response with a `total`/`count` field records nothing.
+    Counters must be non-negative ints within their per-key bound; has_* flags must be bools."""
+    if not paged and not any(isinstance(v, list) for v in container.values()):
+        return {}
+    out: Dict[str, Any] = {}
+    for k, v in container.items():
+        lk = str(k).lower()
+        if lk in PAGING_BOOL_KEYS and isinstance(v, bool):
+            out[k] = v
+        elif lk in PAGING_INT_MAX and isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= PAGING_INT_MAX[lk]:
+            out[k] = v
+    return out
 
 
 def redact_response(http_status: int, body: Any) -> Dict[str, Any]:
@@ -101,7 +117,7 @@ def redact_response(http_status: int, body: Any) -> Dict[str, Any]:
         lists = {k: _redact_rows(v) for k, v in data.items() if isinstance(v, list)}
         if lists:
             result["lists"] = lists
-        paging = _paging_values(body) | _paging_values(data)
+        paging = _paging_values(body, paged=bool(lists)) | _paging_values(data)
         if paging:
             result["paging_values"] = paging
     if isinstance(data, list):

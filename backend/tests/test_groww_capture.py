@@ -109,6 +109,18 @@ def test_paging_counters_are_kept_but_nothing_else_numeric():
     assert "paging_values" not in odd                                    # strings, floats and huge numbers are not kept
 
 
+def test_ambiguous_paging_keys_are_redacted_outside_a_paged_list_and_when_out_of_range():
+    # a flat object (margin-like) with total/count/limit/offset must not expose money or quantities
+    flat = redact_response(200, {"status": "SUCCESS", "payload": {"total": 125000, "count": 7, "limit": 50, "offset": 3, "clear_cash": 900}})
+    assert "paging_values" not in flat and "125000" not in json.dumps(flat) and "900" not in json.dumps(flat)
+    # inside a paged list, an out-of-range / negative / bool-as-int value under a paging name is still dropped
+    big = redact_response(200, {"status": "SUCCESS", "payload": {"order_list": [], "total": 500000, "limit": 5000, "count": -1, "page": True}})
+    assert "paging_values" not in big and "500000" not in json.dumps(big)
+    # genuine paging counters, including ones beside the payload at the top level, remain available
+    top = redact_response(200, {"status": "SUCCESS", "total": 42, "has_more": True, "payload": {"order_list": []}})
+    assert top["paging_values"] == {"total": 42, "has_more": True}
+
+
 def test_payload_positions_and_margin_are_described_without_values():
     pos = redact_response(200, {"status": "SUCCESS", "payload": {"positions": [position_row(), position_row("TCS", qty=-4)]}})
     assert pos["lists"]["positions"]["row_count"] == 2 and SBIN_ISIN not in json.dumps(pos)
