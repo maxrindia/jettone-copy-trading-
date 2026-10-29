@@ -69,6 +69,30 @@ def _skip(code: str, detail: str) -> PlannerSkip:
     return PlannerSkip(code, detail[:200])
 
 
+def cross_broker_derivative_skip(
+    *, master_broker: Optional[str], child_broker: Optional[str], exchange: Any,
+) -> Optional[PlannerSkip]:
+    """INSTRUMENT_UNMAPPED for a derivative (or unknown-exchange) order copied to a Child on a DIFFERENT broker, else None.
+
+    Applied by the pipeline while CANONICAL_MAPPING_ENFORCED is off (when it is on, check_child_order already refuses a
+    cross-broker derivative: no Master ISIN exists for it). A cross-broker Child never receives the Master's token
+    (pipeline._child_instrument_token), so it resolves the instrument by symbol in its own catalog - and no broker's derivative
+    symbol is a verified identity on another broker (docs/architecture/multi-broker-copy-trading/09 section 5, item 4). An Alice
+    Blue Child is the sharpest case: without a token it falls back to a per-underlying cache and a static table that can name
+    a different strike or expiry. Cash equity (NSE/BSE) is left to the existing checks. Same broker, including Alice -> Alice,
+    is unchanged. An unknown Master broker returns None here: the pair gate, which runs first, already refuses it."""
+    master = normalize_broker_id(master_broker) if master_broker else None
+    if master is None:
+        return None
+    child = normalize_broker_id(child_broker)
+    if child == master:
+        return None
+    ex = str(exchange or "").strip().upper()
+    if EXCHANGE_SEGMENTS.get(ex) == ("CASH",):
+        return None
+    return _skip(INSTRUMENT_UNMAPPED, f"CROSS_BROKER_DERIVATIVE_UNMAPPED:{master}->{child}:{ex or 'MISSING_EXCHANGE'}")
+
+
 def check_child_order(
     *,
     master_broker: Optional[str],

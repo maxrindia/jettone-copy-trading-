@@ -46,7 +46,7 @@ from app.services.alice_blue.instruments import InstrumentResolutionError
 from app.services.brokers.identity import master_scope
 from app.services.brokers.pairs import check_pair
 from app.services.brokers.registry import can_be_child, normalize_broker_id, persisted_order_label
-from app.services.instruments.planner import PlannerSkip, check_child_order
+from app.services.instruments.planner import EXCHANGE_SEGMENTS, PlannerSkip, check_child_order, cross_broker_derivative_skip
 from app.services.instruments.terms import Outcome, observation_counts, observe_quantity
 from app.services.copy_engine.risk import RiskCheckResult, RiskEngine
 from app.services.copy_engine.risk_inputs import (
@@ -219,22 +219,38 @@ class CopyEnginePipeline:
         self, follower: Account, event: MasterTradeEvent, *, child_order_type: str, fill_sequence: int
     ) -> Optional[Dict[str, Any]]:
         """
-        R4f. None when enforcement is off (the default: no behaviour change, no work done) or the Child's broker can take
-        this order. Otherwise a per-Child SKIPPED result for ONLY this Child; _record_child_result writes it to the Child's
-        copy_trades row, and an advisory audit row is added here. Any error in the check fails closed (INSTRUMENT_UNMAPPED).
+        R4f. None when the Child's broker can take this order. Otherwise a per-Child SKIPPED result for ONLY this Child;
+        _record_child_result writes it to the Child's copy_trades row, and an advisory audit row is added here. Any error in
+        a check fails closed (INSTRUMENT_UNMAPPED).
+
+        With CANONICAL_MAPPING_ENFORCED on, the full planner check decides (it already refuses a cross-broker derivative, with
+        its own reason). With it off (the default), only cross_broker_derivative_skip runs: a derivative has no verified
+        identity on another broker, so it is never sent across brokers. Cash equity and same-broker orders do no extra work
+        while enforcement is off.
         """
+        skip: Optional[PlannerSkip] = None
         if not settings.CANONICAL_MAPPING_ENFORCED:
-            return None
-        try:
-            skip = check_child_order(
-                master_broker=await self._master_broker_id(event.account_id),
-                child_broker=follower.broker,
-                exchange=event.exchange, symbol=event.symbol, product_type=event.product_type,
-                order_type=child_order_type, instrument_token=event.instrument_id,
-            )
-        except Exception as exc:
-            logger.error(f"[Pipeline] Planner check failed for {follower.display_name}; failing closed: {exc}")
-            skip = PlannerSkip("INSTRUMENT_UNMAPPED", "PLANNER_CHECK_ERROR")
+            if EXCHANGE_SEGMENTS.get(str(event.exchange or "").strip().upper()) == ("CASH",):
+                return None
+            try:
+                skip = cross_broker_derivative_skip(
+                    master_broker=await self._master_broker_id(event.account_id),
+                    child_broker=follower.broker, exchange=event.exchange,
+                )
+            except Exception as exc:
+                logger.error(f"[Pipeline] Cross-broker instrument check failed for {follower.display_name}; failing closed: {exc}")
+                skip = PlannerSkip("INSTRUMENT_UNMAPPED", "CROSS_BROKER_CHECK_ERROR")
+        else:
+            try:
+                skip = check_child_order(
+                    master_broker=await self._master_broker_id(event.account_id),
+                    child_broker=follower.broker,
+                    exchange=event.exchange, symbol=event.symbol, product_type=event.product_type,
+                    order_type=child_order_type, instrument_token=event.instrument_id,
+                )
+            except Exception as exc:
+                logger.error(f"[Pipeline] Planner check failed for {follower.display_name}; failing closed: {exc}")
+                skip = PlannerSkip("INSTRUMENT_UNMAPPED", "PLANNER_CHECK_ERROR")
         if skip is None:
             return None
         logger.info(

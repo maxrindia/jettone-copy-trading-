@@ -400,7 +400,9 @@ async def test_alice_to_alice_skips_nothing_with_enforcement_on(db_session, samp
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", KINDS)
 async def test_with_the_flag_off_execution_is_exactly_as_before(db_session, mixed, monkeypatch, kind):
-    """Flag off (the default): the planner is never consulted, the Groww Child is not skipped, and no skip audit is written."""
+    """Flag off (the default): the full planner is never consulted and same-broker Children are exactly as before. The one
+    check that still runs is the cross-broker derivative refusal: this NFO order is not sent to the Groww Child (a derivative
+    has no verified identity on another broker), and that skip - only that one - is audited."""
     assert settings.CANONICAL_MAPPING_ENFORCED is False
 
     def boom(**kw):
@@ -411,12 +413,12 @@ async def test_with_the_flag_off_execution_is_exactly_as_before(db_session, mixe
     event = dataclasses.replace(make_event(kind, mid), exchange="NFO", instrument_id="74056")
     out = await run(event, mixed["clients"])
     a, g, b = mixed["a"], mixed["g"], mixed["b"]
-    assert out[str(a.id)]["status"] == "SUCCESS" and out[str(g.id)]["status"] == "SUCCESS"      # Groww is NOT skipped
+    assert out[str(a.id)]["status"] == "SUCCESS"                                                 # Alice -> Alice unchanged
+    assert out[str(g.id)]["status"] == "SKIPPED" and out[str(g.id)]["reason"] == "INSTRUMENT_UNMAPPED"
+    assert out[str(g.id)]["detail"] == "CROSS_BROKER_DERIVATIVE_UNMAPPED:alicebluenew->groww:NFO"
     assert out[str(b.id)] == {"status": "REJECTED", "reasons": ["FUNDS_FETCH_FAILED"]}
-    assert mixed["clients"][str(g.id)].place_order.await_count == 1
-    assert await skip_audits(mid) == []
-    by = await trades_by_follower(mid)
-    assert by[g.id][0].status == CopyTradeStatus.SUBMITTED
+    assert mixed["clients"][str(g.id)].place_order.await_count == 0
+    assert [x.account_id for x in await skip_audits(mid)] == [g.id]
 
 
 @pytest.mark.asyncio

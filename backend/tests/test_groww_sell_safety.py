@@ -222,7 +222,9 @@ async def test_derivative_sell_is_rejected_fail_closed(db_session, mock_redis, g
     fake = FakeGroww()
     out, _ = await _run(mock_redis, master, child, fake,
                         _sell(master, "FNO-1", symbol="NIFTY26OCT23500CE", exchange="NFO", product="LONGTERM", qty=75))
-    assert out["status"] == "REJECTED" and fake.bodies("/v1/order/create") == []
+    # An Alice Master's derivative never reaches a Groww Child: the cross-broker derivative check refuses it before the SELL
+    # guard is reached (it used to be REJECTED there). Either way nothing is sent.
+    assert out["status"] == "SKIPPED" and out["reason"] == "INSTRUMENT_UNMAPPED" and fake.bodies("/v1/order/create") == []
 
 
 @pytest.mark.asyncio

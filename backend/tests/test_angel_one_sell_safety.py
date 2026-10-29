@@ -211,7 +211,9 @@ async def test_derivative_sell_is_rejected_fail_closed(db_session, mock_redis, a
     fake = FakeAngel(positions=[position_row(symbol="NIFTY26OCT23500CE", token="26000", exchange="NFO", product="CARRYFORWARD", net="65")])
     out, _ = await _run(mock_redis, master, child,
                         fake, _sell(master, "FNO-1", symbol="NIFTY26OCT23500CE", exchange="NFO", product="LONGTERM", qty=65))
-    assert out["status"] == "REJECTED" and fake.order_bodies() == []
+    # An Alice Master's derivative never reaches an Angel One Child: the cross-broker derivative check refuses it before the
+    # SELL guard is reached (it used to be REJECTED there). Either way nothing is sent.
+    assert out["status"] == "SKIPPED" and out["reason"] == "INSTRUMENT_UNMAPPED" and fake.order_bodies() == []
 
 
 @pytest.mark.asyncio
