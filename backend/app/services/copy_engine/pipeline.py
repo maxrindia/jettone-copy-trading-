@@ -143,6 +143,21 @@ _MODIFY_NRML_PRODUCTS = frozenset({"NRML", "MTF"})
 _MODIFY_MIS_PRODUCTS = frozenset({"MIS", "INTRADAY"})
 
 
+def child_broker_product(product_type: Any, *, market_path: bool = False) -> ProductType:
+    """The broker product a NEW Child order is sent with, exactly as the placement paths derive it from the Master event's
+    product string. The LIMIT and SL paths map DELIVERY to CNC and CARRYFORWARD / MARGIN to NRML; the MARKET path does not (it
+    sends those as MIS - see the note above _MODIFY_CNC_PRODUCTS). Anything else is MIS on every path. Shared with
+    child_preview so a preview can never describe a different product than the one the pipeline would send."""
+    value = str(product_type).upper()
+    if market_path:
+        return ProductType.CNC if value in ("CNC", "LONGTERM") else (ProductType.NRML if value in ("NRML", "MTF") else ProductType.MIS)
+    if value in ("CNC", "LONGTERM", "DELIVERY"):
+        return ProductType.CNC
+    if value in ("NRML", "MTF", "CARRYFORWARD", "MARGIN"):
+        return ProductType.NRML
+    return ProductType.MIS
+
+
 def broker_product_for_modify(stored_product: Any) -> Optional[ProductType]:
     """The broker product of an already-placed Child order, from its persisted `product_type`; None when it is missing or not one
     of the known values. The pipeline passes this to `modify_order` so a client that needs the product (Angel One) gets the order's
@@ -1217,13 +1232,7 @@ class CopyEnginePipeline:
             return {"status": "REJECTED", "reason": "NO_CLIENT"}
 
         broker_side = BrokerOrderSide.BUY if event.side == "BUY" else BrokerOrderSide.SELL
-        prod_upper = str(event.product_type).upper()
-        if prod_upper in ("CNC", "LONGTERM", "DELIVERY"):
-            broker_prod = ProductType.CNC
-        elif prod_upper in ("NRML", "MTF", "CARRYFORWARD", "MARGIN"):
-            broker_prod = ProductType.NRML
-        else:
-            broker_prod = ProductType.MIS
+        broker_prod = child_broker_product(event.product_type)
 
         order_req = OrderRequest(
             symbol=event.symbol,
@@ -1849,13 +1858,7 @@ class CopyEnginePipeline:
             return {"status": "REJECTED", "reason": "NO_CLIENT"}
 
         broker_side = BrokerOrderSide.BUY if event.side == "BUY" else BrokerOrderSide.SELL
-        prod_upper = str(event.product_type).upper()
-        if prod_upper in ("CNC", "LONGTERM", "DELIVERY"):
-            broker_prod = ProductType.CNC
-        elif prod_upper in ("NRML", "MTF", "CARRYFORWARD", "MARGIN"):
-            broker_prod = ProductType.NRML
-        else:
-            broker_prod = ProductType.MIS
+        broker_prod = child_broker_product(event.product_type)
 
         order_req = OrderRequest(
             symbol=event.symbol,
@@ -4043,8 +4046,7 @@ class CopyEnginePipeline:
             return {"status": "REJECTED", "reason": "NO_CLIENT"}
 
         broker_side = BrokerOrderSide.BUY if event.side == "BUY" else BrokerOrderSide.SELL
-        prod_upper = str(event.product_type).upper()
-        broker_prod = ProductType.CNC if prod_upper in ("CNC", "LONGTERM") else (ProductType.NRML if prod_upper in ("NRML", "MTF") else ProductType.MIS)
+        broker_prod = child_broker_product(event.product_type, market_path=True)
 
         order_req = OrderRequest(
             symbol=event.symbol,
