@@ -18,6 +18,15 @@ from app.services.brokers.order_book_read import OrderBookState, read_order_book
 logger = logging.getLogger(__name__)
 
 
+def instrument_key(symbol: Any) -> str:
+    """The key positions are compared on: upper-cased, without the cash-segment "-EQ" suffix. Alice Blue spells an NSE equity
+    "SBIN-EQ" and Groww spells the same instrument "SBIN"; a Child's order row and its broker's position row may use either form,
+    so comparing the raw strings reports a correct holding as two mismatches. Derivative symbols carry no such suffix and are
+    unchanged."""
+    text = str(symbol or "").strip().upper()
+    return text[:-3] if text.endswith("-EQ") and len(text) > 3 else text
+
+
 class ReconciliationEngine:
     @staticmethod
     async def compute_expected_positions(account_id: UUID, db: AsyncSession) -> Dict[str, int]:
@@ -81,17 +90,20 @@ class ReconciliationEngine:
         (implicitly "broker has zero of everything") actual-position map -
         which would misreport every real position as a full mismatch.
         """
-        expected_positions = await cls.compute_expected_positions(account_id, db)
+        expected_positions: Dict[str, int] = {}
+        for raw_symbol, qty in (await cls.compute_expected_positions(account_id, db)).items():
+            key = instrument_key(raw_symbol)
+            expected_positions[key] = expected_positions.get(key, 0) + qty
 
         actual_map: Dict[str, int] = {}
         if actual_positions is not None:
             for p in actual_positions:
-                actual_map[p.symbol] = p.quantity
+                actual_map[instrument_key(p.symbol)] = actual_map.get(instrument_key(p.symbol), 0) + p.quantity
         elif broker_client is not None:
             try:
                 positions_data = await broker_client.get_positions()
                 for p in positions_data:
-                    actual_map[p.symbol] = p.quantity
+                    actual_map[instrument_key(p.symbol)] = actual_map.get(instrument_key(p.symbol), 0) + p.quantity
             except Exception as exc:
                 logger.error(f"Failed to fetch actual positions for account {account_id}: {exc}")
                 event = SystemEvent(
