@@ -389,6 +389,8 @@ def test_nothing_in_the_trading_path_imports_the_instruments_package_except_the_
         "app/services/copy_engine/pipeline.py": ("from app.services.instruments.planner import",
                                                  "from app.services.instruments.terms import"),
         "app/services/alice_blue/instruments.py": ("from app.services.instruments.terms import",),
+        # The read-only Child preview (never sends or writes) calls the same planner functions the pipeline applies before a send.
+        "app/services/copy_engine/child_preview.py": ("from app.services.instruments.planner import",),
     }
     for sub in ("services/copy_engine", "services/reliability", "services/runtime", "services/alice_blue",
                 "services/groww", "services/angel_one", "services/brokers"):
