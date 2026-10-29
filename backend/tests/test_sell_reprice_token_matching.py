@@ -138,6 +138,7 @@ async def test_nfo_sell_reprice_uses_token_primary_matching_despite_symbol_misma
         assert fill_event.instrument_id == "74056"  # sanity: detector threads it through
 
         pipeline = CopyEnginePipeline(validator=EventValidator(redis=mock_redis))
+        pipeline._master_brokers[MASTER_ID] = "alicebluenew"      # the Master is not a stored account here; Alice Blue -> Alice Blue
         res = await pipeline.execute_replication(event=fill_event, clients={str(child_acc.id): client})
     finally:
         app_settings.MARKET_ORDER_BUFFER_PERCENT = original_buffer
@@ -161,6 +162,7 @@ async def test_handle_master_modification_forwards_provided_token_to_get_availab
     client = _reprice_client("BRK_SPY_1", redis=mock_redis, positions=[])
 
     pipeline = CopyEnginePipeline(validator=EventValidator(redis=mock_redis))
+    pipeline._master_brokers[MASTER_ID] = "alicebluenew"      # the Master is not a stored account here; Alice Blue -> Alice Blue
 
     with patch(
         "app.services.copy_engine.pipeline.get_available_long",
@@ -227,6 +229,7 @@ async def test_equity_sell_reprice_unaffected_by_token_threading(db_session, moc
         assert fill_event.instrument_id is None  # sanity: no token on this event
 
         pipeline = CopyEnginePipeline(validator=EventValidator(redis=mock_redis))
+        pipeline._master_brokers[MASTER_ID] = "alicebluenew"      # the Master is not a stored account here; Alice Blue -> Alice Blue
         res = await pipeline.execute_replication(event=fill_event, clients={str(child_acc.id): client})
     finally:
         app_settings.MARKET_ORDER_BUFFER_PERCENT = original_buffer

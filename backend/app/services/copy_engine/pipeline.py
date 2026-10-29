@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -195,6 +196,24 @@ class CopyEnginePipeline:
         if broker:
             self._master_brokers[key] = broker
         return broker
+
+    async def _child_instrument_token(self, master_account_id: Any, child: Optional[Account], token: Optional[str]) -> Optional[str]:
+        """The instrument id to hand to a Child: the Master's own id when Master and Child are on the SAME broker, otherwise None.
+
+        A broker's instrument id (Angel One's symbol token, Groww's ISIN, a Kite token) means something only inside that broker.
+        Alice Blue treats any id it is given as ITS token, so a foreign id would trade a different contract. With None the Child
+        resolves the instrument from its own catalog and fails closed if it cannot. Alice Blue -> Alice Blue is unchanged (a NULL
+        stored broker is Alice Blue on both sides). An unknown Master broker or an unknown Child also yields None."""
+        if not token:
+            return token
+        master_broker = await self._master_broker_id(master_account_id)
+        child_broker = normalize_broker_id(getattr(child, "broker", None)) if child is not None else None
+        return token if master_broker is not None and master_broker == child_broker else None
+
+    async def _event_for_child(self, event: MasterTradeEvent, child: Optional[Account]) -> MasterTradeEvent:
+        """A copy of the event whose instrument id is safe to use for this Child (see _child_instrument_token)."""
+        token = await self._child_instrument_token(event.account_id, child, event.instrument_id)
+        return event if token == event.instrument_id else dataclasses.replace(event, instrument_id=token)
 
     async def _planner_skip(
         self, follower: Account, event: MasterTradeEvent, *, child_order_type: str, fill_sequence: int
@@ -936,6 +955,7 @@ class CopyEnginePipeline:
         """
         Places an immediate LIMIT order on the follower account.
         """
+        event = await self._event_for_child(event, follower)
         acc_id = follower.id
         if not follower.is_active or follower.is_emergency_stopped or follower_runtime_paused:
             logger.info(f"[Pipeline] Follower {follower.display_name} paused/disabled. Skipping limit order.")
@@ -1570,6 +1590,7 @@ class CopyEnginePipeline:
         already carries its own broker-managed trigger, so there is
         nothing to "make marketable" here.
         """
+        event = await self._event_for_child(event, follower)
         acc_id = follower.id
         if not follower.is_active or follower.is_emergency_stopped or follower_runtime_paused:
             logger.info(f"[Pipeline] Follower {follower.display_name} paused/disabled. Skipping SL order.")
@@ -2115,6 +2136,7 @@ class CopyEnginePipeline:
         stop_active: bool,
     ) -> str:
         """One follower's half of handle_sl_trigger_execution."""
+        event = await self._event_for_child(event, account)
         master_order_id = event.master_order_id
         acc_id_str = str(ord_rec.account_id)
 
@@ -2817,6 +2839,7 @@ class CopyEnginePipeline:
                 continue
 
             account, multiplier = follower_info.get(acc_id_str, (None, Decimal("1.0")))
+            child_token = await self._child_instrument_token(master_account_id, account, instrument_token)
             settings_obj = account.copy_settings if account else None
             lot_size = self._get_lot_size(ord_rec.symbol)
 
@@ -2944,7 +2967,7 @@ class CopyEnginePipeline:
                     side=ord_rec.side,
                     exchange=ord_rec.exchange,
                     product_type=ord_rec.product_type,
-                    instrument_token=instrument_token,
+                    instrument_token=child_token,
                     account=account,
                     settings=settings_obj,
                     symbol=ord_rec.symbol,
@@ -3032,7 +3055,7 @@ class CopyEnginePipeline:
                         exchange=ord_rec.exchange,
                         symbol=ord_rec.symbol,
                         product_type=ord_rec.product_type,
-                        provided_token=instrument_token,
+                        provided_token=child_token,
                     )
                     insufficient = remaining_qty > available_long
                     safety_detail = (
@@ -3690,6 +3713,7 @@ class CopyEnginePipeline:
         """
         Executes market order replication for a single follower with complete risk checks.
         """
+        event = await self._event_for_child(event, follower)
         acc_id = follower.id
 
         # A disabled, emergency-stopped or runtime-paused Child never receives a new MARKET copy. This is the same

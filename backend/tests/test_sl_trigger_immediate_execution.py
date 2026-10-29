@@ -98,7 +98,10 @@ async def _events(db_session, event_type):
 
 
 def _pipeline(mock_redis):
-    return CopyEnginePipeline(validator=EventValidator(redis=mock_redis))
+    pipeline = CopyEnginePipeline(validator=EventValidator(redis=mock_redis))
+    # The Master is not a stored account in these tests; declare its broker (Alice Blue -> Alice Blue keeps the token native).
+    pipeline._master_brokers[MASTER_ID] = "alicebluenew"
+    return pipeline
 
 
 # ---------------------------------------------------------------------------
