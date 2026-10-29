@@ -71,6 +71,8 @@ class InstrumentTerms:
     strike: Optional[Decimal] = None
     expiry: Optional[date] = None
     trading_symbol: Optional[str] = None
+    symbol: Optional[str] = None              # the contract master's Symbol column: NFO = the underlying; NSE = the bare name
+    group: Optional[str] = None               # NSE "Group Name" (the series: EQ, SM, BE, ...); None where the file has none
     source: str = ""
     source_date: Optional[date] = None
     loaded_at: Optional[datetime] = None
@@ -186,6 +188,8 @@ def parse_alice_contract_master(exchange: str, text: str, *, loaded_at: datetime
             instrument_type=(row.get("Instrument Type") or "").strip() or None,
             option_type=option_type or None,
             strike=strike, expiry=expiry, trading_symbol=(row.get("Trading Symbol") or "").strip() or None,
+            symbol=(row.get("Symbol") or "").strip().upper() or None,
+            group=(row.get("Group Name") or "").strip().upper() or None,
             source="alice_contract_master", source_date=source_date, loaded_at=loaded_at,
             status=TermsStatus.INVALID if issues else TermsStatus.VALID, issues=tuple(issues),
         )
@@ -249,6 +253,11 @@ class TermsStore:
     def get(self, broker: str, exchange: str, token: str) -> Optional[InstrumentTerms]:
         bucket = self._by_exchange.get((str(broker), str(exchange).strip().upper()))
         return None if bucket is None else bucket.get((str(broker), str(exchange).strip().upper(), str(token).strip()))
+
+    def rows(self, broker: str, exchange: str) -> Tuple[InstrumentTerms, ...]:
+        """A snapshot of every stored row for one broker and exchange (empty when that exchange was never loaded)."""
+        bucket = self._by_exchange.get((str(broker), str(exchange).strip().upper()))
+        return () if bucket is None else tuple(bucket.values())
 
     def size(self) -> int:
         return sum(len(b) for b in self._by_exchange.values())

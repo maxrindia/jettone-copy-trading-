@@ -39,6 +39,7 @@ from app.services.brokers.profiles import build_profile
 from app.services.brokers.registry import get_broker_spec, normalize_broker_id
 from app.services.copy_engine.risk_inputs import UnknownProductTypeError, normalize_product_for_exchange
 from app.services.instruments.catalogs import InstrumentCatalog, default_catalogs
+from app.services.instruments.contracts import ResolutionVerdict, make_contract, resolve_for_broker
 from app.services.instruments.comparator import compare_instrument
 from app.services.instruments.model import Verdict
 from app.services.instruments.normalizer import normalize_equity
@@ -91,6 +92,41 @@ def cross_broker_derivative_skip(
     if EXCHANGE_SEGMENTS.get(ex) == ("CASH",):
         return None
     return _skip(INSTRUMENT_UNMAPPED, f"CROSS_BROKER_DERIVATIVE_UNMAPPED:{master}->{child}:{ex or 'MISSING_EXCHANGE'}")
+
+
+ALICE_ID = "alicebluenew"
+# Prefix of the instrument id handed to an Alice Blue Child whose cross-broker instrument could not be resolved. Never numeric, so
+# even if it reached AliceBlueClient.place_order its numeric-instrumentId guard would refuse it before any request is built.
+ALICE_UNRESOLVED_PREFIX = "UNRESOLVED:"
+
+
+def alice_cross_broker_token(*, exchange: Any, symbol: Any, now: Optional[datetime] = None, store: Optional[Any] = None) -> str:
+    """Alice Blue's OWN token for a cross-broker Master's order, or an ALICE_UNRESOLVED_PREFIX marker with the reason.
+
+    A cross-broker Alice Child must not resolve by symbol inside AliceBlueClient: that path falls back to the per-symbol Redis cache and
+    the static KNOWN_INSTRUMENTS table (contracts.py explains why neither is an identity). Only NSE cash equity is resolved here, from
+    the exact EQ-series row of Alice's own contract master; an Alice-style "-EQ" suffix on the Master's symbol is dropped first. A
+    derivative is never resolved (cross_broker_derivative_skip refuses it), and anything missing, stale or ambiguous is unresolved."""
+    ex = str(exchange or "").strip().upper()
+    if EXCHANGE_SEGMENTS.get(ex) != ("CASH",):
+        return f"{ALICE_UNRESOLVED_PREFIX}CROSS_BROKER_DERIVATIVE:{ex or 'MISSING_EXCHANGE'}"
+    sym = str(symbol or "").strip().upper()
+    if ex == "NSE" and sym.endswith("-EQ"):
+        sym = sym[:-3]
+    contract = make_contract("EQ", ex, sym)
+    if contract is None:
+        return f"{ALICE_UNRESOLVED_PREFIX}ALICE_EQUITY_INVALID_SYMBOL"
+    res = resolve_for_broker(ALICE_ID, contract, now=now, alice_store=store)
+    if res.verdict is ResolutionVerdict.RESOLVED_UNVERIFIED and str(res.broker_token or "").isdigit():
+        return str(res.broker_token)
+    return f"{ALICE_UNRESOLVED_PREFIX}ALICE_EQUITY_{res.verdict.value}:{res.reason}"[:200]
+
+
+def alice_unresolved_skip(child_token: Any) -> Optional[PlannerSkip]:
+    """INSTRUMENT_UNMAPPED when the Child's instrument id is an unresolved-cross-broker marker (alice_cross_broker_token), else None."""
+    if isinstance(child_token, str) and child_token.startswith(ALICE_UNRESOLVED_PREFIX):
+        return _skip(INSTRUMENT_UNMAPPED, child_token[len(ALICE_UNRESOLVED_PREFIX):])
+    return None
 
 
 def check_child_order(

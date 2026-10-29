@@ -24,8 +24,13 @@ catalog states. Every refusal is a distinct verdict; nothing is guessed, and a b
 
 Documented limits that keep derivative mapping UNVERIFIED: Zerodha's `name` column is documented only for equity (so the underlying
 match is best effort); Angel One's scrip master fields other than token/symbol/name/exch_seg have no verified reference; Groww's loader
-reads CASH/EQ rows only. Alice Blue's derivative terms are keyed by token and hold no underlying name, so Alice is resolved only through
-its own token path (Alice -> Alice), never through this module.
+reads CASH/EQ rows only.
+
+Alice Blue is resolved from its own contract master as held by the instrument terms store (instruments/terms.py), never from the
+per-symbol Redis cache or the static KNOWN_INSTRUMENTS table: those are keyed by the bare Symbol column, which for NFO is the underlying
+(every strike and expiry overwrite one key) and for NSE spans every series group. Equity needs the EQ group row whose trading symbol is
+exactly "<SYMBOL>-EQ"; a derivative needs the one row with the same underlying, expiry, kind and (for an option) strike. BSE columns are
+not verified, so BSE is NOT_SUPPORTED. Alice -> Alice still uses the Master's own token and does not come through here.
 """
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -134,7 +139,8 @@ def _fresh(loaded_at: Optional[datetime], now: datetime, max_age: timedelta) -> 
 
 
 def resolve_for_broker(broker_id: str, contract: CanonicalContract, *, now: Optional[datetime] = None,
-                       max_age: timedelta = MAX_CATALOG_AGE, zerodha_store: Optional[Any] = None) -> ContractResolution:
+                       max_age: timedelta = MAX_CATALOG_AGE, zerodha_store: Optional[Any] = None,
+                       alice_store: Optional[Any] = None) -> ContractResolution:
     """Resolve a canonical contract in one broker's own catalog. Pure apart from reading that in-memory catalog. Never raises."""
     now = now or datetime.now(timezone.utc)
     broker = str(broker_id or "").strip().lower()
@@ -151,11 +157,52 @@ def resolve_for_broker(broker_id: str, contract: CanonicalContract, *, now: Opti
                        "equity mapping for this broker is reported by the shadow comparison (instruments/comparator), not by this resolver",
                        contract)
         if broker == "alicebluenew":
-            return _no(broker, ResolutionVerdict.NOT_SUPPORTED,
-                       "Alice Blue is resolved through its own token path, not by canonical identity", contract)
+            return _resolve_alice(contract, now, max_age, alice_store)
         return _no(broker, ResolutionVerdict.NOT_SUPPORTED, "unknown broker", contract)
     except Exception as exc:                                    # an error is never a mapping
         return _no(broker, ResolutionVerdict.INVALID_INPUT, f"resolver error: {type(exc).__name__}", contract)
+
+
+def _alice_row_matches(contract: CanonicalContract, row: Any) -> bool:
+    if row.symbol != contract.underlying:
+        return False
+    if contract.kind == "EQ":
+        return row.group == "EQ" and str(row.trading_symbol or "").upper() == f"{contract.underlying}-EQ"
+    if row.expiry != contract.expiry:
+        return False
+    itype = str(row.instrument_type or "").upper()
+    if contract.kind == "FUT":
+        return row.option_type is None and itype.startswith("FUT")
+    return row.option_type == contract.kind and row.strike is not None and row.strike == contract.strike and itype.startswith("OPT")
+
+
+def _resolve_alice(contract: CanonicalContract, now: datetime, max_age: timedelta, store: Optional[Any]) -> ContractResolution:
+    from app.services.instruments.terms import ALICE, Knowledge, TermsStatus
+    if store is None:
+        from app.services.instruments import terms
+        store = terms.store
+    if contract.exchange == "BSE":
+        return _no(ALICE, ResolutionVerdict.NOT_SUPPORTED, "Alice Blue's BSE contract-master columns are not verified", contract)
+    rows = store.rows(ALICE, contract.exchange)
+    if not rows:
+        return _no(ALICE, ResolutionVerdict.CATALOG_NOT_LOADED, f"Alice Blue {contract.exchange} contract master is not loaded", contract)
+    loaded = [r.loaded_at for r in rows]
+    stale = _fresh(None if any(t is None for t in loaded) else min(loaded), now, max_age)
+    if stale:
+        return _no(ALICE, ResolutionVerdict.STALE, stale, contract)
+    matches = [r for r in rows if _alice_row_matches(contract, r)]
+    if not matches:
+        return _no(ALICE, ResolutionVerdict.UNMAPPED, "no exact contract in Alice Blue's contract master", contract)
+    if any(r.status is not TermsStatus.VALID for r in matches):
+        return _no(ALICE, ResolutionVerdict.UNMAPPED, "the matching contract-master row has invalid metadata", contract)
+    if len(matches) > 1:
+        return _no(ALICE, ResolutionVerdict.AMBIGUOUS, f"{len(matches)} contract-master rows match exactly", contract)
+    row = matches[0]
+    return ContractResolution(
+        ALICE, ResolutionVerdict.RESOLVED_UNVERIFIED,
+        "single exact row in Alice Blue's own contract master; mapping not evidenced against a real account",
+        contract.key, row.trading_symbol, row.token, False, row.lot_size if row.lot_state is Knowledge.KNOWN else None,
+    )
 
 
 def _resolve_zerodha(contract: CanonicalContract, now: datetime, max_age: timedelta, store: Optional[Any]) -> ContractResolution:

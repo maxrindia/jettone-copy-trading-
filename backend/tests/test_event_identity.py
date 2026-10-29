@@ -163,6 +163,12 @@ def pairs_waived(monkeypatch):
     monkeypatch.setattr(pairs, "_feature_gap", lambda *a, **k: None)
     monkeypatch.setattr(pairs, "can_be_master", lambda *a, **k: True)
     monkeypatch.setattr(pairs, "can_be_child", lambda *a, **k: True)
+    # An Alice Child of another broker's Master needs Alice's own token from its contract master (planner.alice_cross_broker_token).
+    from app.services.instruments import terms
+    store = terms.TermsStore()
+    store.load_alice("NSE", "Exch,Exchange Segment,Group Name,Symbol,Token,Instrument Type,Instrument Name,Formatted Ins Name,"
+                            "Trading Symbol,Lot Size,Tick Size\nNSE,nse_cm,EQ,RELIANCE,2885,0,RELIANCE,RELIANCE-EQ,RELIANCE-EQ,1,0.05\n")
+    monkeypatch.setattr(terms, "store", store)
 
 
 async def _master_with_child(db_session, broker, name):

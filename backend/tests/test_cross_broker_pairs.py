@@ -19,7 +19,8 @@ from app.services.alice_blue.types import OrderResultCategory
 from app.services.copy_engine import pipeline as _pipeline  # noqa: F401  (import before planner: planner <-> copy_engine cycle)
 from app.services.instruments.planner import INSTRUMENT_UNMAPPED, cross_broker_derivative_skip
 from test_multi_broker_fanout import (  # noqa: F401  (fixtures are used by name)
-    BROKERS, ORDERS, _result, all_pairs_open_for_test, build_strategy, copies_of, entry, no_network, pipeline,
+    ALICE_SBIN_TOKEN, BROKERS, ORDERS, _result, alice_contract_master, all_pairs_open_for_test, build_strategy, copies_of, entry,
+    no_network, pipeline,
 )
 from test_order_handling_matrix import _event
 from test_strategy_master_switching import _child_client
@@ -116,7 +117,11 @@ async def test_cash_equity_reaches_the_child_without_the_masters_token(
         event=entry(master, f"XE-{master_broker}-{child_broker}", "LIMIT", "0"), clients={str(child.id): client})
     assert res["results"][str(child.id)]["status"] == "SUCCESS", res["results"]
     request = client.place_order.await_args.args[0]
-    assert request.instrument_token is None and request.symbol == "SBIN"          # resolved from the Child's own catalog
+    assert request.symbol == "SBIN" and request.instrument_token != "12345"       # never the Master's token
+    if child_broker == "alicebluenew":
+        assert request.instrument_token == ALICE_SBIN_TOKEN                        # Alice's own, exactly resolved from its master
+    else:
+        assert request.instrument_token is None                                    # resolved from the Child's own catalog
 
 
 @pytest.mark.asyncio

@@ -46,7 +46,10 @@ from app.services.alice_blue.instruments import InstrumentResolutionError
 from app.services.brokers.identity import master_scope
 from app.services.brokers.pairs import check_pair
 from app.services.brokers.registry import can_be_child, normalize_broker_id, persisted_order_label
-from app.services.instruments.planner import EXCHANGE_SEGMENTS, PlannerSkip, check_child_order, cross_broker_derivative_skip
+from app.services.instruments.planner import (
+    ALICE_ID, EXCHANGE_SEGMENTS, PlannerSkip, alice_cross_broker_token, alice_unresolved_skip, check_child_order,
+    cross_broker_derivative_skip,
+)
 from app.services.instruments.terms import Outcome, observation_counts, observe_quantity
 from app.services.copy_engine.risk import RiskCheckResult, RiskEngine
 from app.services.copy_engine.risk_inputs import (
@@ -197,22 +200,32 @@ class CopyEnginePipeline:
             self._master_brokers[key] = broker
         return broker
 
-    async def _child_instrument_token(self, master_account_id: Any, child: Optional[Account], token: Optional[str]) -> Optional[str]:
-        """The instrument id to hand to a Child: the Master's own id when Master and Child are on the SAME broker, otherwise None.
+    async def _child_instrument_token(
+        self, master_account_id: Any, child: Optional[Account], token: Optional[str], *, exchange: Any = None, symbol: Any = None,
+    ) -> Optional[str]:
+        """The instrument id to hand to a Child: the Master's own id when Master and Child are on the SAME broker; for an Alice Blue
+        Child of another broker's Master, Alice's own exactly-resolved token or an unresolved marker; otherwise None.
 
         A broker's instrument id (Angel One's symbol token, Groww's ISIN, a Kite token) means something only inside that broker.
-        Alice Blue treats any id it is given as ITS token, so a foreign id would trade a different contract. With None the Child
-        resolves the instrument from its own catalog and fails closed if it cannot. Alice Blue -> Alice Blue is unchanged (a NULL
-        stored broker is Alice Blue on both sides). An unknown Master broker or an unknown Child also yields None."""
-        if not token:
+        Alice Blue treats any id it is given as ITS token, so a foreign id would trade a different contract - and without an id it
+        falls back to a per-symbol cache and a static table that are not identities, so it is given its own token from its contract
+        master instead (planner.alice_cross_broker_token; the planner skips the Child on a marker). Other Children get None and
+        resolve from their own catalog, failing closed if they cannot. Alice Blue -> Alice Blue is unchanged (a NULL stored broker is
+        Alice Blue on both sides). An unknown Master broker or an unknown Child also yields None."""
+        child_broker = normalize_broker_id(getattr(child, "broker", None)) if child is not None else None
+        if not token and child_broker != ALICE_ID:
             return token
         master_broker = await self._master_broker_id(master_account_id)
-        child_broker = normalize_broker_id(getattr(child, "broker", None)) if child is not None else None
-        return token if master_broker is not None and master_broker == child_broker else None
+        if master_broker is not None and master_broker == child_broker:
+            return token
+        if master_broker is not None and child_broker == ALICE_ID:
+            return alice_cross_broker_token(exchange=exchange, symbol=symbol)
+        return None
 
     async def _event_for_child(self, event: MasterTradeEvent, child: Optional[Account]) -> MasterTradeEvent:
         """A copy of the event whose instrument id is safe to use for this Child (see _child_instrument_token)."""
-        token = await self._child_instrument_token(event.account_id, child, event.instrument_id)
+        token = await self._child_instrument_token(event.account_id, child, event.instrument_id,
+                                                   exchange=event.exchange, symbol=event.symbol)
         return event if token == event.instrument_id else dataclasses.replace(event, instrument_id=token)
 
     async def _planner_skip(
@@ -225,21 +238,21 @@ class CopyEnginePipeline:
 
         With CANONICAL_MAPPING_ENFORCED on, the full planner check decides (it already refuses a cross-broker derivative, with
         its own reason). With it off (the default), only cross_broker_derivative_skip runs: a derivative has no verified
-        identity on another broker, so it is never sent across brokers. Cash equity and same-broker orders do no extra work
-        while enforcement is off.
+        identity on another broker, so it is never sent across brokers. Either way, a cross-broker Alice Blue Child whose
+        instrument could not be resolved exactly (the marker from _child_instrument_token) is then skipped: sending it would
+        leave Alice to resolve by symbol. Cash equity and same-broker orders do no extra work while enforcement is off.
         """
         skip: Optional[PlannerSkip] = None
         if not settings.CANONICAL_MAPPING_ENFORCED:
-            if EXCHANGE_SEGMENTS.get(str(event.exchange or "").strip().upper()) == ("CASH",):
-                return None
-            try:
-                skip = cross_broker_derivative_skip(
-                    master_broker=await self._master_broker_id(event.account_id),
-                    child_broker=follower.broker, exchange=event.exchange,
-                )
-            except Exception as exc:
-                logger.error(f"[Pipeline] Cross-broker instrument check failed for {follower.display_name}; failing closed: {exc}")
-                skip = PlannerSkip("INSTRUMENT_UNMAPPED", "CROSS_BROKER_CHECK_ERROR")
+            if EXCHANGE_SEGMENTS.get(str(event.exchange or "").strip().upper()) != ("CASH",):
+                try:
+                    skip = cross_broker_derivative_skip(
+                        master_broker=await self._master_broker_id(event.account_id),
+                        child_broker=follower.broker, exchange=event.exchange,
+                    )
+                except Exception as exc:
+                    logger.error(f"[Pipeline] Cross-broker instrument check failed for {follower.display_name}; failing closed: {exc}")
+                    skip = PlannerSkip("INSTRUMENT_UNMAPPED", "CROSS_BROKER_CHECK_ERROR")
         else:
             try:
                 skip = check_child_order(
@@ -251,6 +264,8 @@ class CopyEnginePipeline:
             except Exception as exc:
                 logger.error(f"[Pipeline] Planner check failed for {follower.display_name}; failing closed: {exc}")
                 skip = PlannerSkip("INSTRUMENT_UNMAPPED", "PLANNER_CHECK_ERROR")
+        if skip is None:
+            skip = alice_unresolved_skip(event.instrument_id)
         if skip is None:
             return None
         logger.info(
@@ -2855,7 +2870,8 @@ class CopyEnginePipeline:
                 continue
 
             account, multiplier = follower_info.get(acc_id_str, (None, Decimal("1.0")))
-            child_token = await self._child_instrument_token(master_account_id, account, instrument_token)
+            child_token = await self._child_instrument_token(master_account_id, account, instrument_token,
+                                                             exchange=ord_rec.exchange, symbol=ord_rec.symbol)
             settings_obj = account.copy_settings if account else None
             lot_size = self._get_lot_size(ord_rec.symbol)
 

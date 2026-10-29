@@ -49,6 +49,24 @@ def no_network(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
 
 
+ALICE_SBIN_TOKEN = "3045"          # Alice Blue's own token for NSE SBIN-EQ in the test contract master below (never the Master's 12345)
+ALICE_NSE_MASTER = (
+    "Exch,Exchange Segment,Group Name,Symbol,Token,Instrument Type,Instrument Name,Formatted Ins Name,Trading Symbol,Lot Size,Tick Size\n"
+    f"NSE,nse_cm,EQ,SBIN,{ALICE_SBIN_TOKEN},0,STATE BANK OF INDIA,SBIN-EQ,SBIN-EQ,1,0.05\n"
+)
+
+
+@pytest.fixture(autouse=True)
+def alice_contract_master(monkeypatch):
+    """A fresh, just-loaded Alice NSE contract master for each test: an Alice Child of another broker's Master is given Alice's own
+    token from it (planner.alice_cross_broker_token) and is skipped when it is missing."""
+    from app.services.instruments import terms
+    fresh = terms.TermsStore()
+    fresh.load_alice("NSE", ALICE_NSE_MASTER)
+    monkeypatch.setattr(terms, "store", fresh)
+    return fresh
+
+
 @pytest.fixture
 def all_pairs_open_for_test(monkeypatch):
     """TEST ONLY: list all 16 pairs and open every role gate, for the duration of one test."""
@@ -147,6 +165,8 @@ async def test_a_foreign_instrument_token_never_reaches_another_brokers_child(
     request = client.place_order.await_args.args[0]
     if master_broker == child_broker:
         assert request.instrument_token == "12345"          # same broker: the Master's token is native to the Child
+    elif child_broker == "alicebluenew":
+        assert request.instrument_token == ALICE_SBIN_TOKEN  # Alice's own token from its contract master, never the Master's
     else:
         assert request.instrument_token is None, (master_broker, child_broker, request.instrument_token)
 
