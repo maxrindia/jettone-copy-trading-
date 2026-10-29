@@ -1,8 +1,10 @@
 # Groww: Child support and verification runbook
 
-Status: **disabled** (`GROWW_ENABLED=false`). Groww can only be a **Child**; it can never be a
-strategy Master (its orders cannot be detected). Nothing here has been run against a real Groww
-account. Source of every field below: Groww's official Trading API documentation
+Status: Child trading **disabled** (`GROWW_CHILD_TRADING_ENABLED=false`; production has `GROWW_ENABLED=true`
+for setup and login only). Groww can only be a **Child**; it can never be a strategy Master (its orders
+cannot be detected). What has been seen against a real account is limited to the token call (2026-10-19)
+and three read-only GETs on an empty account (2026-10-29) - see "Live capture" below; everything else is
+documentation only. Source of every field below: Groww's official Trading API documentation
 (groww.in/trade-api/docs - cURL orders / portfolio / margin / annexures / instruments, and the
 Python SDK pages), read 2026-10-16. The same table lives in `backend/app/services/groww/contract.py`.
 
@@ -56,8 +58,8 @@ Python SDK pages), read 2026-10-16. The same table lives in `backend/app/service
 
 1. The **FAILURE response body / error codes** (only `status: "SUCCESS" | "FAILURE"` is documented).
 2. The **TOTP-flow token response** (so only the approval flow is implemented).
-3. The shape of an **empty** positions / order list. An unexpected shape is treated as "unknown", never "flat" -
-   which means a genuinely flat account might be treated as unreadable until the capture confirms the shape.
+3. ~~The shape of an **empty** positions / order list.~~ **Live-verified 2026-10-29** (see "Live capture"):
+   `payload.order_list = []` and `payload.positions = []`. Any other shape is still treated as "unknown", never "flat".
 4. The **paging base** of the order list: a full first page (100) is treated as possibly truncated.
 5. Whether `quantity` or `net_carry_forward_quantity` is the sellable long for carried positions; only `quantity`
    ("Net quantity") is used. **CNC holdings** (delivery shares from the holdings endpoint) are not counted, so a
@@ -90,6 +92,39 @@ unchanged and deliberately conservative: an offset-less expiry is trusted only u
 and no session outlives 24 hours. Open: the real timezone and exact lifetime (the docs mention an "expires daily at 6:00 AM"
 for the access-token approach, timezone unstated) - to be settled from the first successful login's logged `ttl`. Not
 established: whether the Groww SDK (`growwapi` 1.5.0, not installed here) reads `active` or `isActive`.
+
+## Live capture: read-only GETs on an empty account (2026-10-29)
+
+How: one-off, inside the production `fastapi` container, reusing the session of the owner's explicit login at
+08:29:31 UTC. The encrypted session was read once from Redis and copied into a throwaway in-process store; the
+client ran on that store with `login()` / `logout()` disabled and an httpx request hook that allowed only the
+three GETs below; requests went through the account's own proxy route. No token request, no logout, no write
+to Redis (the production key and its TTL were unchanged afterwards). Output passed through `redact_response`:
+HTTP status, keys, JSON types, row counts. **No value was recorded** - no balance, id, symbol or token.
+
+| Endpoint | Result | Shape (LIVE-VERIFIED) |
+|---|---|---|
+| `GET /v1/order/list?segment=CASH&page_size=100` | HTTP 200, `status: SUCCESS` | `payload.order_list` is a list; **`[]`** when the account has no orders |
+| `GET /v1/positions/user?segment=CASH` | HTTP 200, `status: SUCCESS` | `payload.positions` is a list; **`[]`** when the account is flat |
+| `GET /v1/margins/detail/user` | HTTP 200, `status: SUCCESS` | JSON numbers `clear_cash`, `collateral_available`, `net_margin_used` (read by Jettone) and `adhoc_margin`, `brokerage_and_charges`, `collateral_used`; objects `commodity_margin_details`, `equity_margin_details`, `fno_margin_details` |
+
+What changed in code: `contract.py` records these shapes (`LIVE_VERIFIED_SHAPES`, `MARGIN_*_FIELDS`); `get_funds`
+now requires each of the three funds fields to be a JSON number (a numeric string, null, boolean, object or a
+missing field refuses the read). Empty lists were already accepted as successful empty answers and still are;
+`tests/test_groww_live_shapes.py` pins the exact captured shapes.
+
+**Still UNVERIFIED** (the account had no orders or positions; nothing was placed):
+- any order-list or position **row**, its fields and value types
+- the real **`order_status` vocabulary** (open, part-filled, delivery, rejected, cancelled)
+- order-list **paging** (a full page of 100 is still treated as possibly truncated)
+- the **FAILURE / error** response body
+- order **create / modify / cancel**, lookup by reference, and static-IP enforcement on those calls
+- the timezone of the token expiry (the logged `ttl` was 57,628 s at 08:29:31 UTC; not yet reconciled with the
+  documented "expires daily at 6:00 AM")
+- any Master -> Groww copy (the pair gate and `GROWW_CHILD_TRADING_ENABLED=false` still refuse it)
+
+`GrowwContract.live_verified` and `master_verified` stay `False`; the capability ceilings in
+`brokers/profiles.py` are unchanged (only LOGIN is `VERIFIED_LIVE`).
 
 ## Safe next step (needs the account owner)
 

@@ -117,6 +117,17 @@ def _int(row: Any, key: str, **kw) -> int:
     return _strict(lambda: strict_int(need(row, key), key, **kw))
 
 
+def _number(row: Any, key: str, **kw) -> Decimal:
+    """A field Groww was SEEN to send as a JSON number (contract.MARGIN_FUNDS_FIELDS): anything else - missing, null, a boolean, a
+    string even if numeric, an object - refuses the response, then the strict checks of _dec apply."""
+    if not isinstance(row, dict) or key not in row:
+        raise GrowwCapabilityUnavailable(f"Groww response {key} is missing")
+    value = row[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise GrowwCapabilityUnavailable(f"Groww response {key} is not a JSON number")
+    return _dec(row, key, **kw)
+
+
 def _opt(row: Any, key: str, **kw) -> Decimal:
     return _strict(lambda: optional_decimal(row, key, **kw))
 
@@ -858,7 +869,8 @@ class GrowwClient:
         payload = self._payload(status, data)
         rows = payload.get("positions")
         if not isinstance(rows, list):
-            # The empty-positions shape is not documented; an unexpected shape is "unknown", never "flat".
+            # A flat account answers payload.positions = [] (live capture 2026-10-29, contract.LIVE_VERIFIED_SHAPES); any
+            # other shape is "unknown", never "flat".
             raise GrowwCapabilityUnavailable("positions response has no positions array")
         positions: List[Position] = []
         for r in rows:
@@ -885,11 +897,12 @@ class GrowwClient:
         self._require_contract()
         status, data = await self._call("read", "GET", C.ROUTES["margin"])
         p = self._payload(status, data)
+        # The three fields are JSON numbers in the live response (contract.MARGIN_FUNDS_FIELDS, captured 2026-10-29).
         return FundsData(
             account_id=self.account_id,
-            available_margin=_dec(p, "clear_cash"),                           # finite; a negative balance is real
-            collateral=_dec(p, "collateral_available", allow_negative=False),
-            used_margin=_dec(p, "net_margin_used", allow_negative=False),
+            available_margin=_number(p, "clear_cash"),                        # finite; a negative balance is real
+            collateral=_number(p, "collateral_available", allow_negative=False),
+            used_margin=_number(p, "net_margin_used", allow_negative=False),
             updated_at=self._clock(),
         )
 

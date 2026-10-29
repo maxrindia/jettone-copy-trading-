@@ -20,10 +20,20 @@ Documented and used:
     non-trading reads 20/s 500/min
   - instrument master CSV columns
 
+LIVE-VERIFIED (read-only capture against a real account through the production proxy, 2026-10-29; shapes only, no
+values recorded; see LIVE_VERIFIED_SHAPES and docs/groww-verification.md):
+  - GET /v1/order/list?segment=CASH&page_size=100 -> HTTP 200, {"status": "SUCCESS", "payload": {"order_list": [...]}};
+    an account with no orders answers order_list = []
+  - GET /v1/positions/user?segment=CASH -> HTTP 200, {"status": "SUCCESS", "payload": {"positions": [...]}}; a flat account
+    answers positions = []
+  - GET /v1/margins/detail/user -> HTTP 200, status SUCCESS; payload carries the JSON numbers in MARGIN_FUNDS_FIELDS and
+    MARGIN_OTHER_NUMERIC_FIELDS and the objects in MARGIN_OBJECT_FIELDS
+  Not seen (the account was empty): any order or position ROW, the order_status vocabulary, a full page.
+
 Documented as unclear or absent - Jettone fails closed on each (see client.py):
   - the FAILURE response body and error codes (only status "SUCCESS"/"FAILURE")
   - the TOTP-flow token response (so only the approval flow is implemented)
-  - the shape of an EMPTY positions/order list (an unexpected shape is "unknown")
+  - any response shape other than the live-verified ones above (an unexpected shape is "unknown", never "flat")
   - the page base of order-list paging (a full first page is treated as truncated)
   - the quantity semantics of a modify on a part-filled order (refused)
   - whether static IP is enforced on reads (Groww's own blog says order placement
@@ -33,12 +43,12 @@ Documented as unclear or absent - Jettone fails closed on each (see client.py):
     mapped to a fill state only when filled_quantity agrees; otherwise refused
   - the timezone of timestamps and token expiry (the earlier reading is used)
 
-`live_verified` stays False until a supervised capture (scripts/groww_capture.py)
-has been reviewed against a real account.
+`live_verified` stays False: the 2026-10-29 capture confirmed the empty-account shapes only, not order or position rows,
+statuses, paging, error bodies or any order operation.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet
+from typing import Dict, FrozenSet, Tuple
 
 BASE_URL = "https://api.groww.in"
 API_VERSION = "1.0"
@@ -78,6 +88,18 @@ LIMIT_TOKEN = ((5, 1), (30, 60))
 ORDER_LIST_PAGE_SIZE = 100          # documented maximum
 
 ORDER_REFERENCE_MIN, ORDER_REFERENCE_MAX = 8, 20   # alphanumeric, at most two hyphens
+
+# Live capture, 2026-10-29 (read-only, empty account). Field NAMES and JSON types only - never a value.
+LIVE_CAPTURE_DATE = "2026-10-29"
+MARGIN_FUNDS_FIELDS: Tuple[str, ...] = ("clear_cash", "collateral_available", "net_margin_used")   # read by get_funds
+MARGIN_OTHER_NUMERIC_FIELDS: Tuple[str, ...] = ("adhoc_margin", "brokerage_and_charges", "collateral_used")
+MARGIN_OBJECT_FIELDS: Tuple[str, ...] = ("commodity_margin_details", "equity_margin_details", "fno_margin_details")
+LIVE_VERIFIED_SHAPES: Dict[str, str] = {
+    "order_list": "HTTP 200, status SUCCESS, payload.order_list is a list; [] when the account has no orders",
+    "positions": "HTTP 200, status SUCCESS, payload.positions is a list; [] when the account is flat",
+    "margin": "HTTP 200, status SUCCESS, payload holds MARGIN_FUNDS_FIELDS and MARGIN_OTHER_NUMERIC_FIELDS as JSON numbers "
+              "and MARGIN_OBJECT_FIELDS as objects",
+}
 
 
 @dataclass(frozen=True)
