@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     # has been reviewed. It is not a pair gate and enables no broker.
     CANONICAL_MAPPING_ENFORCED: bool = False
 
+    # While Live Trading is OFF, log a read-only preview ([ObservePreview], copy_engine/child_preview.py) of what each candidate
+    # Child would face for every new Master entry: membership, role gate, pair gate, instrument mapping, quantity and the Child
+    # adapter's own order validation. Logging only - it never sends, writes or opens anything; set false to silence it.
+    OBSERVE_CHILD_PREVIEW_ENABLED: bool = True
+
     # Lot / freeze quantity validation. OBSERVE is the only implemented mode: at each Child final-quantity point the pipeline
     # logs and counts what a validator would say (services/instruments/terms.py) and changes NO allow / skip / send decision.
     # Any other value is treated as OBSERVE; enforcement does not exist yet.

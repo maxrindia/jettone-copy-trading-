@@ -17,6 +17,7 @@ Which Children an order is copied to is decided per order by strategy
 routing (CopyEnginePipeline._get_eligible_followers_for_master), never here.
 """
 import asyncio
+import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -37,6 +38,7 @@ from app.services import strategy_membership as membership
 from app.services.alice_blue.instruments import load_and_cache_contract_master
 from app.services.alice_blue.manager import account_manager
 from app.services.alice_blue.websocket import AliceBlueWebSocketClient
+from app.services.copy_engine.child_preview import ENTRY_EVENTS, observe_child_previews
 from app.services.copy_engine.detector import MasterTradeDetector
 from app.services.copy_engine.pipeline import CopyEnginePipeline
 from app.services.copy_engine.validator import EventValidator
@@ -102,6 +104,35 @@ class EngineLoop:
         runtime_hooks.set_engine_loop(self)
         self._task = asyncio.create_task(self._run())
         logger.info("EngineLoop task created.")
+
+    # Upper bound on one observe-only preview; past it the preview is abandoned and only a "skipped" line is logged.
+    OBSERVE_PREVIEW_TIMEOUT_SECONDS = 5.0
+
+    @asynccontextmanager
+    async def _order_gate_then_preview(self, source_id: str, pending: list):
+        """The Master's shared order gate (strategy_membership.account_order_gate), exactly as before, followed - only after the gate
+        is RELEASED, in the same task - by the observe-only preview of the event the body queued in `pending` (at most one, and only
+        on the live-trading-OFF return). A Master switch therefore never waits on a preview. If the body raises, the exception
+        propagates as before and nothing is previewed."""
+        async with membership.account_order_gate(source_id):
+            yield
+        if pending:
+            await self._log_observe_preview(pending[0], source_id)
+
+    async def _log_observe_preview(self, trade_event: Any, source_id: str) -> None:
+        """Live Trading OFF only: log what each candidate Child would face for a new Master entry ([ObservePreview], one JSON line
+        per account; copy_engine/child_preview.py). Read-only - no pipeline, client, broker call or database write - and bounded:
+        any error or a slow database only skips the log line, it never changes the observe-only outcome."""
+        if not settings.OBSERVE_CHILD_PREVIEW_ENABLED or str(trade_event.event_type or "").upper() not in ENTRY_EVENTS:
+            return
+        try:
+            records = await asyncio.wait_for(observe_child_previews(trade_event, source_id),
+                                             timeout=self.OBSERVE_PREVIEW_TIMEOUT_SECONDS)
+        except Exception as exc:
+            logger.warning(f"[ObservePreview] skipped ({type(exc).__name__}); observe-only behaviour unchanged")
+            return
+        for record in records:
+            logger.info("[ObservePreview] " + json.dumps(record, default=str, sort_keys=True))
 
     async def stop(self) -> None:
         if runtime_hooks.get_engine_loop() is self:
@@ -340,7 +371,8 @@ class EngineLoop:
                     # 3. Master account: detect + route + copy, holding this
                     # Master's order gate (shared) so a Master switch can
                     # never interleave with it.
-                    async with membership.account_order_gate(source_id):
+                    observe_pending: list = []
+                    async with self._order_gate_then_preview(source_id, observe_pending):
                         if self._monitors.get(source_id) is not monitor:
                             # The Master was switched away while this event
                             # waited for the switch to finish: it now belongs
@@ -401,6 +433,7 @@ class EngineLoop:
                                 f"[EngineLoop][live-trading OFF] Would process {trade_event.event_type} for {trade_event.symbol} "
                                 f"{trade_event.side} qty={trade_event.quantity}"
                             )
+                            observe_pending.append(trade_event)          # previewed after the gate is released
                             return
 
                         if not await is_master_trading_enabled(self.redis):

@@ -6,8 +6,9 @@ stops every new Master event before the pipeline (EngineLoop: "[live-trading OFF
 membership (CHILD_BROKER_UNSUPPORTED / BROKER_PAIR_NOT_SUPPORTED) and at routing (CHILD_BROKER_NOT_READY). This module lets the rest of
 the path be examined without changing any of that.
 
-It never sends and never writes: no database, Redis, broker call, client or session. `would_send` is always False; the pipeline stays
-the only sender. It applies the pipeline's own pre-send checks with the pipeline's own functions, and it does NOT stop at the first
+It never sends and never writes: no database write, no Redis, broker call, client or session (preview_child_order reads only
+in-memory catalogs; observe_child_previews additionally READS the Master's strategy and the accounts). `would_send` is always False;
+the pipeline stays the only sender. It applies the pipeline's own pre-send checks with the pipeline's own functions, and it does NOT stop at the first
 failure - every blocker is listed, so a closed pair shows everything that would still stand in the way once it were opened:
 
   UNSUPPORTED_EVENT          not a new LIMIT / SL / SL-M / MARKET entry (modify, cancel and fills act on existing orders)
@@ -21,10 +22,11 @@ Not previewed (each is reported as a note, never as a pass): funds and the risk 
 claim - all need live Child data or a database write. Child quantity uses the multiplier formula (the pipeline's no-CopySetting
 path); capital-based quantity modes need the Child's live funds. Adapter-level checks exist for Groww only.
 """
+import hashlib
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from types import SimpleNamespace
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import settings
 from app.services.alice_blue.instruments import InstrumentResolutionError
@@ -159,3 +161,97 @@ def preview_child_order(
     if str(event.side).upper() == "SELL":
         notes.append("SELL: the Child's live position book decides at send time (SELL_POSITION_SAFETY_BYPASS is not consulted here)")
     return ChildPreview(master, child, child_type, quantity, tuple(blockers), body, tuple(notes))
+
+
+# ── observe-only engine hook ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+# The Master events that would create NEW Child orders; only these are previewed.
+ENTRY_EVENTS = frozenset({"LIMIT_CREATED", "SL_PENDING_CREATED", "MARKET_ACCEPTED"})
+NOT_A_STRATEGY_MEMBER = "NOT_A_STRATEGY_MEMBER"
+MEMBER_TRADING_DISABLED = "MEMBER_TRADING_DISABLED"
+STRATEGY_TRADING_DISABLED = "STRATEGY_TRADING_DISABLED"
+NO_STRATEGY = "NO_STRATEGY"
+# Fields of the Child order body that describe the order; the reference and anything else are dropped.
+_BODY_FIELDS = ("trading_symbol", "exchange", "segment", "transaction_type", "quantity", "product", "order_type", "price",
+                "trigger_price", "validity")
+
+
+def account_ref(account_id: Any) -> str:
+    """A stable, non-reversible 8-character reference for an account in logs - never its id, name or broker user id."""
+    return hashlib.sha256(str(account_id).encode("utf-8")).hexdigest()[:8]
+
+
+def _mask(value: Any) -> str:
+    text = str(value or "")
+    return f"...{text[-4:]}" if len(text) > 4 else text
+
+
+def preview_record(event: MasterTradeEvent, master_broker: Optional[str], account: Any, membership: str,
+                   extra: Tuple[PreviewBlocker, ...], multiplier: Any) -> Dict[str, Any]:
+    """One sanitized, JSON-ready preview for one candidate Child."""
+    p = preview_child_order(event, master_broker=master_broker, child_broker=getattr(account, "broker", None), multiplier=multiplier)
+    blockers = tuple(extra) + p.blockers
+    return {
+        "master": {"broker": p.master_broker, "order": _mask(event.master_order_id), "event": event.event_type,
+                   "symbol": event.symbol, "exchange": event.exchange, "side": event.side, "quantity": event.quantity,
+                   "order_type": event.order_type, "product_type": event.product_type,
+                   "price": str(event.price), "limit_price": str(event.limit_price), "trigger_price": str(event.trigger_price)},
+        "child": {"ref": account_ref(getattr(account, "id", "")), "broker": p.child_broker, "membership": membership},
+        "would_send": p.would_send,
+        "order_ok_if_enabled": all(b.code in GATE_CODES for b in p.blockers),
+        "blockers": [{"code": b.code, "detail": b.detail} for b in blockers],
+        "child_order": None if p.order_body is None else {k: p.order_body[k] for k in _BODY_FIELDS if k in p.order_body},
+        "child_order_type": p.child_order_type,
+        "child_quantity": p.child_quantity,
+        "notes": list(p.notes),
+    }
+
+
+async def observe_child_previews(event: MasterTradeEvent, master_account_id: Any) -> List[Dict[str, Any]]:
+    """Previews for every active account other than the Master: its strategy's Children AND every other account, so a broker that is
+    not (or cannot yet be) a member - Groww today - shows its membership blocker next to the rest. Database READS only: no write, no
+    broker client, no session, and the Master's credentials are never loaded. An empty list for a non-entry event."""
+    import uuid
+
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from app.core.database import AsyncSessionLocal
+    from app.models.accounts import Account
+    from app.models.strategies import GroupStrategy, StrategyMember
+
+    if str(event.event_type or "").upper() not in ENTRY_EVENTS:
+        return []
+    master_id = uuid.UUID(str(master_account_id))
+    async with AsyncSessionLocal() as session:
+        master = await session.get(Account, master_id)
+        strategies = list((await session.execute(
+            select(GroupStrategy).where(GroupStrategy.master_account_id == master_id, GroupStrategy.deleted_at.is_(None))
+            .options(selectinload(GroupStrategy.members).selectinload(StrategyMember.account))
+        )).scalars().all())
+        candidates = list((await session.execute(
+            select(Account).where(Account.id != master_id, Account.deleted_at.is_(None), Account.is_active.is_(True))
+        )).scalars().all())
+    master_broker = normalize_broker_id(getattr(master, "broker", None)) if master is not None else None
+    strategy = strategies[0] if len(strategies) == 1 else None
+    members = {m.account_id: m for m in (strategy.members if strategy is not None else [])}
+
+    records = []
+    for account in sorted(candidates, key=lambda a: (str(a.broker or ""), account_ref(a.id))):
+        extra: List[PreviewBlocker] = []
+        member = members.get(account.id)
+        if strategy is None:
+            membership = NO_STRATEGY
+            extra.append(PreviewBlocker(NO_STRATEGY, f"{len(strategies)} strategies list this Master"))
+        elif member is None:
+            membership = NOT_A_STRATEGY_MEMBER
+            extra.append(PreviewBlocker(NOT_A_STRATEGY_MEMBER, "not a Child of the Master's strategy"))
+        else:
+            membership = "MEMBER" if member.trading_enabled else MEMBER_TRADING_DISABLED
+            if not member.trading_enabled:
+                extra.append(PreviewBlocker(MEMBER_TRADING_DISABLED, "the Child's trading is disabled in the strategy"))
+        if strategy is not None and not strategy.trading_enabled:
+            extra.append(PreviewBlocker(STRATEGY_TRADING_DISABLED, "the strategy's trading is disabled"))
+        multiplier = member.multiplier if member is not None else Decimal("1")
+        records.append(preview_record(event, master_broker, account, membership, tuple(extra), multiplier))
+    return records
