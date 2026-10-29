@@ -152,9 +152,10 @@ def preview_child_order(
             try:
                 body = _groww_body(event, child_type, quantity, groww_store)
             except InstrumentResolutionError as exc:
-                blockers.append(PreviewBlocker(INSTRUMENT_UNMAPPED, f"GROWW:{str(exc)[:180]}"))
+                # Exception text can carry symbols, ids or credentials: only the exception type is logged.
+                blockers.append(PreviewBlocker(INSTRUMENT_UNMAPPED, f"GROWW:{type(exc).__name__}"))
             except Exception as exc:                                   # the adapter's own refusal, or an unreadable field
-                blockers.append(PreviewBlocker(ADAPTER_REFUSED, f"GROWW:{str(exc)[:180] or type(exc).__name__}"))
+                blockers.append(PreviewBlocker(ADAPTER_REFUSED, f"GROWW:{type(exc).__name__}"))
     elif child not in (GROWW_ID, ALICE_ID):
         notes.append(f"no adapter-level preview for {child or child_broker}")
 

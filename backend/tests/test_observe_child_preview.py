@@ -350,3 +350,68 @@ async def test_the_builder_returns_nothing_for_a_non_entry_and_never_writes(db_s
     assert await P.observe_child_previews(_trade_event(master.id, "ORDER_FILLED"), str(master.id)) == []
     records = await P.observe_child_previews(_trade_event(master.id, "LIMIT_CREATED"), str(master.id))
     assert len(records) == 2 and await _row_counts() == before
+
+
+# ── preview dedupe, error redaction, opt-in default ───────────────────────────────────────────────────────────────────────────
+
+async def _preview_calls(mock_redis, events, monkeypatch):
+    monkeypatch.setattr(settings, "OBSERVE_CHILD_PREVIEW_ENABLED", True)
+    seen = AsyncMock(return_value=[])
+    loop = EngineLoop(redis_client=mock_redis)
+    with patch("app.services.runtime.engine_loop.observe_child_previews", seen):
+        for source_id, ev in events:
+            await loop._log_observe_preview(ev, source_id)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_entry_event_for_the_same_order_is_previewed_once(mock_redis, monkeypatch):
+    ev = _trade_event(uuid.uuid4(), "MARKET_ACCEPTED", order_type="MARKET")
+    seen = await _preview_calls(mock_redis, [("m1", ev), ("m1", ev), ("m1", ev)], monkeypatch)   # e.g. one per partial fill
+    assert seen.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_distinct_orders_events_and_masters_are_each_previewed(mock_redis, monkeypatch):
+    a = _trade_event(uuid.uuid4(), "LIMIT_CREATED")
+    b = _trade_event(uuid.uuid4(), "LIMIT_CREATED")
+    b.master_order_id = "AB-ORDER-OTHER-0002"
+    c = _trade_event(uuid.uuid4(), "SL_PENDING_CREATED")
+    seen = await _preview_calls(mock_redis, [("m1", a), ("m1", b), ("m1", c), ("m2", a)], monkeypatch)
+    assert seen.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_the_dedupe_memory_is_bounded(mock_redis, monkeypatch):
+    monkeypatch.setattr(EngineLoop, "OBSERVE_PREVIEW_DEDUPE_MAX", 3)
+    events = []
+    for i in range(5):
+        ev = _trade_event(uuid.uuid4(), "LIMIT_CREATED")
+        ev.master_order_id = f"ORD-{i}"
+        events.append(("m1", ev))
+    monkeypatch.setattr(settings, "OBSERVE_CHILD_PREVIEW_ENABLED", True)
+    loop = EngineLoop(redis_client=mock_redis)
+    with patch("app.services.runtime.engine_loop.observe_child_previews", AsyncMock(return_value=[])):
+        for source_id, ev in events:
+            await loop._log_observe_preview(ev, source_id)
+    assert len(loop._observe_previewed) == 3
+
+
+@pytest.mark.parametrize("exc_type", [RuntimeError, ValueError, P.InstrumentResolutionError])
+def test_exception_text_never_reaches_the_preview(monkeypatch, exc_type):
+    leaked = "acct=zqgrowwacct order=AB-ORDER-123456789 sym=SBIN api_key=sk-LEAK-123 token=abc"
+
+    def boom(*args, **kwargs):
+        raise exc_type(leaked)
+
+    monkeypatch.setattr(P, "_groww_body", boom)
+    preview = P.preview_child_order(_trade_event(uuid.uuid4(), "LIMIT_CREATED"), master_broker="alicebluenew", child_broker="groww")
+    text = json.dumps([(b.code, b.detail) for b in preview.blockers])
+    for fragment in ("zqgrowwacct", "AB-ORDER", "SBIN", "sk-LEAK", "token=", leaked):
+        assert fragment not in text
+    assert f"GROWW:{exc_type.__name__}" in text
+
+
+def test_the_preview_is_opt_in_by_default():
+    from app.core.config import Settings
+    assert Settings.model_fields["OBSERVE_CHILD_PREVIEW_ENABLED"].default is False

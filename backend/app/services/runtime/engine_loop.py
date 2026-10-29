@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -99,6 +100,10 @@ class EngineLoop:
         # broker_order_id ever seen over the process's lifetime.
         self._order_processing_locks: Dict[str, asyncio.Lock] = {}
         self._order_processing_lock_refcounts: Dict[str, int] = {}
+        # Observe-preview dedupe only: bounded, in-memory, never persisted (see _log_observe_preview).
+        self._observe_previewed: "OrderedDict[Tuple[str, str, str], None]" = OrderedDict()
+
+    OBSERVE_PREVIEW_DEDUPE_MAX = 2048
 
     async def start(self) -> None:
         runtime_hooks.set_engine_loop(self)
@@ -125,6 +130,14 @@ class EngineLoop:
         any error or a slow database only skips the log line, it never changes the observe-only outcome."""
         if not settings.OBSERVE_CHILD_PREVIEW_ENABLED or str(trade_event.event_type or "").upper() not in ENTRY_EVENTS:
             return
+        # One preview per logical Master order and entry event: a repeated MARKET_ACCEPTED (one per partial fill of the same
+        # order) or a re-delivered update is not previewed again. A different order id or event type is always previewed.
+        key = (str(source_id), str(trade_event.master_order_id), str(trade_event.event_type or "").upper())
+        if key in self._observe_previewed:
+            return
+        self._observe_previewed[key] = None
+        while len(self._observe_previewed) > self.OBSERVE_PREVIEW_DEDUPE_MAX:
+            self._observe_previewed.popitem(last=False)
         try:
             records = await asyncio.wait_for(observe_child_previews(trade_event, source_id),
                                              timeout=self.OBSERVE_PREVIEW_TIMEOUT_SECONDS)

@@ -70,8 +70,8 @@ class Settings(BaseSettings):
 
     # While Live Trading is OFF, log a read-only preview ([ObservePreview], copy_engine/child_preview.py) of what each candidate
     # Child would face for every new Master entry: membership, role gate, pair gate, instrument mapping, quantity and the Child
-    # adapter's own order validation. Logging only - it never sends, writes or opens anything; set false to silence it.
-    OBSERVE_CHILD_PREVIEW_ENABLED: bool = True
+    # adapter's own order validation. Logging only - it never sends, writes or opens anything; opt-in: set true to enable it.
+    OBSERVE_CHILD_PREVIEW_ENABLED: bool = False
 
     # Lot / freeze quantity validation. OBSERVE is the only implemented mode: at each Child final-quantity point the pipeline
     # logs and counts what a validator would say (services/instruments/terms.py) and changes NO allow / skip / send decision.
