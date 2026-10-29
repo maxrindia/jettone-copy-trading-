@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MATRIX_NOT_LOADED,
+  blockedReason,
   brokerLabel,
   masterDetectionBlocker,
   matrixRows,
@@ -77,5 +78,21 @@ describe("labels and summaries", () => {
     expect(masterDetectionBlocker(broker("z", { master_detection: { mode: "POLL", external_orders_verified: false, blocker: null } }))).toBe(
       "Master order detection is not verified.",
     );
+  });
+});
+
+describe("blockedReason", () => {
+  it("lists every missing requirement and says code-complete is not broker-verified", () => {
+    const text = blockedReason({
+      master: "alicebluenew", child: "groww", supported: false, requirement: "PAIR_NOT_ALLOWLISTED", detail: "d", message: "Blocked.",
+      missing: [{ requirement: "PAIR_NOT_ALLOWLISTED", detail: "not allowlisted" }, { requirement: "EVIDENCE_BELOW_LIVE", detail: "groww: placement is VERIFIED_DOCS" }],
+      code_complete: true, real_broker_verified: false,
+    });
+    expect(text).toContain("not allowlisted");
+    expect(text).toContain("groww: placement is VERIFIED_DOCS");
+    expect(text).toContain("not verified with the real broker");
+  });
+  it("falls back to the engine message when the engine sends no list", () => {
+    expect(blockedReason({ master: "a", child: "b", supported: false, requirement: null, detail: "d", message: "Only this." })).toBe("Only this.");
   });
 });

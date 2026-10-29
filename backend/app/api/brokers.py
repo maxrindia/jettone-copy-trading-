@@ -13,7 +13,7 @@ from fastapi import APIRouter
 from app.services import strategy_readiness
 from app.services.brokers.capabilities import Role
 from app.services.brokers.master_source import detection_info
-from app.services.brokers.pairs import SUPPORTED_PAIRS
+from app.services.brokers.pairs import SUPPORTED_PAIRS, pair_requirements
 from app.services.brokers.profiles import build_profile
 from app.services.brokers.registry import all_broker_specs, get_broker_spec
 
@@ -93,6 +93,11 @@ async def get_broker_matrix() -> Dict[str, Any]:
             cells.append({
                 "master": master, "child": child, "supported": p["supported"] is True, "requirement": p["requirement"],
                 "detail": p["detail"], "message": p["message"],
+                # Everything still missing for REAL trading. code_complete says the engine path is implemented and exercised with
+                # fakes; real_broker_verified stays false for any pair that is not supported, because a fake proves nothing about a broker.
+                "missing": list(pair_requirements(master, child)),
+                "code_complete": True,
+                "real_broker_verified": p["supported"] is True,
             })
     return {"success": True, "data": {"brokers": brokers, "matrix": cells,
                                       "supported": [c for c in cells if c["supported"]],

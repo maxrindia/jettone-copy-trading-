@@ -27,6 +27,11 @@ export interface MatrixCell {
   requirement: string | null;
   detail: string;
   message: string;
+  /** Every requirement still missing for real trading (not just the first). Optional: older engines do not send it. */
+  missing?: { requirement: string; detail: string }[];
+  /** The engine path is implemented and exercised with fakes. This is not broker verification. */
+  code_complete?: boolean;
+  real_broker_verified?: boolean;
 }
 
 export interface BrokerMatrixData {
@@ -54,6 +59,18 @@ export interface MatrixRow {
   cells: { child: string; supported: boolean; reason: string }[];
 }
 
+/** The engine's reason plus every missing requirement. "Code complete" never means verified with the real broker. */
+export function blockedReason(cell: MatrixCell): string {
+  const base = cell.message || cell.detail;
+  const missing = Array.isArray(cell.missing) ? cell.missing.map((m) => m.detail).filter(Boolean) : [];
+  const parts = [base];
+  if (missing.length > 0) parts.push(`Missing: ${missing.join("; ")}.`);
+  if (cell.code_complete === true && cell.real_broker_verified !== true) {
+    parts.push("The copy path is implemented and tested with simulated brokers; it is not verified with the real broker.");
+  }
+  return parts.join(" ");
+}
+
 /** One row per Master broker, in the engine's broker order. A missing cell is blocked, never supported. */
 export function matrixRows(data: BrokerMatrixData | null | undefined): MatrixRow[] {
   if (!data || !Array.isArray(data.brokers) || !Array.isArray(data.matrix)) return [];
@@ -63,7 +80,7 @@ export function matrixRows(data: BrokerMatrixData | null | undefined): MatrixRow
     cells: ids.map((child) => {
       const cell = data.matrix.find((c) => c.master === master && c.child === child);
       if (!cell) return { child, supported: false, reason: MATRIX_NOT_LOADED };
-      return { child, supported: cell.supported === true, reason: cell.supported === true ? "Supported" : cell.message || cell.detail };
+      return { child, supported: cell.supported === true, reason: cell.supported === true ? "Supported" : blockedReason(cell) };
     }),
   }));
 }

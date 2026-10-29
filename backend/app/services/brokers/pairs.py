@@ -29,11 +29,11 @@ This gates the creation of NEW Child orders. It does not gate modify, cancel, SL
 which act on orders that already exist; blocking them would leave a live Child order unmanageable.
 """
 from dataclasses import dataclass
-from typing import Mapping, Optional, Tuple
+from typing import Dict, Mapping, Optional, Tuple
 
 from app.services.brokers.capabilities import Feature, Verification
 from app.services.brokers.profiles import build_profile
-from app.services.brokers.registry import can_be_child, can_be_master, normalize_broker_id
+from app.services.brokers.registry import can_be_child, can_be_master, get_broker_spec, normalize_broker_id
 
 BROKER_PAIR_NOT_SUPPORTED = "BROKER_PAIR_NOT_SUPPORTED"
 
@@ -104,3 +104,33 @@ def check_pair(master_broker: Optional[str], child_broker: Optional[str]) -> Pai
         return PairDecision(True, None, f"{master}->{child}")
     except Exception as exc:                                    # an error is never read as support
         return _no(f"PAIR_CHECK_ERROR:{type(exc).__name__}")
+
+
+def pair_requirements(master_broker: Optional[str], child_broker: Optional[str]) -> Tuple[Dict[str, str], ...]:
+    """EVERY requirement a pair still lacks, not only the first (check_pair stops at the first). Read-only and never raises; an
+    empty tuple means nothing is missing. It describes, it never grants: a pair is supported only when check_pair says so.
+
+    The list is about REAL-BROKER readiness (allowlist, role gates, live-verified evidence). It is not a statement about the code:
+    the engine's fan-out is exercised for every pair with fakes (tests/test_multi_broker_fanout.py), and a fake is not evidence."""
+    try:
+        master = normalize_broker_id(master_broker) if master_broker is not None else None
+        child = normalize_broker_id(child_broker)
+        if master is None or child is None:
+            return ({"requirement": "BROKER_UNKNOWN", "detail": "A broker of this pair is not recognised."},)
+        missing = []
+        if (master, child) not in SUPPORTED_PAIRS:
+            missing.append({"requirement": "PAIR_NOT_ALLOWLISTED",
+                            "detail": f"{master}->{child} is not on the allowlist; it is added only after a supervised live smoke order and recorded owner approval."})
+        for role, broker, open_ in (("MASTER", master, can_be_master(master)), ("CHILD", child, can_be_child(child))):
+            if not open_:
+                spec = get_broker_spec(broker)
+                missing.append({"requirement": f"{role}_ROLE_NOT_OPEN", "detail": f"{broker}: {spec.reason if spec else 'unknown broker'}"})
+        for broker, features in ((master, REQUIRED_MASTER_FEATURES), (child, REQUIRED_CHILD_FEATURES)):
+            profile = build_profile(broker)
+            for feature in features:
+                level = profile.features.get(feature, Verification.NOT_SUPPORTED) if profile else Verification.NOT_SUPPORTED
+                if level is not Verification.VERIFIED_LIVE:
+                    missing.append({"requirement": "EVIDENCE_BELOW_LIVE", "detail": f"{broker}: {feature.value} is {level.value}, needs VERIFIED_LIVE"})
+        return tuple(missing)
+    except Exception as exc:                                    # an error is never read as "nothing missing"
+        return ({"requirement": "PAIR_CHECK_ERROR", "detail": type(exc).__name__},)
