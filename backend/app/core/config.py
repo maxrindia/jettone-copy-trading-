@@ -117,6 +117,11 @@ class Settings(BaseSettings):
     # Even when true it has no effect until GrowwContract.master_verified is set in code, which
     # needs the owner's captures (order-list paging, stable order ids, part-fill vocabulary).
     GROWW_MASTER_ENABLED: bool = False
+    # CANARY: opens the Alice Blue -> Groww pair (and only that pair) for a supervised first live order without the allowlist /
+    # VERIFIED_LIVE evidence. The role gates (GROWW_ENABLED, GROWW_CHILD_TRADING_ENABLED, contract) still apply. It does not enable
+    # Live Trading and does not cap quantity: cap the Groww Child with a FIXED quantity-policy of 1 first. Default off; remove once
+    # the pair is allowlisted with recorded evidence.
+    ALICE_GROWW_CANARY_ENABLED: bool = False
     # Groww's instrument master (CSV). Empty = never downloaded; set it to the URL
     # in Groww's instruments documentation, or load a downloaded file instead.
     GROWW_INSTRUMENT_MASTER_URL: str = ""

@@ -365,3 +365,31 @@ def test_the_crosswalk_and_shadow_features_stay_out_of_the_pair_gate_and_the_tra
     for rel in ("services/brokers/pairs.py", "services/copy_engine/pipeline.py"):
         text = (APP / rel).read_text(encoding="utf-8").lower()
         assert "crosswalk" not in text and "shadow" not in text, rel
+
+
+# ── Alice Blue -> Groww canary (owner flag, default off) ──────────────────────────────────────────────────────────────────────
+
+def _groww_roles_open(monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "GROWW_ENABLED", True)
+    monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", True)
+
+
+def test_canary_is_off_by_default_and_the_pair_stays_closed(monkeypatch):
+    from app.core.config import settings
+    from app.services.brokers.pairs import check_pair
+    _groww_roles_open(monkeypatch)
+    assert settings.ALICE_GROWW_CANARY_ENABLED is False
+    assert check_pair("alicebluenew", "groww").supported is False
+
+
+def test_canary_opens_only_alice_to_groww_and_keeps_the_role_gates(monkeypatch):
+    from app.core.config import settings
+    from app.services.brokers.pairs import check_pair
+    monkeypatch.setattr(settings, "ALICE_GROWW_CANARY_ENABLED", True)
+    _groww_roles_open(monkeypatch)
+    assert check_pair("alicebluenew", "groww").supported is True
+    for pair in (("groww", "alicebluenew"), ("alicebluenew", "angelone"), ("angelone", "groww")):
+        assert check_pair(*pair).supported is False, pair
+    monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", False)        # the child role gate still closes it
+    assert check_pair("alicebluenew", "groww").supported is False

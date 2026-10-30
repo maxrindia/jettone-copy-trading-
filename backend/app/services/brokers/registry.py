@@ -328,3 +328,8 @@ def session_key_for(broker_id: Optional[str], account_id) -> str:
     spec = get_broker_spec(broker_id)
     prefix = spec.session_prefix if spec and spec.session_prefix else _ALICE.session_prefix
     return f"{prefix}{account_id}"
+
+
+def canary_pair_open(master: str, child: str) -> bool:
+    """The owner-set canary for the one pair alicebluenew -> groww. Off unless ALICE_GROWW_CANARY_ENABLED; it never opens any other pair."""
+    return bool(settings.ALICE_GROWW_CANARY_ENABLED) and (master, child) == ("alicebluenew", "groww")

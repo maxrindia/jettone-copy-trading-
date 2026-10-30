@@ -33,7 +33,9 @@ from typing import Dict, Mapping, Optional, Tuple
 
 from app.services.brokers.capabilities import Feature, Verification
 from app.services.brokers.profiles import build_profile
-from app.services.brokers.registry import can_be_child, can_be_master, get_broker_spec, normalize_broker_id
+from app.services.brokers.registry import (
+    can_be_child, can_be_master, canary_pair_open, get_broker_spec, normalize_broker_id,
+)
 
 BROKER_PAIR_NOT_SUPPORTED = "BROKER_PAIR_NOT_SUPPORTED"
 
@@ -92,12 +94,15 @@ def check_pair(master_broker: Optional[str], child_broker: Optional[str]) -> Pai
             return _no(f"MASTER_BROKER_UNKNOWN:{str(master_broker)[:40]}")
         if child is None:
             return _no(f"CHILD_BROKER_UNKNOWN:{str(child_broker)[:40]}")
-        if (master, child) not in SUPPORTED_PAIRS:
+        canary = canary_pair_open(master, child)
+        if (master, child) not in SUPPORTED_PAIRS and not canary:
             return _no(f"PAIR_NOT_ALLOWLISTED:{master}->{child}")
         if not can_be_master(master):
             return _no(f"MASTER_ROLE_NOT_OPEN:{master}")
         if not can_be_child(child):
             return _no(f"CHILD_ROLE_NOT_OPEN:{child}")
+        if canary:
+            return PairDecision(True, None, f"{master}->{child} (CANARY: evidence below VERIFIED_LIVE)")
         gap = _feature_gap(master, REQUIRED_MASTER_FEATURES) or _feature_gap(child, REQUIRED_CHILD_FEATURES)
         if gap:
             return _no(f"EVIDENCE_BELOW_LIVE:{gap}")
