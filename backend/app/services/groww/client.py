@@ -54,7 +54,10 @@ from app.services.groww.instruments import GrowwInstrumentStore, store as defaul
 
 logger = logging.getLogger("groww_client")
 
-_REFUSAL_FIELDS = ("code", "error_code", "error", "message", "status")
+# Groww's failure envelope (seen live 2026-10-30): {"header": null, "error": {"errorCode": ..., "errorMessage": ...}, "response": null}.
+# Only these two fields, read from `error`, are ever logged as values.
+_REFUSAL_FIELDS = ("errorCode", "errorMessage")
+_URLISH = re.compile(r"://|@")                             # a URL or user@host (e.g. a proxy URL with credentials)
 _TOKENISH = re.compile(r"[A-Za-z0-9_.-]{28,}")           # a long unbroken run looks like a key or token
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -319,6 +322,7 @@ class GrowwClient:
         self.user_id = label.strip()
         self._api_key = api_key
         self._api_secret = api_secret
+        self._proxy_url = proxy_url
         self.redis = redis
         self.static_ip = static_ip
         self.static_ip_valid_until = static_ip_valid_until
@@ -434,13 +438,14 @@ class GrowwClient:
     def _log_refused_token_response(self, data: Dict[str, Any], resp: httpx.Response) -> None:
         """Groww answered the token request with a non-200. Record WHY from Groww's own error fields so a refusal (approval pending,
         IP not whitelisted, bad key) can be told apart. Logged: the HTTP status, the Content-Type, the body kind, the body SHAPE, and
-        only the values of the error fields `code` / `error_code` / `error` / `message` / `status` when they are short plain strings.
-        A value that looks like a token or contains our key or secret is replaced. Never logged: any other value, headers, credentials."""
+        only the values of `error.errorCode` and `error.errorMessage` when they are plain strings. A value that looks like a token or a
+        URL, or that contains our key, secret or proxy URL, is replaced. Never logged: the raw body, any other value, headers, credentials."""
         found: Dict[str, str] = {}
-        for container in (data, data.get("error") if isinstance(data.get("error"), dict) else {}):
+        error = data.get("error") if isinstance(data, dict) else None
+        if isinstance(error, dict):
             for key in _REFUSAL_FIELDS:
-                value = container.get(key) if isinstance(container, dict) else None
-                if isinstance(value, str) and value.strip() and key not in found:
+                value = error.get(key)
+                if isinstance(value, str) and value.strip():
                     found[key] = self._scrub_refusal_text(value)
         logger.warning(
             f"[{self.account_id}] Groww token request refused: http={resp.status_code} content_type={_safe_content_type(resp)!r} "
@@ -449,10 +454,10 @@ class GrowwClient:
 
     def _scrub_refusal_text(self, text: str) -> str:
         clean = "".join(c if 32 <= ord(c) < 127 else "?" for c in text.strip())[:160]
-        for secret in (self._api_key, self._api_secret):
+        for secret in (self._api_key, self._api_secret, self._proxy_url):
             if secret and secret in clean:
                 return "[redacted]"
-        if _TOKENISH.search(clean):
+        if _TOKENISH.search(clean) or _URLISH.search(clean):
             return "[redacted]"
         return clean
 
@@ -548,6 +553,7 @@ class GrowwClient:
     # ── instruments ──────────────────────────────────────────────────────
     async def resolve_instrument(self, exchange: str, symbol: str) -> Tuple[str, str]:
         """(ISIN or '', Groww trading_symbol). Another broker's token is never accepted."""
+        await self._instruments.ensure_loaded()
         inst = self._instruments.resolve(exchange, symbol)
         return inst.isin, inst.trading_symbol
 
@@ -649,6 +655,7 @@ class GrowwClient:
 
     async def _place_order(self, req: OrderRequest, reference: str, state: SendState) -> OrderResult:
         try:
+            await self._instruments.ensure_loaded()      # lazy, single-flight; a no-op unless Groww and the master URL are configured
             self._require_static_ip()
             body = self.build_order_body(
                 symbol=req.symbol, exchange=req.exchange, side=req.side, quantity=req.quantity,

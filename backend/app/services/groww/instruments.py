@@ -14,14 +14,24 @@ kept - F&O is not supported, so derivatives never resolve.
 
 Resolution refuses unless exactly one instrument matches, and an instrument
 whose buy/sell flag is false or unreadable is refused for that side.
+
+Loading (the store is never marked ready by an empty or unreadable download)
+----------------------------------------------------------------------------
+`ensure_loaded` is the one entry point, used at startup and lazily before a Groww order. It does nothing unless GROWW_ENABLED and
+GROWW_INSTRUMENT_MASTER_URL are set. A download is parsed into a separate staging store, validated (required columns present, at
+least a minimum number of equity rows), and only then swapped in as one unit, so a failed, malformed, empty or truncated refresh can
+never corrupt a previously valid catalog and a refresh never accumulates duplicate rows. Concurrent callers share one download. A
+catalog older than SOFT_MAX_AGE is refreshed in the background while the current one keeps serving; older than HARD_MAX_AGE it is
+refused (the master may have changed), and a failed attempt is not repeated for FAILURE_COOLDOWN.
 """
 
+import asyncio
 import csv
 import io
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 import httpx
 
@@ -33,6 +43,14 @@ logger = logging.getLogger("groww_instruments")
 _EXCHANGES = ("NSE", "BSE")
 _TRUE = {"true", "1", "yes", "y", "t"}
 _FALSE = {"false", "0", "no", "n", "f"}
+
+REQUIRED_COLUMNS = ("exchange", "trading_symbol", "instrument_type", "segment", "buy_allowed", "sell_allowed")
+MIN_EQUITY_ROWS = 1000                       # the live file holds ~12,800; far fewer means a truncated or wrong document
+SOFT_MAX_AGE = timedelta(hours=12)           # past this a refresh is started in the background
+HARD_MAX_AGE = timedelta(hours=36)           # past this the catalog is refused until a refresh succeeds
+FAILURE_COOLDOWN = timedelta(seconds=60)     # no download retry sooner than this after a failure
+FETCH_TIMEOUT_SECONDS = 60.0
+MAX_DOWNLOAD_BYTES = 80 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -72,6 +90,9 @@ class GrowwInstrumentStore:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._load_calls = 0
         self._snapshot_at: Optional[datetime] = None
+        self._refresh_lock = asyncio.Lock()
+        self._last_failure_at: Optional[datetime] = None
+        self._background: Optional["asyncio.Future"] = None
 
     @property
     def snapshot_loaded_at(self) -> Optional[datetime]:
@@ -79,6 +100,73 @@ class GrowwInstrumentStore:
         where exactly one full-document load (load_csv_text / load_file) populated the store counts. Any other
         history - rows added directly, a second load, a failed or empty load - leaves the freshness unknown."""
         return self._snapshot_at if self._load_calls == 1 else None
+
+    def _age(self) -> Optional[timedelta]:
+        return None if self._snapshot_at is None else self._clock() - self._snapshot_at
+
+    @property
+    def is_ready(self) -> bool:
+        """Loaded and not past HARD_MAX_AGE. A catalog with unknown freshness (rows added directly) counts as ready."""
+        if not self.size:
+            return False
+        age = self._age()
+        return age is None or age <= HARD_MAX_AGE
+
+    def replace_from_csv_text(self, text: str, *, min_rows: int = 1) -> int:
+        """Parse `text` into a staging store, validate it, then swap it in as one unit. Raises ValueError (the store is untouched)
+        for a missing/renamed required column, no readable rows, or fewer than `min_rows` equity rows."""
+        reader = csv.DictReader(io.StringIO(text))
+        columns = set(reader.fieldnames or ())
+        missing = [c for c in REQUIRED_COLUMNS if c not in columns]
+        if missing:
+            raise ValueError("instrument master is missing required column(s): " + ", ".join(missing))
+        staging = GrowwInstrumentStore(self._clock)
+        added = staging.load_rows(reader)
+        if added <= 0 or added < min_rows:
+            raise ValueError(f"instrument master holds {added} NSE/BSE equity row(s); expected at least {max(1, min_rows)}")
+        self._by_key = staging._by_key
+        self.size = staging.size
+        self._load_calls = 1                 # one complete document: the snapshot time is meaningful
+        self._snapshot_at = self._clock()
+        return added
+
+    async def _download_and_replace(self, fetch: Optional[Callable[[str], Awaitable[str]]]) -> int:
+        text = await (fetch or _fetch_text)(settings.GROWW_INSTRUMENT_MASTER_URL)
+        return self.replace_from_csv_text(text, min_rows=MIN_EQUITY_ROWS)
+
+    async def _refresh(self, fetch: Optional[Callable[[str], Awaitable[str]]]) -> bool:
+        """One download under the lock. True when a valid catalog is now loaded. Any failure keeps the previous catalog."""
+        async with self._refresh_lock:
+            age = self._age()
+            if self.size and age is not None and age < SOFT_MAX_AGE:
+                return True                                  # another caller refreshed while this one waited
+            now = self._clock()
+            if self._last_failure_at is not None and now - self._last_failure_at < FAILURE_COOLDOWN:
+                return self.is_ready
+            try:
+                n = await self._download_and_replace(fetch)
+            except Exception as exc:
+                self._last_failure_at = now
+                logger.error(f"Groww instrument master could not be loaded ({type(exc).__name__}); "
+                             f"{'keeping the previous catalog' if self.size else 'Groww orders will be refused'}.")
+                return self.is_ready
+            self._last_failure_at = None
+            logger.info(f"Groww instrument master loaded: {n} equity instruments.")
+            return True
+
+    async def ensure_loaded(self, fetch: Optional[Callable[[str], Awaitable[str]]] = None) -> bool:
+        """True when a usable catalog is loaded. Does nothing (no network) unless GROWW_ENABLED and the URL are set. An empty store
+        waits for one shared download; a soft-stale one is refreshed in the background and keeps serving meanwhile."""
+        if not settings.GROWW_ENABLED or not settings.GROWW_INSTRUMENT_MASTER_URL:
+            return self.is_ready
+        age = self._age()
+        if self.size and age is not None and age < SOFT_MAX_AGE:
+            return True
+        if self.is_ready and age is not None:               # soft-stale but still within HARD_MAX_AGE: serve, refresh behind
+            if self._background is None or self._background.done():
+                self._background = asyncio.ensure_future(self._refresh(fetch))
+            return True
+        return await self._refresh(fetch)
 
     def iter_instruments(self) -> Tuple[GrowwInstrument, ...]:
         return tuple(i for key in sorted(self._by_key) for i in self._by_key[key])
@@ -129,6 +217,8 @@ class GrowwInstrumentStore:
             raise InstrumentResolutionError(f"Groww instrument mapping supports NSE/BSE equity only (got {exchange!r}).")
         if not self.size:
             raise InstrumentResolutionError("Groww instrument master is not loaded.")
+        if not self.is_ready:
+            raise InstrumentResolutionError("Groww instrument master is stale; it must be refreshed before an order.")
         sym = str(symbol or "").strip().upper()
         if sym.endswith("-EQ"):
             sym = sym[:-3]
@@ -146,20 +236,21 @@ class GrowwInstrumentStore:
 store = GrowwInstrumentStore()
 
 
+async def _fetch_text(url: str) -> str:
+    async with httpx.AsyncClient(timeout=FETCH_TIMEOUT_SECONDS) as http:
+        resp = await http.get(url)
+        resp.raise_for_status()
+    if len(resp.content) > MAX_DOWNLOAD_BYTES:
+        raise ValueError("instrument master download is larger than the allowed size")
+    return resp.text
+
+
 async def load_instruments_if_enabled(target: Optional[GrowwInstrumentStore] = None) -> int:
-    """Downloads Groww's instrument master once at startup, only when GROWW_ENABLED
-    and GROWW_INSTRUMENT_MASTER_URL are both set. Any failure leaves the store
-    empty, so every Groww order is refused (fail closed)."""
+    """Startup load: downloads Groww instrument master only when GROWW_ENABLED and GROWW_INSTRUMENT_MASTER_URL are both set, through
+    the store validated, atomic, single-flight `ensure_loaded`. Returns the number of instruments now loaded (0 when disabled or
+    when the load failed, which leaves the store empty so every Groww order is refused)."""
     target = target if target is not None else store
     if not settings.GROWW_ENABLED or not settings.GROWW_INSTRUMENT_MASTER_URL:
         return 0
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as http:
-            resp = await http.get(settings.GROWW_INSTRUMENT_MASTER_URL)
-            resp.raise_for_status()
-        n = target.load_csv_text(resp.text)
-        logger.info(f"Groww instrument master loaded: {n} equity instruments.")
-        return n
-    except Exception as exc:
-        logger.error(f"Groww instrument master could not be loaded ({type(exc).__name__}); Groww orders will be refused.")
-        return 0
+    await target.ensure_loaded()
+    return target.size if target.is_ready else 0
