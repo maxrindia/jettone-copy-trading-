@@ -54,6 +54,9 @@ from app.services.groww.instruments import GrowwInstrumentStore, store as defaul
 
 logger = logging.getLogger("groww_client")
 
+_REFUSAL_FIELDS = ("code", "error_code", "error", "message", "status")
+_TOKENISH = re.compile(r"[A-Za-z0-9_.-]{28,}")           # a long unbroken run looks like a key or token
+
 IST = timezone(timedelta(hours=5, minutes=30))
 GROWW_DAILY_LOGIN_CAP = 120            # token endpoint: 5/s, 30/min, 150 per 24 h - stay under it
 MAX_SESSION_SECONDS = 24 * 3600
@@ -405,6 +408,7 @@ class GrowwClient:
             raise GrowwAuthError(f"network error during login: {type(exc).__name__}") from None
         data = self._json(resp)
         if resp.status_code != 200:
+            self._log_refused_token_response(data, resp)
             raise GrowwAuthError(
                 f"Groww refused the token request (HTTP {resp.status_code}). "
                 "Has today's approval been given for this API key on Groww Cloud?"
@@ -426,6 +430,31 @@ class GrowwClient:
         blob = json.dumps({"token": token, "at": self._clock().isoformat()})
         await self.redis.set(self.session_key, encrypt_secret(blob), ex=ttl)
         logger.info(f"[{self.account_id}] Groww session established (activity flag: {flag_names}; ttl={ttl}s).")
+
+    def _log_refused_token_response(self, data: Dict[str, Any], resp: httpx.Response) -> None:
+        """Groww answered the token request with a non-200. Record WHY from Groww's own error fields so a refusal (approval pending,
+        IP not whitelisted, bad key) can be told apart. Logged: the HTTP status, the Content-Type, the body kind, the body SHAPE, and
+        only the values of the error fields `code` / `error_code` / `error` / `message` / `status` when they are short plain strings.
+        A value that looks like a token or contains our key or secret is replaced. Never logged: any other value, headers, credentials."""
+        found: Dict[str, str] = {}
+        for container in (data, data.get("error") if isinstance(data.get("error"), dict) else {}):
+            for key in _REFUSAL_FIELDS:
+                value = container.get(key) if isinstance(container, dict) else None
+                if isinstance(value, str) and value.strip() and key not in found:
+                    found[key] = self._scrub_refusal_text(value)
+        logger.warning(
+            f"[{self.account_id}] Groww token request refused: http={resp.status_code} content_type={_safe_content_type(resp)!r} "
+            f"body={_body_kind(resp)} fields={json.dumps(found, sort_keys=True)} shape={_shape_of(data)}"
+        )
+
+    def _scrub_refusal_text(self, text: str) -> str:
+        clean = "".join(c if 32 <= ord(c) < 127 else "?" for c in text.strip())[:160]
+        for secret in (self._api_key, self._api_secret):
+            if secret and secret in clean:
+                return "[redacted]"
+        if _TOKENISH.search(clean):
+            return "[redacted]"
+        return clean
 
     def _log_unusable_token_response(self, reason: str, data: Dict[str, Any], resp: httpx.Response) -> None:
         """Groww answered 200 but the token response failed a check. Record WHY, what kind of body it was, its
