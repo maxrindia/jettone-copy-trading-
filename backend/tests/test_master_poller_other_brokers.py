@@ -257,17 +257,17 @@ async def test_order_types_use_the_common_vocabulary(db_session, master_account,
     assert dispatched and dispatched[0].order_type == expected
 
 
-# ── Groww order-list paging boundary (the page base is NOT verified; a full page is never trusted) ──
+# ── Groww order-list paging boundary: a full page that never advances is never trusted (real paging is in test_groww_order_pagination) ──
 
 @pytest.mark.asyncio
-async def test_a_full_groww_page_is_a_missed_poll_not_a_complete_book(db_session, master_account, mock_redis):
+async def test_a_full_groww_page_that_never_advances_is_a_missed_poll_not_a_complete_book(db_session, master_account, mock_redis):
     d = await Driver("groww").start(mock_redis)
     page = lambda n: [d.row(str(20000 + i), "complete") for i in range(n)]       # noqa: E731
     d.set_book(page(99))                                                          # just under a page: readable
     dispatched = []
     poller = make_poller(d, mock_redis, dispatched)
     assert await poller.poll_once() == 0 and poller.is_seeded
-    d.set_book(page(99) + [d.row("29999", "open")])                               # exactly a full page: possibly truncated
+    d.set_book(page(99) + [d.row("29999", "open")])                               # a full page the fake repeats for every page: it never advances
     assert await poller.poll_once() == 0 and dispatched == []
     d.set_book(page(99) + [d.row("29998", "open")][:0])                           # back under a page, nothing new
     assert await poller.poll_once() == 0

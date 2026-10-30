@@ -532,7 +532,7 @@ async def test_order_book_lifecycle(mock_redis):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("response", [
-    ok({"order_list": [order_row(str(i)) for i in range(100)]}),            # full page: possibly truncated
+    ok({"order_list": [order_row(str(i)) for i in range(100)]}),            # a full page that never advances (the same rows for every page)
     ok({}),                                                                  # no order_list
     ok({"order_list": "nope"}),
     (200, {"status": "FAILURE"}),
@@ -541,7 +541,7 @@ async def test_order_book_lifecycle(mock_redis):
     ok({"order_list": [{k: v for k, v in order_row("1").items() if k != "quantity"}]}),
     ok({"order_list": [{k: v for k, v in order_row("1", "OPEN", 10, 0).items() if k != "filled_quantity"}]}),
     ok({"order_list": [{**order_row("1", "EXECUTED", 10, 0)}]}),            # EXECUTED with no fill
-], ids=["truncated", "no_array", "not_list", "failure", "http_500", "unknown_status", "missing_qty",
+], ids=["full_page_never_advances", "no_array", "not_list", "failure", "http_500", "unknown_status", "missing_qty",
      "missing_filled_qty", "contradiction"])
 async def test_an_unusable_order_list_raises_instead_of_guessing(mock_redis, response):
     c, fake = await logged_in(mock_redis)

@@ -224,7 +224,7 @@ async def test_a_position_that_cannot_be_classified_blocks_and_names_groww(db_se
 @pytest.mark.asyncio
 @pytest.mark.parametrize("override", [(500, {"status": "FAILURE"}), (200, {"status": "SUCCESS", "payload": {"unexpected": []}}),
                                       (200, {"status": "SUCCESS", "payload": {"order_list": [{"groww_order_id": str(i)} for i in range(100)]}})],
-                         ids=["http-error", "no-order-list", "full-page"])
+                         ids=["http-error", "no-order-list", "full-page-that-never-advances"])
 async def test_an_unreadable_groww_book_blocks_and_is_never_read_as_nothing_open(db_session, mock_redis, groww_roles_open, canary, override):
     sc = await alice_strategy(db_session, mock_redis)
     sc.fake.list_override = override
@@ -334,6 +334,7 @@ async def test_a_lapsed_groww_session_is_alerted_as_the_master_not_being_watched
 
 @pytest.mark.asyncio
 async def test_a_truncated_order_list_is_alerted_with_its_own_reason(db_session, mock_redis):
+    # the fake returns the same 100 rows for every page, so the read is refused as a full page that never advances
     master, fake, client, poller = await make_master_poller(db_session, mock_redis)
     await poller.poll_once()
     fake.list_override = (200, {"status": "SUCCESS", "payload": {"order_list": [{"groww_order_id": str(i)} for i in range(100)]}})
