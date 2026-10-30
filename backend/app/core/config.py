@@ -124,6 +124,11 @@ class Settings(BaseSettings):
     ALICE_GROWW_CANARY_ENABLED: bool = False
     # Same canary for the one pair Alice Blue -> Zerodha (ZERODHA_ENABLED and ZERODHA_CHILD_TRADING_ENABLED still apply). Default off.
     ALICE_ZERODHA_CANARY_ENABLED: bool = False
+    # Generic owner canary: a comma-separated list of "master>child" broker pairs (for example "groww>alicebluenew,groww>groww") that
+    # may carry orders for a supervised first live test without the allowlist / VERIFIED_LIVE evidence. It waives ONLY those two
+    # checks: the Master role gate (flag + contract master_verified), the Child role gate and every per-order safety check still
+    # apply, and it does not enable Live Trading. An entry that does not name two known brokers opens nothing. Default empty (off).
+    CANARY_PAIRS: str = ""
     # Groww's instrument master (CSV). Empty = never downloaded; set it to the URL
     # in Groww's instruments documentation, or load a downloaded file instead.
     GROWW_INSTRUMENT_MASTER_URL: str = ""

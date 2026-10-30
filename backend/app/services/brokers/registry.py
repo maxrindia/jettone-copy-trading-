@@ -20,7 +20,7 @@ detection is not implemented.
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, FrozenSet, Optional
+from typing import Dict, FrozenSet, Optional, Tuple
 
 from app.core.config import settings
 from app.services.angel_one.contract import ANGEL_CONTRACT, contract_is_usable
@@ -330,10 +330,27 @@ def session_key_for(broker_id: Optional[str], account_id) -> str:
     return f"{prefix}{account_id}"
 
 
+def listed_canary_pairs() -> FrozenSet[Tuple[str, str]]:
+    """The pairs named in CANARY_PAIRS ("master>child", comma-separated), as canonical broker ids. An entry that is not two known
+    brokers joined by ">" is ignored, so a typo opens nothing (fail closed). Read from settings on every call."""
+    pairs = set()
+    for entry in str(settings.CANARY_PAIRS or "").split(","):
+        master, sep, child = entry.partition(">")
+        if not sep:
+            continue
+        m, c = normalize_broker_id(master) if master.strip() else None, normalize_broker_id(child) if child.strip() else None
+        if m is not None and c is not None:
+            pairs.add((m, c))
+    return frozenset(pairs)
+
+
 def canary_pair_open(master: str, child: str) -> bool:
-    """The owner-set canaries: alicebluenew -> groww (ALICE_GROWW_CANARY_ENABLED) and alicebluenew -> zerodha
-    (ALICE_ZERODHA_CANARY_ENABLED). Each is off by default and opens only its own pair."""
-    if master != "alicebluenew":
-        return False
-    return (child == "groww" and bool(settings.ALICE_GROWW_CANARY_ENABLED)) or (
-        child == "zerodha" and bool(settings.ALICE_ZERODHA_CANARY_ENABLED))
+    """The owner-set canaries. Two named flags - alicebluenew -> groww (ALICE_GROWW_CANARY_ENABLED) and alicebluenew -> zerodha
+    (ALICE_ZERODHA_CANARY_ENABLED) - and the generic CANARY_PAIRS list. Everything is off by default and each opens only the pair
+    it names; the role gates and the per-order checks are untouched by a canary."""
+    if master == "alicebluenew" and (
+        (child == "groww" and bool(settings.ALICE_GROWW_CANARY_ENABLED))
+        or (child == "zerodha" and bool(settings.ALICE_ZERODHA_CANARY_ENABLED))
+    ):
+        return True
+    return (master, child) in listed_canary_pairs()

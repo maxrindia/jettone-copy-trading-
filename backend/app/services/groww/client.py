@@ -93,6 +93,12 @@ class GrowwCapabilityUnavailable(GrowwError):
     """A response was missing, malformed or outside the documented vocabulary."""
 
 
+class GrowwOrderListTruncated(GrowwCapabilityUnavailable):
+    """The order list came back as a full page, so older orders may be missing and the list is not trusted. A subclass, so every
+    handler of GrowwCapabilityUnavailable still catches it; the type name alone tells an operator WHY a read failed (a monitor
+    alert carries only the exception type, never a broker message)."""
+
+
 class GrowwRateLimited(GrowwError):
     pass
 
@@ -823,7 +829,7 @@ class GrowwClient:
             raise GrowwCapabilityUnavailable("order list response has no order_list array")
         if len(rows) >= C.ORDER_LIST_PAGE_SIZE:
             # The page base of Groww's paging is undocumented: a full page may hide orders.
-            raise GrowwCapabilityUnavailable("order list may be truncated (full page); not trusting it")
+            raise GrowwOrderListTruncated("order list may be truncated (full page); not trusting it")
         records = [self.parse_order_row(r) for r in rows]
         await self._restore_client_order_ids(records)
         return records

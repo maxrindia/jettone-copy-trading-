@@ -52,7 +52,7 @@ the same lock, so no order can be routed between the check and the commit.
 """
 import logging
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -76,10 +76,11 @@ from app.services.brokers.order_book_read import (
     NO_CLIENT as ORDER_BOOK_NO_CLIENT,
     RAW_READ_NOT_SUPPORTED as ORDER_BOOK_RAW_READ_NOT_SUPPORTED,
     OrderBookState,
+    read_order_book,
     read_order_book_rows,
 )
 from app.services import strategy_readiness as readiness
-from app.services.brokers.registry import can_be_master
+from app.services.brokers.registry import can_be_master, is_alice_blue
 from app.services.copy_engine.risk_inputs import (
     UnknownProductTypeError,
     normalize_product_for_exchange,
@@ -187,6 +188,32 @@ def _raw_label(row: Dict[str, Any]) -> str:
     return f"{_raw_order_id(row) or '?'} {sym} {_raw_status(row) or 'UNKNOWN'}"
 
 
+_BROKER_NAMES = {"groww": "Groww", "angelone": "Angel One", "zerodha": "Zerodha"}
+
+
+def _broker_label(broker: Optional[str]) -> str:
+    """How the broker is named to the user in a blocker. A NULL or Alice Blue broker is "Alice Blue" - the wording every Alice-only
+    message has always used, so those messages are unchanged."""
+    if is_alice_blue(broker):
+        return "Alice Blue"
+    return _BROKER_NAMES.get(str(broker or "").strip().lower(), str(broker))
+
+
+async def _parsed_book_as_rows(client: Any):
+    """The order book of a broker with NO raw read (Groww, Angel One, Zerodha), proven read from its PARSED records.
+
+    These clients raise on a failed or untrustworthy read (no order list, a truncated page, an unrecognised status), so a list they
+    return - even an empty one - is a read that succeeded. Each record becomes a row carrying only the three keys the checks below
+    read, so the checks themselves are the ones Alice Blue accounts go through. Anything not proven read (UNKNOWN or FAILED) is
+    returned as it is and blocks, exactly as an unreadable Alice Blue book does."""
+    read = await read_order_book(client, checked=True)
+    if not read.is_known:
+        return read
+    rows = tuple({"orderStatus": str(r.status or ""), "brokerOrderId": str(r.broker_order_id or ""), "tradingSymbol": str(r.symbol or "")}
+                 for r in read.records)
+    return replace(read, rows=rows)
+
+
 async def _load_strategy(db: AsyncSession, strategy_id: uuid.UUID) -> GroupStrategy:
     strategy = (
         await db.execute(
@@ -212,7 +239,8 @@ async def _validate_request(
 
     new_master = (
         await db.execute(
-            select(Account).where(Account.id == new_master_id).options(selectinload(Account.api_credential))
+            select(Account).where(Account.id == new_master_id)
+            .options(selectinload(Account.api_credential), selectinload(Account.broker_credential))
         )
     ).scalar_one_or_none()
     if new_master is None or new_master.deleted_at is not None:
@@ -227,7 +255,10 @@ async def _validate_request(
             f"Broker '{new_master.broker}' can only be a Child account; its orders cannot be detected, "
             "so it cannot be a strategy's Master.",
         )
-    if new_master.api_credential is None:
+    # Alice Blue keeps its secret in api_credentials; every other broker keeps its credentials in the encrypted vault
+    # (broker_credentials). Each broker is held to the credential store IT uses.
+    has_credential = new_master.api_credential is not None if is_alice_blue(new_master.broker) else new_master.broker_credential is not None
+    if not has_credential:
         raise SwitchValidationError(
             409, "NEW_MASTER_NOT_ELIGIBLE", "The selected Master account has no API credential configured."
         )
@@ -264,10 +295,9 @@ async def run_preflight(
             scope.setdefault(m.account_id, "CHILD")
     scope[new_master_id] = "NEW_MASTER"
 
-    names: Dict[uuid.UUID, str] = {
-        a.id: a.display_name
-        for a in (await db.execute(select(Account).where(Account.id.in_(list(scope))))).scalars().all()
-    }
+    scope_accounts = (await db.execute(select(Account).where(Account.id.in_(list(scope))))).scalars().all()
+    names: Dict[uuid.UUID, str] = {a.id: a.display_name for a in scope_accounts}
+    broker_labels: Dict[uuid.UUID, str] = {a.id: _broker_label(a.broker) for a in scope_accounts}
     master_ids = [a for a, r in scope.items() if r in ("CURRENT_MASTER", "NEW_MASTER")]
     scope_ids = list(scope)
 
@@ -301,7 +331,7 @@ async def run_preflight(
         if rows:
             add(blockers, "PENDING_MASTER_ORDERS", acc,
                 f"{len(rows)} Master order(s) still working in Jettone's records. Wait for them to fill "
-                "or cancel them in Alice Blue.",
+                f"or cancel them in {broker_labels.get(acc, 'Alice Blue')}.",
                 len(rows), [f"{o.broker_order_id or o.internal_order_id} {o.symbol} {o.status.value}" for o in rows])
 
     child_open = (
@@ -324,7 +354,7 @@ async def run_preflight(
             if no_id:
                 detail += f" ({no_id} without a broker order id - placement outcome unknown)"
             add(blockers, "PENDING_CHILD_ORDERS", acc,
-                detail + ". Wait for fill sync to complete or resolve them in Alice Blue.",
+                detail + f". Wait for fill sync to complete or resolve them in {broker_labels.get(acc, 'Alice Blue')}.",
                 len(rows), [f"{o.broker_order_id or o.internal_order_id} {o.symbol} {o.status.value}" for o in rows])
 
     master_order_ids_subq = select(Order.broker_order_id).where(
@@ -426,7 +456,7 @@ async def run_preflight(
             # they can be wrong in both directions. Live orders and positions
             # (below) are what block.
             add(warnings, "CARRY_POSITION_UNVERIFIED", acc,
-                "Jettone's records show these delivery holdings. Not verified with Alice Blue.",
+                f"Jettone's records show these delivery holdings. Not verified with {broker_labels.get(acc, 'Alice Blue')}.",
                 len(open_carry) + len(unknown), open_carry + unknown)
 
     # ── 2. Live broker state (fail closed) ──────────────────────────────
@@ -448,7 +478,10 @@ async def run_preflight(
         client = client_provider(str(acc))
         # One raw read, classified explicitly (brokers/order_book_read): ORDERS / EMPTY are a book that was PROVEN read; UNKNOWN and
         # FAILED are never "nothing open". The blocker codes and messages below are the ones this check has always used.
+        bn = broker_labels.get(acc, "Alice Blue")
         read = await read_order_book_rows(client)
+        if read.reason == ORDER_BOOK_RAW_READ_NOT_SUPPORTED and bn != "Alice Blue":
+            read = await _parsed_book_as_rows(client)          # a non-Alice broker is verified from its parsed records
         if read.reason == ORDER_BOOK_NO_CLIENT:
             add(blockers, "BROKER_VERIFICATION_UNAVAILABLE", acc,
                 "The engine has no active broker session for this account, so its orders and positions "
@@ -467,7 +500,7 @@ async def run_preflight(
             if read.state is OrderBookState.FAILED:
                 logger.warning(f"[MasterSwitch] Order book fetch raised for {acc}: {read.detail}")
             add(blockers, "BROKER_VERIFICATION_UNAVAILABLE", acc,
-                "Alice Blue order book could not be fetched, so working orders cannot be ruled out.")
+                f"{bn} order book could not be fetched, so working orders cannot be ruled out.")
         else:
             book = read.rows
             if scope[acc] == "NEW_MASTER":
@@ -476,14 +509,14 @@ async def run_preflight(
             working = [r for r in book if _raw_status(r) not in TERMINAL_BROKER_STATUSES]
             if scope[acc] in ("CURRENT_MASTER", "NEW_MASTER"):
                 relevant = working
-                code, what = "PENDING_MASTER_ORDERS", "working order(s) at Alice Blue on the Master account"
+                code, what = "PENDING_MASTER_ORDERS", f"working order(s) at {bn} on the Master account"
             else:
                 known = system_ids_by_acc.get(acc, set())
                 relevant = [r for r in working if _raw_order_id(r) in known]
-                code, what = "PENDING_CHILD_ORDERS", "copied child order(s) still working at Alice Blue"
+                code, what = "PENDING_CHILD_ORDERS", f"copied child order(s) still working at {bn}"
             if relevant:
                 add(blockers, code, acc,
-                    f"{len(relevant)} {what}. Wait for them to fill or cancel them in Alice Blue.",
+                    f"{len(relevant)} {what}. Wait for them to fill or cancel them in {bn}.",
                     len(relevant), [_raw_label(r) for r in relevant])
 
         try:
@@ -493,7 +526,7 @@ async def run_preflight(
             positions = None
         if positions is None:
             add(blockers, "BROKER_VERIFICATION_UNAVAILABLE", acc,
-                "Alice Blue position book could not be fetched, so open positions cannot be ruled out.")
+                f"{bn} position book could not be fetched, so open positions cannot be ruled out.")
         else:
             open_pos = [p for p in positions if int(getattr(p, "quantity", 0) or 0) != 0]
             cnc_pos, intraday_pos, blocking_pos = [], [], []
@@ -514,12 +547,12 @@ async def run_preflight(
 
             if blocking_pos:
                 add(blockers, "OPEN_POSITIONS", acc,
-                    f"{len(blocking_pos)} open position(s). Square them off in Alice Blue before switching - "
+                    f"{len(blocking_pos)} open position(s). Square them off in {bn} before switching - "
                     "Jettone never squares off automatically.",
                     len(blocking_pos), [_pos_label(p) for p in blocking_pos])
             if cnc_pos:
                 add(warnings, "CNC_POSITIONS_OPEN", acc,
-                    f"{len(cnc_pos)} open CNC (delivery) position(s). They stay open in Alice Blue; Jettone "
+                    f"{len(cnc_pos)} open CNC (delivery) position(s). They stay open in {bn}; Jettone "
                     "will not close or transfer them automatically.",
                     len(cnc_pos), [_pos_label(p) for p in cnc_pos])
             if intraday_pos:

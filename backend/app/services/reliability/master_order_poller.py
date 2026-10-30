@@ -102,6 +102,10 @@ BROKER_STATUS_MAP: Dict[str, OrderStatus] = {
 JETTONE_ORIGINATED_SOURCES = {OrderSource.INTERNAL_UI, OrderSource.SYSTEM}
 
 
+# Consecutive unreadable polls before the Master is reported as not being watched (about 30 seconds at the default 5 s interval).
+BLIND_ALERT_AFTER_FAILURES = 6
+
+
 class MasterOrderPoller:
     """
     Polls the master account's broker order book on an interval and pushes
@@ -155,6 +159,11 @@ class MasterOrderPoller:
         # Membership means "already observed"; the value is what tells a
         # genuine change apart from an unchanged repeat.
         self._seen_state: Dict[str, Tuple[str, int, int, Decimal, Decimal]] = {}
+        # Consecutive polls whose order-book read RAISED (a lapsed session, a refused or truncated list, a network error), and whether
+        # that outage has already been alerted. Only a read that raised counts: a broker whose reader returns [] on failure (Alice
+        # Blue) cannot be told apart from a genuinely empty book, so it is never counted here.
+        self._unreadable_polls = 0
+        self._blind_alerted = False
         # Orders present in the very first poll - permanently replication-
         # ineligible (rule 1).
         self._baseline_order_ids: Set[str] = set()
@@ -215,6 +224,7 @@ class MasterOrderPoller:
         read = await read_order_book(client, checked=is_seed_pass)
         if read.state is OrderBookState.FAILED:
             logger.warning(f"[MasterOrderPoller] Order book fetch failed: {read.detail}")
+            await self._note_unreadable(read.detail)
             return 0
         if not read.is_known:
             if is_seed_pass:
@@ -225,6 +235,7 @@ class MasterOrderPoller:
             # A later poll whose read cannot be shown to have succeeded (e.g. Alice Blue's [] on failure) changes nothing:
             # exactly what processing that empty list did before. Nothing is removed from the seen state.
             return 0
+        await self._note_readable()
         book = read.records
 
         dispatched = 0
@@ -321,6 +332,41 @@ class MasterOrderPoller:
                 logger.error(f"[MasterOrderPoller] Restart-recovery resume failed closed: {exc}", exc_info=True)
 
         return dispatched
+
+    async def _note_unreadable(self, detail: str) -> None:
+        """Counts a poll whose read raised and, once, alerts that this Master is not being watched. Until it can be read again nothing
+        it does is copied, so the outage must never be only a log line. Never raises."""
+        self._unreadable_polls += 1
+        if self._blind_alerted or self._unreadable_polls < BLIND_ALERT_AFTER_FAILURES:
+            return
+        self._blind_alerted = True
+        await self._emit_monitor_event(
+            "MASTER_MONITOR_BLIND", "ERROR",
+            f"Master {self.master_account_id} has not been readable for {self._unreadable_polls} polls in a row ({detail}). "
+            "Nothing it places is being copied until it can be read again.",
+            {"consecutive_failed_polls": self._unreadable_polls, "reason": str(detail)[:80]},
+        )
+
+    async def _note_readable(self) -> None:
+        """A read that succeeded ends an outage: it is reported once, and the count starts again."""
+        was_alerted = self._blind_alerted
+        self._unreadable_polls = 0
+        self._blind_alerted = False
+        if was_alerted:
+            await self._emit_monitor_event(
+                "MASTER_MONITOR_RECOVERED", "INFO",
+                f"Master {self.master_account_id} is readable again. Orders it placed during the outage were NOT copied.", {},
+            )
+
+    async def _emit_monitor_event(self, event_type: str, severity: str, message: str, payload: Dict[str, Any]) -> None:
+        try:
+            async with AsyncSessionLocal() as session:
+                await emit_system_event(
+                    session, event_type=event_type, severity=severity, message=message,
+                    account_id=uuid.UUID(self.master_account_id), metadata_payload=payload,
+                )
+        except Exception as exc:
+            logger.error(f"[MasterOrderPoller] Failed to record {event_type}: {exc}")
 
     async def _report_missed_activation_orders(self, records) -> None:
         """Orders placed after the switch snapshot that the expired-snapshot
