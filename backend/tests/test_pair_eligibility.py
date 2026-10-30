@@ -10,7 +10,8 @@ import pytest
 from sqlalchemy import func, select
 
 from app.core.config import Settings, settings
-from app.models.accounts import Account, AccountType
+from app.core.crypto import encrypt_secret
+from app.models.accounts import Account, AccountType, BrokerCredential
 from app.models.audit import SystemEvent
 from app.models.strategies import GroupStrategy, StrategyAccountRole, StrategyMember
 from app.services import strategy_switch
@@ -193,6 +194,14 @@ async def preflight(api_client, sid, new_master, action="REMOVE"):
                                 params={"new_master_account_id": str(new_master.id), "old_master_action": action}, headers=AUTH)
 
 
+async def give_vault_credential(account, broker="groww"):
+    """A real non-Alice account keeps its credentials in the encrypted vault (broker_credentials), not in api_credentials; a Master
+    switch checks the store the account's own broker uses."""
+    async with TestingSessionLocal() as s:
+        s.add(BrokerCredential(account_id=account.id, broker=broker, encrypted_payload=encrypt_secret("{}"), key_version=1))
+        await s.commit()
+
+
 @pytest.fixture
 def groww_can_be_master(monkeypatch):
     """Pretend the Groww Master ROLE were open, so the switch reaches the pair check (the pair stays unsupported regardless)."""
@@ -206,6 +215,7 @@ async def test_a_switch_that_would_newly_leave_a_trading_child_unsupported_is_re
     strategy = await link_strategy(db_session, master, [child], name="s")
     new_master = await _account(db_session, "other_master", AccountType.MASTER)
     await set_broker(new_master, "groww")
+    await give_vault_credential(new_master)
     provide(api_client, master, child, new_master)
     pre = (await preflight(api_client, str(strategy.id), new_master)).json()
     assert pre["allowed"] is False and pre["can_override"] is False
@@ -241,6 +251,7 @@ async def test_a_child_that_is_not_trading_and_a_kept_old_master_are_warnings_on
     strategy = await link_strategy(db_session, master, [], name="solo")
     new_master = await _account(db_session, "other_master", AccountType.MASTER)
     await set_broker(new_master, "groww")
+    await give_vault_credential(new_master)
     provide(api_client, master, new_master)
     pre = (await preflight(api_client, str(strategy.id), new_master, action="CHILD")).json()
     assert pre["allowed"] is True and not [b for b in pre["blockers"] if b["code"] == CODE]
@@ -255,6 +266,7 @@ async def test_a_non_trading_child_never_blocks_a_switch_even_when_newly_unsuppo
     strategy = await link_strategy(db_session, master, [child], name="idle", member_trading_enabled=False)
     new_master = await _account(db_session, "other_master", AccountType.MASTER)
     await set_broker(new_master, "groww")
+    await give_vault_credential(new_master)
     provide(api_client, master, child, new_master)
     pre = (await preflight(api_client, str(strategy.id), new_master)).json()
     assert pre["allowed"] is True and not [b for b in pre["blockers"] if b["code"] == CODE]
