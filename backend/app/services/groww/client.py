@@ -818,21 +818,77 @@ class GrowwClient:
         )
 
     async def get_order_book(self) -> List[OrderRecord]:
+        """Every order of the day's CASH book, read page by page (see `_read_order_rows`). It returns the COMPLETE book or raises: a
+        failed, malformed, unbounded or inconsistent read never yields a partial list, so a caller can never mistake a missing order
+        for a cancelled one or a half-read book for an empty one."""
         self._require_contract()
-        status, data = await self._call(
-            "read", "GET", C.ROUTES["order_list"],
-            params={"segment": C.SUPPORTED_SEGMENT, "page_size": C.ORDER_LIST_PAGE_SIZE},
-        )
-        payload = self._payload(status, data)
-        rows = payload.get("order_list")
-        if not isinstance(rows, list):
-            raise GrowwCapabilityUnavailable("order list response has no order_list array")
-        if len(rows) >= C.ORDER_LIST_PAGE_SIZE:
-            # The page base of Groww's paging is undocumented: a full page may hide orders.
-            raise GrowwOrderListTruncated("order list may be truncated (full page); not trusting it")
+        rows = await self._read_order_rows(C.SUPPORTED_SEGMENT)
         records = [self.parse_order_row(r) for r in rows]
         await self._restore_client_order_ids(records)
         return records
+
+    async def _fetch_order_page(self, segment: str, page: int) -> List[Dict[str, Any]]:
+        """ONE page of the order list. HTTP 200, an `order_list` array of objects that each carry a usable groww_order_id; anything else
+        raises. Read-only."""
+        status, data = await self._call(
+            "read", "GET", C.ROUTES["order_list"],
+            params={"segment": segment, "page_size": C.ORDER_LIST_PAGE_SIZE, "page": page},
+        )
+        rows = self._payload(status, data).get("order_list")
+        if not isinstance(rows, list):
+            raise GrowwCapabilityUnavailable("order list response has no order_list array")
+        for row in rows:
+            if not isinstance(row, dict):
+                raise GrowwCapabilityUnavailable("order row is not an object")
+            raw_id = row.get("groww_order_id")
+            if isinstance(raw_id, bool) or not isinstance(raw_id, (str, int)) or not str(raw_id).strip():
+                raise GrowwCapabilityUnavailable("order row has no usable groww_order_id")
+        return rows
+
+    async def _read_order_rows(self, segment: str) -> List[Dict[str, Any]]:
+        """The raw rows of one segment's order list, newest first, de-duplicated by groww_order_id. Complete or raises.
+
+        Pages are read from the base upward at the documented maximum size. The list ends at the first page with FEWER rows than were
+        asked for (an empty page included); a page with exactly that many rows always fetches the next. A full page that adds no order
+        means the server ignored the page parameter and is refused. One read is bounded by a page limit and a deadline. A book of more
+        than one page can move while it is read, so it is confirmed by re-reading page 0, and read again (a bounded number of times)
+        if that page - or any order seen twice - changed. A read of a single short page is one request, as it always was."""
+        deadline = self._monotonic() + C.ORDER_LIST_READ_DEADLINE_SECONDS
+        size = C.ORDER_LIST_PAGE_SIZE
+        for _ in range(C.ORDER_LIST_SCAN_ATTEMPTS):
+            by_id: Dict[str, Dict[str, Any]] = {}
+            conflict = False
+            first_page: List[Dict[str, Any]] = []
+            pages_read = 0
+            page = C.ORDER_LIST_PAGE_BASE
+            while True:
+                if pages_read >= C.ORDER_LIST_MAX_PAGES:
+                    raise GrowwOrderListTruncated("order list exceeds the page limit; not trusting it")
+                if self._monotonic() > deadline:
+                    raise GrowwOrderListTruncated("order list read exceeded its deadline; not trusting it")
+                rows = await self._fetch_order_page(segment, page)
+                pages_read += 1
+                if pages_read == 1:
+                    first_page = rows
+                added = 0
+                for raw in rows:
+                    oid = str(raw["groww_order_id"]).strip()
+                    if oid in by_id:
+                        conflict = conflict or by_id[oid] != raw      # an identical repeat is dropped; a different one means it moved
+                        continue
+                    by_id[oid] = raw
+                    added += 1
+                if len(rows) < size:
+                    break
+                if added == 0:
+                    raise GrowwOrderListTruncated("order list page did not advance; not trusting it")
+                page += 1
+            if not conflict:
+                if pages_read == 1:
+                    return list(by_id.values())                       # one response: there is nothing to reconcile
+                if await self._fetch_order_page(segment, C.ORDER_LIST_PAGE_BASE) == first_page:
+                    return list(by_id.values())                       # page 0 is as it was, so no order slipped between pages
+        raise GrowwOrderListTruncated("order list kept changing while it was read; not trusting it")
 
     async def get_order(self, broker_order_id: str) -> Optional[OrderRecord]:
         """ONE order by its groww_order_id (GET /v1/order/detail). None only for HTTP 404; any other failure or an unreadable row

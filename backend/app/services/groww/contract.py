@@ -86,6 +86,13 @@ LIMIT_ORDERS = ((10, 1), (250, 60))
 LIMIT_READS = ((20, 1), (500, 60))
 LIMIT_TOKEN = ((5, 1), (30, 60))
 ORDER_LIST_PAGE_SIZE = 100          # documented maximum
+# Order-list paging, observed live 2026-10-30 (read-only, page_size=2 over four orders): `page` is 0-based, the list is newest first, page 0
+# and page 1 held the rows and page 2 was an empty list. The payload carries NO total or next-page field, so the end of the list is a page
+# with fewer rows than were asked for. Only sizes up to 2 were seen live; behaviour at 100 or more rows is verified offline only.
+ORDER_LIST_PAGE_BASE = 0
+ORDER_LIST_MAX_PAGES = 20           # one read never exceeds this many pages: a book of 2,000 or more orders is refused, never cut short
+ORDER_LIST_READ_DEADLINE_SECONDS = 30.0   # one read, all its pages and retries
+ORDER_LIST_SCAN_ATTEMPTS = 3        # a multi-page read is repeated this many times if the book moves while it is read
 
 ORDER_REFERENCE_MIN, ORDER_REFERENCE_MAX = 8, 20   # alphanumeric, at most two hyphens
 
