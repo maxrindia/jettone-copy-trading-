@@ -191,6 +191,7 @@ class ZerodhaClient:
         self._instruments = instruments if instruments is not None else default_store
         self._login_lock = asyncio.Lock()
         self._login_generation = 0
+        self._instruments_lock = asyncio.Lock()
         self._orders_limiter = SlidingWindowLimiter(C.LIMIT_ORDERS, now=monotonic, sleep=sleep)
         self._reads_limiter = SlidingWindowLimiter(C.LIMIT_READS, now=monotonic, sleep=sleep)
         self._session_limiter = SlidingWindowLimiter(C.LIMIT_SESSION, now=monotonic, sleep=sleep)
@@ -251,6 +252,7 @@ class ZerodhaClient:
                 do_login=lambda: self._login_once(token), session_key=self.session_key, daily_cap=ZERODHA_DAILY_LOGIN_CAP,
             )
             self._login_generation += 1
+        await self.ensure_instruments()
 
     async def _login_once(self, request_token: str) -> None:
         try:
@@ -369,6 +371,20 @@ class ZerodhaClient:
         inst = self._instruments.resolve(exchange, symbol)
         return inst.instrument_token, inst.tradingsymbol
 
+    async def ensure_instruments(self) -> None:
+        """Load the NSE and BSE instrument dumps into the store when it is empty (after a login or a restart). Read-only and best
+        effort: a failure is logged by type only, and the order path then refuses the symbol as "not loaded" instead of guessing."""
+        if self._instruments.size:
+            return
+        async with self._instruments_lock:
+            if self._instruments.size:
+                return
+            for exchange in ("NSE", "BSE"):                  # cash equity only: a cross-broker derivative is refused upstream
+                try:
+                    self._instruments.load_csv_text(await self.fetch_instruments(exchange))
+                except Exception as exc:
+                    logger.warning(f"[{self.account_id}] Zerodha {exchange} instrument dump not loaded ({type(exc).__name__})")
+
     async def fetch_instruments(self, exchange: str) -> str:
         """GET /instruments/:exchange: the CSV text (decoded from gzip when needed). Read-only; raises on anything unexpected."""
         exch = str(exchange or "").strip().upper()
@@ -460,6 +476,7 @@ class ZerodhaClient:
                                 f"Not sent: internal error ({type(exc).__name__})", {})
 
     async def _place_order(self, req: OrderRequest, tag: str, state: SendState) -> OrderResult:
+        await self.ensure_instruments()
         try:
             body = self.build_order_body(
                 symbol=req.symbol, exchange=req.exchange, side=req.side, quantity=req.quantity, product_type=req.product_type,

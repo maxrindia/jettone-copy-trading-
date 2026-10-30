@@ -331,5 +331,9 @@ def session_key_for(broker_id: Optional[str], account_id) -> str:
 
 
 def canary_pair_open(master: str, child: str) -> bool:
-    """The owner-set canary for the one pair alicebluenew -> groww. Off unless ALICE_GROWW_CANARY_ENABLED; it never opens any other pair."""
-    return bool(settings.ALICE_GROWW_CANARY_ENABLED) and (master, child) == ("alicebluenew", "groww")
+    """The owner-set canaries: alicebluenew -> groww (ALICE_GROWW_CANARY_ENABLED) and alicebluenew -> zerodha
+    (ALICE_ZERODHA_CANARY_ENABLED). Each is off by default and opens only its own pair."""
+    if master != "alicebluenew":
+        return False
+    return (child == "groww" and bool(settings.ALICE_GROWW_CANARY_ENABLED)) or (
+        child == "zerodha" and bool(settings.ALICE_ZERODHA_CANARY_ENABLED))

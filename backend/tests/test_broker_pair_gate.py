@@ -393,3 +393,19 @@ def test_canary_opens_only_alice_to_groww_and_keeps_the_role_gates(monkeypatch):
         assert check_pair(*pair).supported is False, pair
     monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", False)        # the child role gate still closes it
     assert check_pair("alicebluenew", "groww").supported is False
+
+
+def test_zerodha_canary_is_off_by_default_and_opens_only_alice_to_zerodha(monkeypatch):
+    from app.core.config import settings
+    from app.services.brokers.pairs import check_pair
+    monkeypatch.setattr(settings, "ZERODHA_ENABLED", True)
+    monkeypatch.setattr(settings, "ZERODHA_CHILD_TRADING_ENABLED", True)
+    assert settings.ALICE_ZERODHA_CANARY_ENABLED is False
+    assert check_pair("alicebluenew", "zerodha").supported is False
+    monkeypatch.setattr(settings, "ALICE_ZERODHA_CANARY_ENABLED", True)
+    assert check_pair("alicebluenew", "zerodha").supported is True
+    assert check_pair("alicebluenew", "groww").supported is False         # the Groww canary is its own flag
+    for pair in (("zerodha", "alicebluenew"), ("angelone", "zerodha"), ("groww", "zerodha")):
+        assert check_pair(*pair).supported is False, pair
+    monkeypatch.setattr(settings, "ZERODHA_CHILD_TRADING_ENABLED", False)  # the child role gate still closes it
+    assert check_pair("alicebluenew", "zerodha").supported is False

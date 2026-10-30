@@ -122,6 +122,8 @@ class Settings(BaseSettings):
     # Live Trading and does not cap quantity: cap the Groww Child with a FIXED quantity-policy of 1 first. Default off; remove once
     # the pair is allowlisted with recorded evidence.
     ALICE_GROWW_CANARY_ENABLED: bool = False
+    # Same canary for the one pair Alice Blue -> Zerodha (ZERODHA_ENABLED and ZERODHA_CHILD_TRADING_ENABLED still apply). Default off.
+    ALICE_ZERODHA_CANARY_ENABLED: bool = False
     # Groww's instrument master (CSV). Empty = never downloaded; set it to the URL
     # in Groww's instruments documentation, or load a downloaded file instead.
     GROWW_INSTRUMENT_MASTER_URL: str = ""
