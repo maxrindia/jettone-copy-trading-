@@ -42,6 +42,7 @@ def test_every_new_gate_defaults_to_off():
 
 def test_groww_master_stays_closed_with_every_flag_on_until_the_contract_is_verified(monkeypatch):
     set_flags(monkeypatch, GROWW_ENABLED=True, GROWW_CHILD_TRADING_ENABLED=True, GROWW_MASTER_ENABLED=True)
+    use_groww_contract(monkeypatch, GrowwContract(master_verified=False))          # the contract is shipped verified since 2 Nov 2026
     assert get_broker_spec("groww").capabilities.as_master is False and not can_be_master("groww")
     assert can_be_child("groww")                                                  # Child is independent of Master
 

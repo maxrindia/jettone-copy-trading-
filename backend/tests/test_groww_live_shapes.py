@@ -27,7 +27,8 @@ def test_the_contract_records_the_live_shapes_without_claiming_live_verification
     assert set(C.LIVE_VERIFIED_SHAPES) == {"order_list", "positions", "margin"}
     assert C.MARGIN_FUNDS_FIELDS == ("clear_cash", "collateral_available", "net_margin_used")
     assert set(LIVE_MARGIN) == set(C.MARGIN_FUNDS_FIELDS + C.MARGIN_OTHER_NUMERIC_FIELDS + C.MARGIN_OBJECT_FIELDS)
-    assert C.GROWW_CONTRACT.live_verified is False and C.GROWW_CONTRACT.master_verified is False   # rows, statuses, paging unseen
+    assert C.GROWW_CONTRACT.live_verified is False                       # rows, statuses, paging unseen
+    assert C.GROWW_CONTRACT.master_verified is True                      # set on the owner's instruction (2 Nov 2026) for a supervised observe-only check; B2 capture pending
 
 
 # ── empty lists are successful, empty answers ─────────────────────────────────────────────────────────────────────────────────

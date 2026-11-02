@@ -88,6 +88,7 @@ async def test_the_identity_limitation_never_changes_what_roles_groww_may_have(c
     from app.services.brokers.registry import can_be_child, can_be_master
     monkeypatch.setattr(settings, "GROWW_CHILD_TRADING_ENABLED", child_flag)
     monkeypatch.setattr(settings, "GROWW_MASTER_ENABLED", master_flag)
+    monkeypatch.setattr("app.services.brokers.registry.GROWW_CONTRACT", __import__("dataclasses").replace(__import__("app.services.brokers.registry", fromlist=["x"]).GROWW_CONTRACT, master_verified=False))   # the contract is shipped verified (owner decision, 2 Nov 2026); this test is about the unverified case
     g = await add(client, "groww", "grw-roles")
     caps = (await listed(client))[g["id"]]["broker_capabilities"]
     assert caps["as_child"] is can_be_child("groww") and caps["as_master"] is can_be_master("groww")   # exactly the registry's answer

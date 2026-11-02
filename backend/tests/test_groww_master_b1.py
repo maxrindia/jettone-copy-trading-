@@ -66,7 +66,7 @@ def test_nothing_is_on_by_default():
     s = Settings(_env_file=None)
     assert s.CANARY_PAIRS == "" and (s.GROWW_ENABLED, s.GROWW_CHILD_TRADING_ENABLED, s.GROWW_MASTER_ENABLED) == (False,) * 3
     assert s.ALICE_GROWW_CANARY_ENABLED is False and s.ENGINE_LIVE_TRADING_ENABLED is False and s.SELL_POSITION_SAFETY_BYPASS is False
-    assert registry.GROWW_CONTRACT.master_verified is False and registry.listed_canary_pairs() == frozenset()
+    assert registry.GROWW_CONTRACT.master_verified is True and registry.listed_canary_pairs() == frozenset()   # verified by owner decision (2 Nov 2026); still closed by the flag
     assert set(SUPPORTED_PAIRS) == {(ALICE, ALICE)}
     assert registry.can_be_master(GROWW) is False
 
@@ -83,6 +83,7 @@ def test_the_canary_list_opens_only_pairs_it_names_correctly(monkeypatch, value,
 
 
 def test_a_listed_pair_still_needs_every_role_gate(monkeypatch, canary):
+    monkeypatch.setattr(registry, "GROWW_CONTRACT", dataclasses.replace(registry.GROWW_CONTRACT, master_verified=False))   # shipped True since 2 Nov 2026
     assert check_pair(GROWW, ALICE).detail == f"MASTER_ROLE_NOT_OPEN:{GROWW}"                     # nothing else is open
     for name in ("GROWW_ENABLED", "GROWW_CHILD_TRADING_ENABLED"):
         monkeypatch.setattr(settings, name, True)

@@ -108,6 +108,7 @@ def test_satisfying_an_interface_never_grants_a_role(mock_redis, monkeypatch):
     from app.core.config import settings
     monkeypatch.setattr(settings, "GROWW_ENABLED", True)
     monkeypatch.setattr(settings, "GROWW_MASTER_ENABLED", True)
+    monkeypatch.setattr("app.services.brokers.registry.GROWW_CONTRACT", __import__("dataclasses").replace(__import__("app.services.brokers.registry", fromlist=["x"]).GROWW_CONTRACT, master_verified=False))   # shipped verified (owner decision, 2 Nov 2026); here the unverified case
     assert isinstance(groww(mock_redis), MasterOrderSource)
     assert isinstance(angel(mock_redis), MasterOrderSource)
     assert get_broker_spec("groww").capabilities.as_master is False

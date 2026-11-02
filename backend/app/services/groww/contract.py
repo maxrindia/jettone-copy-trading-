@@ -120,7 +120,11 @@ class GrowwContract:
     notes: Dict[str, str] = field(default_factory=dict)
 
 
-GROWW_CONTRACT = GrowwContract()
+# master_verified is set on the OWNER's instruction of 2 Nov 2026 so a Groww account can be the Master of a strategy for a supervised,
+# observe-only verification (Live Trading off): the owner places a 1-share order in the Groww app and the Master monitor must be seen
+# detecting it. The B2 capture that would normally precede this is therefore still PENDING. It opens nothing by itself - the Master role
+# also needs GROWW_MASTER_ENABLED, and a pair needs CANARY_PAIRS. Revert this line if the supervised check does not show the order.
+GROWW_CONTRACT = GrowwContract(master_verified=True)
 
 
 def contract_is_usable(contract: GrowwContract) -> bool:
