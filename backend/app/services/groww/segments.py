@@ -32,6 +32,7 @@ from typing import Any, Dict, Optional, Protocol, Set, Tuple
 from app.core.config import settings
 from app.services.alice_blue.instruments import InstrumentResolutionError
 from app.services.alice_blue.types import OrderRecord
+from app.services.brokers.fno_units import infer_quantity_unit  # noqa: F401  (re-exported: the rule is shared by every Master adapter)
 from app.services.instruments.contracts import make_contract
 
 logger = logging.getLogger("groww_segments")
@@ -65,23 +66,6 @@ class CashSegment:
 
     def describe_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
         return {}
-
-
-def infer_quantity_unit(quantity: int, lot_size: int, freeze_quantity: int) -> Optional[str]:
-    """UNITS or LOTS for ONE order from documented instrument fields only, or None when it is not unambiguous.
-
-    Units must be a multiple of the lot size, so a quantity BELOW one lot can only be a count of lots (and only if it does not exceed the most
-    lots one order may hold, freeze_quantity // lot_size). A quantity of at least one lot that is a multiple of it is units - unless it could
-    also be a legal count of lots. With no freeze quantity that bound is unknown and the order is ambiguous. Index contracts always resolve
-    (NIFTY: 75 per lot, at most 24 lots per order, so 75 is units and 1 is lots); an instrument where both readings fit is refused."""
-    if quantity <= 0 or lot_size <= 0 or freeze_quantity <= 0:
-        return None                                      # the freeze quantity is what bounds a legal count of lots; without it nothing is provable
-    max_lots = freeze_quantity // lot_size
-    if quantity < lot_size:
-        return "LOTS" if quantity <= max_lots else None  # below one lot can only be lots - and only a legal number of them
-    if quantity % lot_size or quantity <= max_lots:
-        return None                                      # not a whole number of lots as units, or it fits as lots too: ambiguous
-    return "UNITS"
 
 
 class DerivativesSegment:

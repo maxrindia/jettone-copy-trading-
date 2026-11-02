@@ -308,14 +308,14 @@ def test_the_route_policy_is_the_original_answer_unless_the_pair_is_listed(monke
 
 
 def test_a_listed_pair_needs_a_readable_contract_and_a_child_with_a_resolver(monkeypatch):
-    monkeypatch.setattr(settings, "CROSS_BROKER_FNO_PAIRS", "groww>alicebluenew,groww>zerodha,groww>groww")
+    monkeypatch.setattr(settings, "CROSS_BROKER_FNO_PAIRS", "groww>alicebluenew,groww>angelone,groww>groww")
     monkeypatch.setattr(terms, "store", store_with(loaded_at=datetime.now(timezone.utc)))
     ok = derivative_routing.route("groww", "alicebluenew", "NFO", KEY)
     assert ok.allowed and ok.child_token == "50001" and ok.skip is None
     for key in (None, "", "garbage", "CE|NFO|NIFTY|2026-11-26", "EQ|NSE|SYM|SBIN"):
         d = derivative_routing.route("groww", "alicebluenew", "NFO", key)
         assert d.allowed is False and "CROSS_BROKER_FNO_CONTRACT_UNAVAILABLE" in d.skip.detail
-    for child in ("zerodha", "groww"):                                    # listed, but no resolver is registered for the Child
+    for child in ("angelone", "groww"):                                   # listed, but no resolver is registered for the Child
         d = derivative_routing.route("groww", child, "NFO", KEY)
         assert d.allowed is (child == "groww") and (child == "groww" or "CHILD_NOT_SUPPORTED" in d.skip.detail)
 
@@ -341,11 +341,11 @@ def test_a_new_child_broker_is_routable_by_registering_one_resolver(monkeypatch)
     """Open/closed: the planner, the pipeline and the preview are not edited to add a Child broker; one resolver is registered."""
     from app.services.instruments.contracts import ContractResolution, ResolutionVerdict
 
-    monkeypatch.setattr(settings, "CROSS_BROKER_FNO_PAIRS", "groww>zerodha")
-    assert derivative_routing.route("groww", "zerodha", "NFO", KEY).allowed is False
-    monkeypatch.setitem(derivative_routing.CHILD_RESOLVERS, "zerodha",
-                        lambda c: ContractResolution("zerodha", ResolutionVerdict.RESOLVED_UNVERIFIED, "x", c.key, "NIFTY26NOV23500CE", "12345"))
-    d = derivative_routing.route("groww", "zerodha", "NFO", KEY)
+    monkeypatch.setattr(settings, "CROSS_BROKER_FNO_PAIRS", "groww>angelone")
+    assert derivative_routing.route("groww", "angelone", "NFO", KEY).allowed is False
+    monkeypatch.setitem(derivative_routing.CHILD_RESOLVERS, "angelone",
+                        lambda c: ContractResolution("angelone", ResolutionVerdict.RESOLVED_UNVERIFIED, "x", c.key, "NIFTY26NOV23500CE", "12345"))
+    d = derivative_routing.route("groww", "angelone", "NFO", KEY)
     assert d.allowed is True and d.child_token == "12345"
 
 

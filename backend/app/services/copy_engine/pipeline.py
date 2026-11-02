@@ -245,21 +245,36 @@ class CopyEnginePipeline:
         return None
 
     @staticmethod
-    def _child_derivative_lot(exchange: Any, child: Optional[Account], child_token: Any) -> Optional[int]:
-        """The Child's OWN lot size for a derivative order, or None (cash equity, an unknown token, or a lot the Child's contract master does
-        not state - then sizing is exactly what it was). Read from the Child broker's contract master by the Child's own token: today that
-        is Alice Blue's (instruments/terms.py); another Child broker adds its own lookup here."""
-        if derivative_routing.is_cash(exchange) or child is None or not child_token:
+    def _child_derivative_lot(exchange: Any, child: Optional[Account], child_token: Any, symbol: Any = None) -> Optional[int]:
+        """The Child's OWN lot size for a derivative order, or None (cash equity, no lookup for that broker, or a lot its own catalog does not
+        state - then sizing is exactly what it was). The lookup per Child broker lives in derivative_routing.CHILD_LOT_PROVIDERS."""
+        if child is None:
             return None
-        if normalize_broker_id(getattr(child, "broker", None)) != ALICE_ID:
-            return None
-        return known_lot_size(ALICE_ID, exchange, child_token)
+        return derivative_routing.child_lot(getattr(child, "broker", None), exchange, symbol, child_token)
 
     async def _event_for_child(self, event: MasterTradeEvent, child: Optional[Account]) -> MasterTradeEvent:
         """A copy of the event whose instrument id is safe to use for this Child (see _child_instrument_token)."""
+        contract_key = event.contract_key
+        child_broker = normalize_broker_id(getattr(child, "broker", None)) if child is not None else None
+        if contract_key is None and not derivative_routing.is_cash(event.exchange) and child_broker is not None:
+            # A Master whose order book carries only a TOKEN (Alice Blue) has its contract key read from its OWN contract master here, so the
+            # same route policy serves it as serves a Groww / Zerodha Master (whose adapters attach the key when they read the order).
+            master_broker = await self._master_broker_id(event.account_id)
+            if master_broker is not None and master_broker != child_broker:
+                contract_key = derivative_routing.master_contract_key(master_broker, event.exchange, event.instrument_id)
+                if contract_key is not None:
+                    event = dataclasses.replace(event, contract_key=contract_key)
         token = await self._child_instrument_token(event.account_id, child, event.instrument_id,
-                                                   exchange=event.exchange, symbol=event.symbol, contract_key=event.contract_key)
-        return event if token == event.instrument_id else dataclasses.replace(event, instrument_id=token)
+                                                   exchange=event.exchange, symbol=event.symbol, contract_key=contract_key)
+        if token != event.instrument_id:
+            event = dataclasses.replace(event, instrument_id=token)
+        if contract_key and child_broker in derivative_routing.SYMBOL_IDENTITY_CHILDREN and not derivative_routing.is_cash(event.exchange):
+            master_broker = await self._master_broker_id(event.account_id)
+            decision = derivative_routing.route(master_broker, child_broker, event.exchange, contract_key)
+            if decision.allowed and decision.child_symbol:
+                # This Child identifies the instrument by its own trading symbol: it gets the symbol of the exactly-resolved row of ITS catalog.
+                event = dataclasses.replace(event, symbol=decision.child_symbol, instrument_id=None)
+        return event
 
     async def _planner_skip(
         self, follower: Account, event: MasterTradeEvent, *, child_order_type: str, fill_sequence: int
@@ -1093,7 +1108,7 @@ class CopyEnginePipeline:
                 follower_capital=funds_data.available_margin,
                 lot_size=lot_size,
                 settings=settings_obj,
-                derivative_lot=self._child_derivative_lot(event.exchange, follower, event.instrument_id),
+                derivative_lot=self._child_derivative_lot(event.exchange, follower, event.instrument_id, event.symbol),
                 reference_price=limit_price,
                 multiplier=multiplier,
             )
@@ -1719,7 +1734,7 @@ class CopyEnginePipeline:
                 follower_capital=funds_data.available_margin,
                 lot_size=lot_size,
                 settings=settings_obj,
-                derivative_lot=self._child_derivative_lot(event.exchange, follower, event.instrument_id),
+                derivative_lot=self._child_derivative_lot(event.exchange, follower, event.instrument_id, event.symbol),
                 reference_price=trigger_price if trigger_price > 0 else sl_price,
                 multiplier=multiplier,
             )
@@ -2988,7 +3003,7 @@ class CopyEnginePipeline:
                     follower_capital=funds_data.available_margin,
                     lot_size=lot_size,
                     settings=settings_obj,
-                    derivative_lot=self._child_derivative_lot(ord_rec.exchange, account, ord_rec.instrument_token),
+                    derivative_lot=self._child_derivative_lot(ord_rec.exchange, account, ord_rec.instrument_token, ord_rec.symbol),
                     reference_price=new_price,
                     multiplier=multiplier,
                 )
@@ -3910,7 +3925,7 @@ class CopyEnginePipeline:
                 follower_capital=funds_data.available_margin,
                 lot_size=lot_size,
                 settings=settings_obj,
-                derivative_lot=self._child_derivative_lot(event.exchange, follower, event.instrument_id),
+                derivative_lot=self._child_derivative_lot(event.exchange, follower, event.instrument_id, event.symbol),
                 reference_price=event.price,
                 multiplier=multiplier,
             )

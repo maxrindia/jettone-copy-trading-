@@ -50,6 +50,7 @@ from app.services.brokers.rate_limit import RateLimitExceeded, SlidingWindowLimi
 from app.services.brokers.strict_numbers import StrictNumberError, need, optional_decimal, strict_decimal, strict_int
 from app.services.brokers.transport import SendState, is_provably_not_sent
 from app.services.zerodha import contract as C
+from app.services.zerodha.derivatives import with_contract_key
 from app.services.zerodha.contract import ZERODHA_CONTRACT, ZerodhaContract, contract_is_usable
 from app.services.zerodha.instruments import ZerodhaInstrumentStore, store as default_store
 
@@ -66,7 +67,8 @@ TAG_PREFIX = "JT"
 ORDER_TYPE_MAP = {OrderType.MARKET: "MARKET", OrderType.LIMIT: "LIMIT", OrderType.SL: "SL", OrderType.SL_M: "SL-M"}
 # Jettone product -> Zerodha product, per exchange. Equity cash: CNC / MIS. NFO: NRML / MIS. Anything else is refused, not sent.
 EQUITY_PRODUCTS = {ProductType.CNC: "CNC", ProductType.MIS: "MIS"}
-DERIVATIVE_PRODUCTS = {ProductType.NRML: "NRML", ProductType.MIS: "MIS"}
+# CNC on a derivative exchange is another broker's name for CARRY (Alice Blue's LONGTERM): on NFO that is NRML.
+DERIVATIVE_PRODUCTS = {ProductType.NRML: "NRML", ProductType.MIS: "MIS", ProductType.CNC: "NRML"}
 
 
 class ZerodhaError(Exception):
@@ -683,7 +685,7 @@ class ZerodhaClient:
         rows = self._data(status, data)
         if not isinstance(rows, list):
             raise ZerodhaCapabilityUnavailable("order book response has no list of orders")
-        records = [self.parse_order_row(r) for r in rows]
+        records = [with_contract_key(self.parse_order_row(r), self._instruments) for r in rows]
         await self._restore_client_order_ids(records)
         return records
 

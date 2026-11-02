@@ -136,6 +136,10 @@ class Settings(BaseSettings):
     # What Groww's `quantity` means for an FNO order: "UNITS" (a multiple of the lot size) or "LOTS". Groww's documentation does not state it,
     # so the default is EMPTY and every FNO order is then refused as UNSUPPORTED rather than guessed. Set it only from a reviewed capture.
     GROWW_FNO_QUANTITY_UNIT: str = ""
+    # Same question for a ZERODHA Master's F&O orders. Only "UNITS" is supported (the order's quantity is then already in units and no
+    # conversion touches the order book the Child fill sync also reads). Anything else (the default) attaches no contract to a Zerodha F&O
+    # order, so it cannot be routed to another broker's Child. Zerodha Master itself stays behind ZERODHA_MASTER_ENABLED and master_verified.
+    ZERODHA_FNO_QUANTITY_UNIT: str = ""
     # Cross-broker derivative routing allowlist: comma-separated "master>child" pairs (for example "groww>alicebluenew") for which an F&O
     # order whose contract resolves EXACTLY in the Child's own catalog is copied. Anything not listed keeps the existing refusal
     # (CROSS_BROKER_DERIVATIVE_UNMAPPED). Default empty (off). It never opens a role or pair gate; both still apply.

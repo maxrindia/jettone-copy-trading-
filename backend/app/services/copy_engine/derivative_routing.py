@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, Optional
 
 from app.services.brokers.registry import listed_fno_pairs, normalize_broker_id
 from app.services.instruments.contracts import (
-    CanonicalContract, ContractResolution, ResolutionVerdict, contract_from_key, resolve_for_broker,
+    CanonicalContract, ContractResolution, ResolutionVerdict, contract_from_key, make_contract, resolve_for_broker,
 )
 from app.services.instruments.planner import (
     ALICE_ID, EXCHANGE_SEGMENTS, INSTRUMENT_UNMAPPED, PlannerSkip, cross_broker_derivative_skip,
@@ -38,8 +38,64 @@ def _resolve_alice(contract: CanonicalContract) -> ContractResolution:
     return resolve_for_broker(ALICE_ID, contract)
 
 
+def _resolve_zerodha(contract: CanonicalContract) -> ContractResolution:
+    return resolve_for_broker("zerodha", contract)
+
+
 # Child broker -> how a canonical contract is resolved in that broker's own catalog. One entry = one more routable Child.
-CHILD_RESOLVERS: Dict[str, Resolver] = {ALICE_ID: _resolve_alice}
+CHILD_RESOLVERS: Dict[str, Resolver] = {ALICE_ID: _resolve_alice, "zerodha": _resolve_zerodha}
+
+# Child brokers that identify an instrument by its TRADING SYMBOL, not by a numeric token (Zerodha: the exact tradingsymbol). For them a
+# routed order carries the resolved symbol of the Child's own catalog and no token; every other Child (Alice Blue) is sent its own token.
+SYMBOL_IDENTITY_CHILDREN = frozenset({"zerodha"})
+
+
+def _alice_lot(exchange: Any, symbol: Any, token: Any) -> Optional[int]:
+    from app.services.instruments.terms import known_lot_size
+    return known_lot_size(ALICE_ID, exchange, token)
+
+
+def _zerodha_lot(exchange: Any, symbol: Any, token: Any) -> Optional[int]:
+    from app.services.zerodha import instruments as zi
+    try:
+        inst = zi.store.resolve(str(exchange), str(symbol))
+    except Exception:
+        return None
+    return int(inst.lot_size) if inst.lot_size_stated and inst.lot_size > 1 else None
+
+
+# Child broker -> its own lot size for a derivative, read from ITS OWN catalog (None when unknown: then sizing is exactly what it was).
+CHILD_LOT_PROVIDERS: Dict[str, Callable[[Any, Any, Any], Optional[int]]] = {ALICE_ID: _alice_lot, "zerodha": _zerodha_lot}
+
+
+def child_lot(child_broker: Optional[str], exchange: Any, symbol: Any, token: Any) -> Optional[int]:
+    """The Child's own lot size for a derivative order, or None (cash equity, no provider for that broker, or the catalog does not state it)."""
+    if is_cash(exchange):
+        return None
+    provider = CHILD_LOT_PROVIDERS.get(normalize_broker_id(child_broker) or "")
+    try:
+        return provider(exchange, symbol, token) if provider else None
+    except Exception:                                                                    # an error is never a lot size
+        return None
+
+
+def master_contract_key(master_broker: Optional[str], exchange: Any, token: Any) -> Optional[str]:
+    """The canonical contract key of a Master's derivative order for a Master broker whose order book carries only a TOKEN (Alice Blue), read
+    from that broker's OWN contract master; None for any other broker (Groww and Zerodha attach their key when they read the order) or when
+    the row is missing, invalid, or not a plain NFO future / option."""
+    if normalize_broker_id(master_broker) != ALICE_ID or str(exchange or "").strip().upper() != "NFO" or not token:
+        return None
+    try:
+        from app.services.instruments import terms
+        row = terms.store.get(ALICE_ID, "NFO", str(token))
+        if row is None or row.status is not terms.TermsStatus.VALID or row.expiry is None:
+            return None
+        itype = str(row.instrument_type or "").upper()
+        kind = "FUT" if itype.startswith("FUT") else (str(row.option_type or "").upper() if itype.startswith("OPT") else "")
+        contract = make_contract(kind, "NFO", row.symbol, row.expiry, row.strike if kind in ("CE", "PE") else None)
+        return contract.key if contract is not None else None
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True)

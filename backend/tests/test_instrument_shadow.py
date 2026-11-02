@@ -394,7 +394,10 @@ def test_nothing_in_the_trading_path_imports_the_instruments_package_except_the_
         # Phase A (cross-broker F&O): the ONE route policy the pipeline, the planner skip and the preview all ask. It uses only the pure
         # canonical-contract types / resolvers (no network, database or broker call - tests/test_groww_fno_master.py) and the planner's skip.
         "app/services/copy_engine/derivative_routing.py": ("from app.services.instruments.contracts import (",
-                                                           "from app.services.instruments.planner import ("),
+                                                           "from app.services.instruments.planner import (",
+                                                           # the Child's lot size and the Alice Master's contract key are read from Alice's own contract master
+                                                           "from app.services.instruments.terms import known_lot_size",
+                                                           "from app.services.instruments import terms"),
         # The Groww F&O segment policy builds the pure CanonicalContract key for a Master's F&O order; it resolves nothing at another broker.
         "app/services/groww/segments.py": ("from app.services.instruments.contracts import make_contract",),
     }
