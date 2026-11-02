@@ -168,7 +168,18 @@ class QuantityCalculator:
         settings: CopySetting,
         reference_price: Decimal = Decimal("0"),
         multiplier: Optional[Decimal] = None,
+        derivative_lot: Optional[int] = None,
     ) -> int:
+        """`derivative_lot` is the Child's lot size for a DERIVATIVE order whose lot is known (None for cash equity and whenever it is not
+        known: then nothing here changes). It makes the sizing lot-based, the way an F&O trader thinks of it:
+          FIXED       `fixed_qty` is a number of LOTS (1 = one lot, 2 = two lots), not units; the result is lots x lot size;
+          MULTIPLIER  Master quantity x multiplier, rounded DOWN to whole lots (less than one lot = 0 = ZERO_LOT_RESULT, never rounded up);
+          the other modes use the lot as their rounding unit."""
+        if derivative_lot and derivative_lot > 1:
+            if mode == QuantityMode.FIXED:
+                lots = settings.fixed_qty if settings.fixed_qty is not None else 1
+                return max(0, int(lots)) * derivative_lot
+            lot_size = derivative_lot
         strategy = cls.STRATEGIES.get(mode, FixedQuantityStrategy())
         return strategy.calculate(
             master_qty=master_qty,

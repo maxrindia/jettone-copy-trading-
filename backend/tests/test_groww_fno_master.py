@@ -412,3 +412,81 @@ async def test_an_unsupported_f_and_o_order_is_logged_once_with_the_raw_values(d
         await c.master_client.get_order_book()
     hits = [m for m in caplog.messages if "PRODUCT_NOT_FNO" in m]
     assert len(hits) == 1 and "'product': 'CNC'" in hits[0] and "'exchange': 'NSE'" in hits[0]
+
+
+# ── lot-based F&O sizing: "one lot" or "a multiple of the Master's lots", chosen per Child ───────────────────────────────────────
+
+from app.models.accounts import CopySetting, QuantityMode                                    # noqa: E402
+from app.services.copy_engine.calculator import QuantityCalculator                          # noqa: E402
+
+
+def setting(mode, fixed=1):
+    return CopySetting(follower_account_id=None, copy_enabled=True, quantity_mode=mode, fixed_qty=fixed)
+
+
+@pytest.mark.parametrize("mode,fixed,master,mult,lot,expected", [
+    (QuantityMode.FIXED, 1, 65, "1", 65, 65),          # one lot, whatever the Master traded
+    (QuantityMode.FIXED, 1, 650, "1", 65, 65),
+    (QuantityMode.FIXED, 2, 65, "1", 65, 130),         # two lots
+    (QuantityMode.FIXED, 0, 65, "1", 65, 0),           # zero lots = skip
+    (QuantityMode.MULTIPLIER, 1, 65, "1", 65, 65),     # the Master's own lots
+    (QuantityMode.MULTIPLIER, 1, 130, "2", 65, 260),   # twice the Master's lots
+    (QuantityMode.MULTIPLIER, 1, 65, "3", 65, 195),
+    (QuantityMode.MULTIPLIER, 1, 65, "0.5", 65, 0),    # less than one lot: never rounded up
+    (QuantityMode.MULTIPLIER, 1, 130, "1.5", 65, 195),   # exactly 3 lots
+])
+def test_derivative_sizing_is_in_whole_lots(mode, fixed, master, mult, lot, expected):
+    got = QuantityCalculator.calculate_quantity(mode=mode, master_qty=master, master_capital=Decimal("1"), follower_capital=Decimal("1"), lot_size=1,
+                                                settings=setting(mode, fixed), multiplier=Decimal(mult), derivative_lot=lot)
+    assert got == expected and got % lot == 0
+
+
+@pytest.mark.parametrize("mode,fixed,master,mult,expected", [
+    (QuantityMode.FIXED, 1, 10, "1", 1), (QuantityMode.FIXED, 5, 10, "1", 5), (QuantityMode.MULTIPLIER, 1, 10, "2", 20),
+])
+def test_cash_sizing_is_exactly_what_it_was(mode, fixed, master, mult, expected):
+    for lot in (None, 1):
+        assert QuantityCalculator.calculate_quantity(mode=mode, master_qty=master, master_capital=Decimal("1"), follower_capital=Decimal("1"), lot_size=1,
+                                                     settings=setting(mode, fixed), multiplier=Decimal(mult), derivative_lot=lot) == expected
+
+
+async def alice_policy(c, mode, fixed=1):
+    async with TestingSessionLocal() as s:
+        row = (await s.execute(select(CopySetting).where(CopySetting.follower_account_id == c.alice.id))).scalar_one()
+        row.quantity_mode, row.fixed_qty = mode, fixed
+        await s.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,fixed,master_units,expected", [
+    (QuantityMode.FIXED, 1, 75, 75),        # "one lot": the Child gets one lot even though FIXED 1 used to mean one UNIT (and was rejected)
+    (QuantityMode.FIXED, 2, 75, 150),
+    (QuantityMode.MULTIPLIER, 1, 150, 150),
+])
+async def test_the_alice_child_is_sized_in_lots_for_a_groww_f_and_o_order(db_session, mock_redis, fno_gates, mode, fixed, master_units, expected):
+    c = await fno_chain(db_session, mock_redis)
+    await alice_policy(c, mode, fixed)
+    c.master_fake.fno_order("F-1", CE, qty=master_units)
+    await c.poll()
+    (req,) = c.placed_on_alice()
+    assert req.quantity == expected and req.quantity % 75 == 0 and req.instrument_token == "50001"
+
+
+@pytest.mark.asyncio
+async def test_less_than_one_lot_is_skipped_never_rounded_up_and_cash_is_still_one_unit(db_session, mock_redis, fno_gates):
+    c = await fno_chain(db_session, mock_redis)
+    await alice_policy(c, QuantityMode.FIXED, 1)
+    async with TestingSessionLocal() as s:                                   # a fractional multiplier on the strategy member
+        from app.models.strategies import StrategyMember
+        m = (await s.execute(select(StrategyMember).where(StrategyMember.account_id == c.alice.id))).scalar_one()
+        m.multiplier = Decimal("0.5")
+        await s.commit()
+    await alice_policy(c, QuantityMode.MULTIPLIER)
+    c.master_fake.fno_order("F-1", CE, qty=75)
+    await c.poll()
+    assert c.placed_on_alice() == []                                         # 0.5 lot is below one lot: ZERO_LOT_RESULT
+    await alice_policy(c, QuantityMode.FIXED, 1)
+    c.master_fake.app_order("G-1", status="OPEN", price=800)
+    await c.poll()
+    (req,) = c.placed_on_alice()
+    assert req.exchange == "NSE" and req.quantity == 1                       # cash: FIXED 1 is still one share

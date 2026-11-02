@@ -373,6 +373,18 @@ def validate_quantity(terms: Optional[InstrumentTerms], quantity: Any, *, now: d
     return _verdict(overall, lot, freeze, (d.code for d in dims), freshness)
 
 
+def known_lot_size(broker: str, exchange: Any, token: Any, *, terms_store: Optional[TermsStore] = None) -> Optional[int]:
+    """The lot size a broker's OWN contract master states for (exchange, token), or None when the row is missing or the lot is unknown or 1.
+    Read from the module-level store at call time. Used to size a derivative order in whole lots; never a guess."""
+    tok = str(token).strip() if token not in (None, "") else ""
+    if not tok:
+        return None
+    row = (terms_store or store).get(broker, str(exchange or ""), tok)
+    if row is None or row.lot_state is not Knowledge.KNOWN or not row.lot_size or row.lot_size <= 1:
+        return None
+    return int(row.lot_size)
+
+
 def observe_quantity(*, child_broker: Optional[str], master_broker: Optional[str], exchange: Any, token: Any, quantity: Any,
                      now: datetime, terms_store: Optional[TermsStore] = None, max_age: timedelta = MAX_AGE) -> QuantityVerdict:
     """The lookup + validation used by the pipeline's observation points. The Master's token is only meaningful on the SAME broker, so

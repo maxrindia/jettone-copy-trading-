@@ -50,7 +50,7 @@ from app.services.brokers.registry import can_be_child, normalize_broker_id, per
 from app.services.instruments.planner import (
     ALICE_ID, ALICE_UNRESOLVED_PREFIX, EXCHANGE_SEGMENTS, PlannerSkip, alice_cross_broker_token, alice_unresolved_skip, check_child_order,
 )
-from app.services.instruments.terms import Outcome, observation_counts, observe_quantity
+from app.services.instruments.terms import Outcome, known_lot_size, observation_counts, observe_quantity
 from app.services.copy_engine.risk import RiskCheckResult, RiskEngine
 from app.services.copy_engine.risk_inputs import (
     PositionSafetyError,
@@ -243,6 +243,17 @@ class CopyEnginePipeline:
                     return decision.child_token
             return alice_cross_broker_token(exchange=exchange, symbol=symbol)
         return None
+
+    @staticmethod
+    def _child_derivative_lot(exchange: Any, child: Optional[Account], child_token: Any) -> Optional[int]:
+        """The Child's OWN lot size for a derivative order, or None (cash equity, an unknown token, or a lot the Child's contract master does
+        not state - then sizing is exactly what it was). Read from the Child broker's contract master by the Child's own token: today that
+        is Alice Blue's (instruments/terms.py); another Child broker adds its own lookup here."""
+        if derivative_routing.is_cash(exchange) or child is None or not child_token:
+            return None
+        if normalize_broker_id(getattr(child, "broker", None)) != ALICE_ID:
+            return None
+        return known_lot_size(ALICE_ID, exchange, child_token)
 
     async def _event_for_child(self, event: MasterTradeEvent, child: Optional[Account]) -> MasterTradeEvent:
         """A copy of the event whose instrument id is safe to use for this Child (see _child_instrument_token)."""
@@ -1082,6 +1093,7 @@ class CopyEnginePipeline:
                 follower_capital=funds_data.available_margin,
                 lot_size=lot_size,
                 settings=settings_obj,
+                derivative_lot=self._child_derivative_lot(event.exchange, follower, event.instrument_id),
                 reference_price=limit_price,
                 multiplier=multiplier,
             )
@@ -1707,6 +1719,7 @@ class CopyEnginePipeline:
                 follower_capital=funds_data.available_margin,
                 lot_size=lot_size,
                 settings=settings_obj,
+                derivative_lot=self._child_derivative_lot(event.exchange, follower, event.instrument_id),
                 reference_price=trigger_price if trigger_price > 0 else sl_price,
                 multiplier=multiplier,
             )
@@ -2975,6 +2988,7 @@ class CopyEnginePipeline:
                     follower_capital=funds_data.available_margin,
                     lot_size=lot_size,
                     settings=settings_obj,
+                    derivative_lot=self._child_derivative_lot(ord_rec.exchange, account, ord_rec.instrument_token),
                     reference_price=new_price,
                     multiplier=multiplier,
                 )
@@ -3896,6 +3910,7 @@ class CopyEnginePipeline:
                 follower_capital=funds_data.available_margin,
                 lot_size=lot_size,
                 settings=settings_obj,
+                derivative_lot=self._child_derivative_lot(event.exchange, follower, event.instrument_id),
                 reference_price=event.price,
                 multiplier=multiplier,
             )

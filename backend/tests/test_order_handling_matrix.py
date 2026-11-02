@@ -176,13 +176,14 @@ async def test_order_type_mapping(mock_redis, order_type, price, trigger, price_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("product,expected", [
-    (ProductType.MIS, "INTRADAY"),
-    (ProductType.CNC, "LONGTERM"),
-    (ProductType.NRML, "MTF"),
+@pytest.mark.parametrize("product,exchange,expected", [
+    (ProductType.MIS, "NFO", "INTRADAY"),
+    (ProductType.CNC, "NFO", "LONGTERM"),
+    (ProductType.NRML, "NFO", "LONGTERM"),      # MTF (margin trade funding) is cash-only: NRML on a derivative exchange is Alice's LONGTERM
+    (ProductType.NRML, "NSE", "MTF"),           # cash equity is unchanged
 ])
-async def test_product_mapping(mock_redis, product, expected):
-    _, body = await _payload(mock_redis, order_type=OrderType.LIMIT, product=product)
+async def test_product_mapping(mock_redis, product, exchange, expected):
+    _, body = await _payload(mock_redis, order_type=OrderType.LIMIT, product=product, exchange=exchange)
     assert body["product"] == expected
 
 
