@@ -826,7 +826,15 @@ class GrowwClient:
         records: List[OrderRecord] = []
         for policy in segments.enabled_policies():                 # CASH always; FNO only when GROWW_FNO_MASTER_ENABLED (groww/segments.py)
             rows = await self._read_order_rows(policy.name)
-            records.extend(policy.to_record(self, r) for r in rows)
+            for r in rows:
+                try:
+                    records.append(policy.to_record(self, r))
+                except GrowwError as exc:
+                    if not policy.isolate_row_errors:
+                        raise
+                    # One odd row of an optional segment must not blind the whole book. It is skipped (never dispatched, so never copied) and
+                    # logged with the fields that explain it, so the first live order of a new kind shows exactly what was unexpected.
+                    logger.warning(f"[Groww {policy.name}] a row was skipped: {type(exc).__name__}: {str(exc)[:160]}. Fields: {policy.describe_row(r)}")
         await self._restore_client_order_ids(records)
         return records
 

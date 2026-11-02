@@ -347,3 +347,68 @@ def test_a_new_child_broker_is_routable_by_registering_one_resolver(monkeypatch)
                         lambda c: ContractResolution("zerodha", ResolutionVerdict.RESOLVED_UNVERIFIED, "x", c.key, "NIFTY26NOV23500CE", "12345"))
     d = derivative_routing.route("groww", "zerodha", "NFO", KEY)
     assert d.allowed is True and d.child_token == "12345"
+
+
+# ── the quantity unit can be INFERRED per order (AUTO), the exchange is tolerant, and one odd row cannot blind the book ──────────
+
+@pytest.mark.parametrize("qty,lot,freeze,expected", [
+    (1, 75, 1800, "LOTS"), (24, 75, 1800, "LOTS"), (25, 75, 1800, None), (70, 75, 1800, None), (75, 75, 1800, "UNITS"), (150, 75, 1800, "UNITS"),
+    (75, 75, 0, None), (1, 25, 1000, "LOTS"), (25, 25, 1000, None), (50, 25, 1000, "UNITS"), (1, 35, 601, "LOTS"), (35, 35, 601, "UNITS"),
+    (0, 75, 1800, None), (-75, 75, 1800, None), (75, 0, 1800, None),
+])
+def test_the_quantity_unit_is_inferred_only_when_it_is_unambiguous(qty, lot, freeze, expected):
+    assert segments.infer_quantity_unit(qty, lot, freeze) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("qty,expected_units", [(1, 75), (2, 150), (75, 75), (150, 150)])
+async def test_auto_reads_one_lot_as_lots_and_a_lot_multiple_as_units(db_session, mock_redis, fno_gates, monkeypatch, qty, expected_units):
+    monkeypatch.setattr(settings, "GROWW_FNO_QUANTITY_UNIT", "AUTO")
+    c = await fno_chain(db_session, mock_redis)
+    c.master_fake.fno_order("F-1", CE, qty=qty)
+    await c.poll()
+    (req,) = c.placed_on_alice()
+    assert req.quantity == expected_units and req.instrument_token == "50001"
+
+
+@pytest.mark.asyncio
+async def test_auto_refuses_an_order_whose_unit_is_not_unambiguous(db_session, mock_redis, fno_gates, monkeypatch):
+    monkeypatch.setattr(settings, "GROWW_FNO_QUANTITY_UNIT", "AUTO")
+    c = await fno_chain(db_session, mock_redis)
+    c.master_fake.fno_order("F-1", CE, qty=70)
+    (rec,) = await c.master_client.get_order_book()
+    assert rec.status == "UNSUPPORTED_FNO_QUANTITY_UNIT_AMBIGUOUS"
+    await c.poll()
+    assert c.placed_on_alice() == []
+
+
+@pytest.mark.asyncio
+async def test_an_nfo_exchange_row_is_read_like_an_nse_one(db_session, mock_redis, fno_gates):
+    c = await fno_chain(db_session, mock_redis)
+    c.master_fake.fno_order("F-1", CE, exchange="NFO")
+    await c.poll()
+    assert len(c.placed_on_alice()) == 1
+
+
+@pytest.mark.asyncio
+async def test_one_malformed_f_and_o_row_is_skipped_and_logged_with_its_fields_the_cash_book_is_still_read(db_session, mock_redis, fno_gates, caplog):
+    c = await fno_chain(db_session, mock_redis)
+    c.master_fake.app_order("G-1", status="OPEN", price=800)
+    c.master_fake.fno_order("F-1", CE, status="SOME_NEW_STATUS")
+    with caplog.at_level("WARNING", logger="groww_client"):
+        records = await c.master_client.get_order_book()
+    assert [r.exchange for r in records] == ["NSE"]                                    # the cash order is there; the odd F&O row is not
+    assert any("a row was skipped" in m and "SOME_NEW_STATUS" in m and "NIFTY26NOV23500CE" in m for m in caplog.messages)
+    await c.poll()
+    assert len(c.placed_on_alice()) == 1 and c.placed_on_alice()[0].exchange == "NSE"   # and it still copies
+
+
+@pytest.mark.asyncio
+async def test_an_unsupported_f_and_o_order_is_logged_once_with_the_raw_values(db_session, mock_redis, fno_gates, caplog):
+    c = await fno_chain(db_session, mock_redis)
+    c.master_fake.fno_order("LOGONCE-9", CE, product="CNC")                 # a fresh id: the once-per-order memory is process-wide
+    with caplog.at_level("WARNING", logger="groww_segments"):
+        await c.master_client.get_order_book()
+        await c.master_client.get_order_book()
+    hits = [m for m in caplog.messages if "PRODUCT_NOT_FNO" in m]
+    assert len(hits) == 1 and "'product': 'CNC'" in hits[0] and "'exchange': 'NSE'" in hits[0]

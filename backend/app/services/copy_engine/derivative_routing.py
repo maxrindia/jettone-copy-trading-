@@ -17,6 +17,7 @@ Everything fails closed: an unlisted pair, an unreadable key, a Child without a 
 that is not numeric keeps the original `INSTRUMENT_UNMAPPED` skip (reason `CROSS_BROKER_DERIVATIVE_UNMAPPED:...` or `CROSS_BROKER_FNO_*`).
 This policy never opens a role gate or a pair gate and never decides Live Trading; those still apply to the order afterwards.
 """
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
@@ -27,6 +28,8 @@ from app.services.instruments.contracts import (
 from app.services.instruments.planner import (
     ALICE_ID, EXCHANGE_SEGMENTS, INSTRUMENT_UNMAPPED, PlannerSkip, cross_broker_derivative_skip,
 )
+
+logger = logging.getLogger("derivative_routing")
 
 Resolver = Callable[[CanonicalContract], ContractResolution]
 
@@ -76,6 +79,8 @@ def route(master_broker: Optional[str], child_broker: Optional[str], exchange: A
         token = str(resolution.broker_token or "")
         if resolution.verdict is not ResolutionVerdict.RESOLVED_UNVERIFIED or not token.isdigit():
             return _refuse(f"CROSS_BROKER_FNO_{resolution.verdict.value}:{resolution.reason}")
+        logger.info(f"[F&O route] {master}->{child}: {contract.key} resolved to the Child's own {resolution.broker_symbol} (token {token}, lot "
+                    f"{resolution.lot_size}); the mapping is not evidenced against a real account.")
         return RouteDecision(True, None, token, resolution.broker_symbol)
     except Exception as exc:                                                              # an error is never a route
         return RouteDecision(False, PlannerSkip(INSTRUMENT_UNMAPPED, f"CROSS_BROKER_FNO_ROUTE_ERROR:{type(exc).__name__}"))
