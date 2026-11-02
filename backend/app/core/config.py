@@ -129,6 +129,17 @@ class Settings(BaseSettings):
     # checks: the Master role gate (flag + contract master_verified), the Child role gate and every per-order safety check still
     # apply, and it does not enable Live Trading. An entry that does not name two known brokers opens nothing. Default empty (off).
     CANARY_PAIRS: str = ""
+    # F&O (derivatives) as a Master's segment. Phase A: a Groww Master's FNO order list is READ and its orders normalized to a canonical
+    # contract (underlying + expiry + strike + CE/PE/FUT) so they can be copied to an Alice Blue Child. Default off: until it is on, only the
+    # CASH book is read, exactly as before. It does not by itself copy anything: see CROSS_BROKER_FNO_PAIRS.
+    GROWW_FNO_MASTER_ENABLED: bool = False
+    # What Groww's `quantity` means for an FNO order: "UNITS" (a multiple of the lot size) or "LOTS". Groww's documentation does not state it,
+    # so the default is EMPTY and every FNO order is then refused as UNSUPPORTED rather than guessed. Set it only from a reviewed capture.
+    GROWW_FNO_QUANTITY_UNIT: str = ""
+    # Cross-broker derivative routing allowlist: comma-separated "master>child" pairs (for example "groww>alicebluenew") for which an F&O
+    # order whose contract resolves EXACTLY in the Child's own catalog is copied. Anything not listed keeps the existing refusal
+    # (CROSS_BROKER_DERIVATIVE_UNMAPPED). Default empty (off). It never opens a role or pair gate; both still apply.
+    CROSS_BROKER_FNO_PAIRS: str = ""
     # Groww's instrument master (CSV). Empty = never downloaded; set it to the URL
     # in Groww's instruments documentation, or load a downloaded file instead.
     GROWW_INSTRUMENT_MASTER_URL: str = ""

@@ -49,6 +49,7 @@ from app.services.brokers.strict_numbers import StrictNumberError, need, optiona
 from app.services.brokers.position_checks import duplicate_position_key
 from app.services.brokers.transport import SendState, is_provably_not_sent
 from app.services.groww import contract as C
+from app.services.groww import segments
 from app.services.groww.contract import GROWW_CONTRACT, GrowwContract, contract_is_usable
 from app.services.groww.instruments import GrowwInstrumentStore, store as default_store
 
@@ -818,12 +819,14 @@ class GrowwClient:
         )
 
     async def get_order_book(self) -> List[OrderRecord]:
-        """Every order of the day's CASH book, read page by page (see `_read_order_rows`). It returns the COMPLETE book or raises: a
+        """Every order of the day's book (CASH, plus FNO when it is enabled), read page by page (see `_read_order_rows`). It returns the COMPLETE book or raises: a
         failed, malformed, unbounded or inconsistent read never yields a partial list, so a caller can never mistake a missing order
         for a cancelled one or a half-read book for an empty one."""
         self._require_contract()
-        rows = await self._read_order_rows(C.SUPPORTED_SEGMENT)
-        records = [self.parse_order_row(r) for r in rows]
+        records: List[OrderRecord] = []
+        for policy in segments.enabled_policies():                 # CASH always; FNO only when GROWW_FNO_MASTER_ENABLED (groww/segments.py)
+            rows = await self._read_order_rows(policy.name)
+            records.extend(policy.to_record(self, r) for r in rows)
         await self._restore_client_order_ids(records)
         return records
 

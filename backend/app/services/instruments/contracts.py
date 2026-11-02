@@ -112,6 +112,18 @@ def make_contract(kind: Any, exchange: Any, underlying: Any, expiry: Any = None,
     return c if c.problem() is None else None
 
 
+def contract_from_key(key: Any) -> Optional[CanonicalContract]:
+    """The derivative contract a `CanonicalContract.key` names, or None. The inverse of `key` for FUT / CE / PE (an equity key is not
+    parsed here: an equity order never carries one). Strict - an unreadable, partial or non-round-tripping key yields None, never a guess."""
+    parts = str(key or "").split("|")
+    if len(parts) not in (4, 5) or parts[0] not in ("FUT", "CE", "PE"):
+        return None
+    if (parts[0] == "FUT") != (len(parts) == 4):
+        return None
+    contract = make_contract(parts[0], parts[1], parts[2], parts[3], parts[4] if len(parts) == 5 else None)
+    return contract if contract is not None and contract.key == str(key) else None
+
+
 @dataclass(frozen=True)
 class ContractResolution:
     broker_id: str

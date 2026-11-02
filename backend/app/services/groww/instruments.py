@@ -30,7 +30,8 @@ import csv
 import io
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 import httpx
@@ -66,6 +67,31 @@ class GrowwInstrument:
     lot_size_stated: bool = False
 
 
+@dataclass(frozen=True)
+class GrowwDerivative:
+    """One F&O row of Groww's instrument master. Read-only identity data for DETECTING a Master's F&O orders (phase A): nothing here places
+    an order, and nothing about it is verified against a live account."""
+    exchange: str                 # as the file states it (NSE for NSE F&O); the canonical exchange (NFO) is the segment policy's decision
+    trading_symbol: str
+    kind: str                     # FUT | CE | PE
+    underlying: str               # the file's underlying_symbol
+    expiry: date
+    strike: Optional[Decimal]     # options only
+    lot_size: int
+    freeze_quantity: int          # 0 = not provided
+    buy_allowed: Optional[bool]
+    sell_allowed: Optional[bool]
+
+
+def _derivative_kind(instrument_type: str) -> Optional[str]:
+    """CE / PE are documented values. A future's instrument_type is NOT stated in Groww's documentation, so only a value that starts with
+    FUT is read as a future and anything else is not loaded (then the contract cannot resolve: fail closed)."""
+    t = str(instrument_type or "").strip().upper()
+    if t in ("CE", "PE"):
+        return t
+    return "FUT" if t.startswith("FUT") else None
+
+
 def _flag(value: object) -> Optional[bool]:
     v = str(value or "").strip().lower()
     if v in _TRUE:
@@ -85,6 +111,7 @@ def _int(value: object) -> int:
 class GrowwInstrumentStore:
     def __init__(self, clock: Optional[Callable[[], datetime]] = None) -> None:
         self._by_key: Dict[Tuple[str, str], List[GrowwInstrument]] = {}
+        self._derivs: Dict[Tuple[str, str], List[GrowwDerivative]] = {}
         self.size = 0
         # Freshness metadata for read-only consumers (R4b); it does not influence loading or resolve().
         self._clock = clock or (lambda: datetime.now(timezone.utc))
@@ -125,6 +152,7 @@ class GrowwInstrumentStore:
         if added <= 0 or added < min_rows:
             raise ValueError(f"instrument master holds {added} NSE/BSE equity row(s); expected at least {max(1, min_rows)}")
         self._by_key = staging._by_key
+        self._derivs = staging._derivs
         self.size = staging.size
         self._load_calls = 1                 # one complete document: the snapshot time is meaningful
         self._snapshot_at = self._clock()
@@ -183,6 +211,9 @@ class GrowwInstrumentStore:
             seg = str(r.get("segment") or "").strip().upper()
             itype = str(r.get("instrument_type") or "").strip().upper()
             sym = str(r.get("trading_symbol") or "").strip().upper()
+            if seg == "FNO":
+                self._add_derivative(r, exch, sym, itype)       # a separate index: never counted as equity, never changes cash resolution
+                continue
             if exch not in _EXCHANGES or seg != "CASH" or itype != "EQ" or not sym:
                 continue
             isin = str(r.get("isin") or "").strip().upper()
@@ -199,6 +230,41 @@ class GrowwInstrumentStore:
             added += 1
         self.size += added
         return added
+
+    def _add_derivative(self, r: Dict[str, str], exch: str, sym: str, itype: str) -> None:
+        kind = _derivative_kind(itype)
+        underlying = str(r.get("underlying_symbol") or "").strip().upper()
+        try:
+            expiry = date.fromisoformat(str(r.get("expiry_date") or "").strip())
+            strike_raw = str(r.get("strike_price") or "").strip()
+            strike = Decimal(strike_raw) if kind in ("CE", "PE") and strike_raw else None
+            if strike is not None and (not strike.is_finite() or strike <= 0):
+                return
+        except (ValueError, InvalidOperation):
+            return
+        if kind is None or exch != "NSE" or not sym or not underlying or underlying == "NAN" or (kind in ("CE", "PE") and strike is None):
+            return                                                    # an incomplete or unrecognised F&O row is simply not loaded
+        lot = _int(r.get("lot_size"))
+        if lot <= 0:
+            return
+        self._derivs.setdefault((exch, sym), []).append(GrowwDerivative(
+            exchange=exch, trading_symbol=sym, kind=kind, underlying=underlying, expiry=expiry, strike=strike, lot_size=lot,
+            freeze_quantity=max(0, _int(r.get("freeze_quantity"))), buy_allowed=_flag(r.get("buy_allowed")), sell_allowed=_flag(r.get("sell_allowed")),
+        ))
+
+    @property
+    def derivative_count(self) -> int:
+        return sum(len(v) for v in self._derivs.values())
+
+    def derivative(self, exchange: str, trading_symbol: str) -> GrowwDerivative:
+        """The ONE F&O row for (exchange, trading_symbol), or InstrumentResolutionError (none, several, or not loaded)."""
+        key = (str(exchange or "").strip().upper(), str(trading_symbol or "").strip().upper())
+        if not self._derivs:
+            raise InstrumentResolutionError("Groww F&O instruments are not loaded.")
+        found = self._derivs.get(key, [])
+        if len(found) != 1:
+            raise InstrumentResolutionError(f"Groww F&O instrument {key[0]}:{key[1]} is " + ("not found." if not found else f"ambiguous ({len(found)} matches)."))
+        return found[0]
 
     def load_csv_text(self, text: str) -> int:
         first_load = self._load_calls == 0

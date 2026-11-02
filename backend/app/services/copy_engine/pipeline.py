@@ -41,14 +41,14 @@ from app.services.copy_engine.child_outcomes import (
     record_fanout_summary,
     record_pre_send_outcome,
 )
+from app.services.copy_engine import derivative_routing
 from app.services.copy_engine.events import MasterTradeEvent, derive_copy_event_id
 from app.services.alice_blue.instruments import InstrumentResolutionError
 from app.services.brokers.identity import master_scope
 from app.services.brokers.pairs import check_pair
 from app.services.brokers.registry import can_be_child, normalize_broker_id, persisted_order_label
 from app.services.instruments.planner import (
-    ALICE_ID, EXCHANGE_SEGMENTS, PlannerSkip, alice_cross_broker_token, alice_unresolved_skip, check_child_order,
-    cross_broker_derivative_skip,
+    ALICE_ID, ALICE_UNRESOLVED_PREFIX, EXCHANGE_SEGMENTS, PlannerSkip, alice_cross_broker_token, alice_unresolved_skip, check_child_order,
 )
 from app.services.instruments.terms import Outcome, observation_counts, observe_quantity
 from app.services.copy_engine.risk import RiskCheckResult, RiskEngine
@@ -217,6 +217,7 @@ class CopyEnginePipeline:
 
     async def _child_instrument_token(
         self, master_account_id: Any, child: Optional[Account], token: Optional[str], *, exchange: Any = None, symbol: Any = None,
+        contract_key: Optional[str] = None,
     ) -> Optional[str]:
         """The instrument id to hand to a Child: the Master's own id when Master and Child are on the SAME broker; for an Alice Blue
         Child of another broker's Master, Alice's own exactly-resolved token or an unresolved marker; otherwise None.
@@ -234,13 +235,19 @@ class CopyEnginePipeline:
         if master_broker is not None and master_broker == child_broker:
             return token
         if master_broker is not None and child_broker == ALICE_ID:
+            if contract_key and not derivative_routing.is_cash(exchange):
+                # A derivative of another broker's Master: Alice's OWN token for the exactly-resolved contract, only for a listed pair
+                # (CROSS_BROKER_FNO_PAIRS); otherwise the unresolved marker below keeps the original refusal.
+                decision = derivative_routing.route(master_broker, child_broker, exchange, contract_key)
+                if decision.allowed and decision.child_token:
+                    return decision.child_token
             return alice_cross_broker_token(exchange=exchange, symbol=symbol)
         return None
 
     async def _event_for_child(self, event: MasterTradeEvent, child: Optional[Account]) -> MasterTradeEvent:
         """A copy of the event whose instrument id is safe to use for this Child (see _child_instrument_token)."""
         token = await self._child_instrument_token(event.account_id, child, event.instrument_id,
-                                                   exchange=event.exchange, symbol=event.symbol)
+                                                   exchange=event.exchange, symbol=event.symbol, contract_key=event.contract_key)
         return event if token == event.instrument_id else dataclasses.replace(event, instrument_id=token)
 
     async def _planner_skip(
@@ -252,8 +259,9 @@ class CopyEnginePipeline:
         a check fails closed (INSTRUMENT_UNMAPPED).
 
         With CANONICAL_MAPPING_ENFORCED on, the full planner check decides (it already refuses a cross-broker derivative, with
-        its own reason). With it off (the default), only cross_broker_derivative_skip runs: a derivative has no verified
-        identity on another broker, so it is never sent across brokers. Either way, a cross-broker Alice Blue Child whose
+        its own reason). With it off (the default), only the derivative route policy runs: a derivative has no verified
+        identity on another broker, so it is never sent across brokers unless the pair is listed in CROSS_BROKER_FNO_PAIRS and the
+        contract resolves exactly in the Child's own catalog (copy_engine/derivative_routing.py). Either way, a cross-broker Alice Blue Child whose
         instrument could not be resolved exactly (the marker from _child_instrument_token) is then skipped: sending it would
         leave Alice to resolve by symbol. Cash equity and same-broker orders do no extra work while enforcement is off.
         """
@@ -261,9 +269,8 @@ class CopyEnginePipeline:
         if not settings.CANONICAL_MAPPING_ENFORCED:
             if EXCHANGE_SEGMENTS.get(str(event.exchange or "").strip().upper()) != ("CASH",):
                 try:
-                    skip = cross_broker_derivative_skip(
-                        master_broker=await self._master_broker_id(event.account_id),
-                        child_broker=follower.broker, exchange=event.exchange,
+                    skip = derivative_routing.skip_for(
+                        await self._master_broker_id(event.account_id), follower.broker, event.exchange, event.contract_key,
                     )
                 except Exception as exc:
                     logger.error(f"[Pipeline] Cross-broker instrument check failed for {follower.display_name}; failing closed: {exc}")
@@ -2875,6 +2882,9 @@ class CopyEnginePipeline:
             account, multiplier = follower_info.get(acc_id_str, (None, Decimal("1.0")))
             child_token = await self._child_instrument_token(master_account_id, account, instrument_token,
                                                              exchange=ord_rec.exchange, symbol=ord_rec.symbol)
+            if (isinstance(child_token, str) and child_token.startswith(ALICE_UNRESOLVED_PREFIX) and ord_rec.instrument_token
+                    and not derivative_routing.is_cash(ord_rec.exchange)):
+                child_token = ord_rec.instrument_token        # a routed derivative child order was placed with its own token; reuse it
             settings_obj = account.copy_settings if account else None
             lot_size = self._get_lot_size(ord_rec.symbol)
 

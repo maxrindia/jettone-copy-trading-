@@ -112,6 +112,9 @@ class OrderRecord:
     # above is only a default). The token is persisted only when this is set, so a stored (exchange, token) pair
     # is never built from a defaulted exchange.
     instrument_exchange: Optional[str] = None
+    # CanonicalContract.key of a DERIVATIVE order read from a broker that reports contract terms (Groww FNO), else None. It is the
+    # broker-neutral identity a cross-broker Child resolves in ITS OWN catalog; the Master broker's own token never crosses brokers.
+    contract_key: Optional[str] = None
 
 
 @dataclass
@@ -136,3 +139,5 @@ class OrderUpdateEvent:
     instrument_id: Optional[str] = None
     # Threaded from OrderRecord.instrument_exchange (None for WebSocket events, which carry no instrument token).
     instrument_exchange: Optional[str] = None
+    # Threaded from OrderRecord.contract_key (None for every flow that has no canonical derivative contract).
+    contract_key: Optional[str] = None

@@ -33,10 +33,11 @@ from app.services.alice_blue.instruments import InstrumentResolutionError
 from app.services.alice_blue.types import OrderType
 from app.services.brokers.pairs import check_pair
 from app.services.brokers.registry import can_be_child, normalize_broker_id
+from app.services.copy_engine import derivative_routing
 from app.services.copy_engine.events import MasterTradeEvent
 from app.services.copy_engine.pipeline import child_broker_product
 from app.services.instruments.planner import (
-    ALICE_ID, alice_cross_broker_token, alice_unresolved_skip, cross_broker_derivative_skip,
+    ALICE_ID, alice_cross_broker_token, alice_unresolved_skip,
 )
 
 GROWW_ID = "groww"
@@ -138,9 +139,11 @@ def preview_child_order(
     if quantity <= 0:
         blockers.append(PreviewBlocker(ZERO_LOT_RESULT, f"child quantity {quantity} is not positive"))
 
-    derivative = cross_broker_derivative_skip(master_broker=master, child_broker=child_broker, exchange=event.exchange)
+    derivative = derivative_routing.skip_for(master, child_broker, event.exchange, getattr(event, "contract_key", None))
     if derivative is not None:
         blockers.append(PreviewBlocker(INSTRUMENT_UNMAPPED, derivative.detail))
+    elif master is not None and master != child and not derivative_routing.is_cash(event.exchange):
+        notes.append("F&O routed: the contract resolves exactly in the Child's own catalog (CROSS_BROKER_FNO_PAIRS)")
     elif child == ALICE_ID and master is not None and master != ALICE_ID:
         unresolved = alice_unresolved_skip(alice_cross_broker_token(exchange=event.exchange, symbol=event.symbol, store=alice_store))
         if unresolved is not None:

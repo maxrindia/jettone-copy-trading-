@@ -344,6 +344,21 @@ def listed_canary_pairs() -> FrozenSet[Tuple[str, str]]:
     return frozenset(pairs)
 
 
+def listed_fno_pairs() -> FrozenSet[Tuple[str, str]]:
+    """The "master>child" pairs named in CROSS_BROKER_FNO_PAIRS, as canonical broker ids (same grammar and same fail-closed parsing as
+    CANARY_PAIRS: an entry that is not two known brokers joined by ">" is ignored). Read from settings on every call. Listing a pair here
+    only lets a derivative order whose contract RESOLVES EXACTLY in the Child's catalog through; it opens no role or pair gate."""
+    pairs = set()
+    for entry in str(settings.CROSS_BROKER_FNO_PAIRS or "").split(","):
+        master, sep, child = entry.partition(">")
+        if not sep:
+            continue
+        m, c = normalize_broker_id(master) if master.strip() else None, normalize_broker_id(child) if child.strip() else None
+        if m is not None and c is not None:
+            pairs.add((m, c))
+    return frozenset(pairs)
+
+
 def canary_pair_open(master: str, child: str) -> bool:
     """The owner-set canaries. Two named flags - alicebluenew -> groww (ALICE_GROWW_CANARY_ENABLED) and alicebluenew -> zerodha
     (ALICE_ZERODHA_CANARY_ENABLED) - and the generic CANARY_PAIRS list. Everything is off by default and each opens only the pair

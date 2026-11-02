@@ -71,6 +71,8 @@ class MasterTradeEvent:
     # Canonical id of the broker this event's Master trades through (brokers/registry). None = an event that predates multi-broker
     # support, which is Alice Blue. Only used to scope the duplicate-guard and copy-event keys (see brokers/identity.py).
     master_broker: Optional[str] = None
+    # CanonicalContract.key of a derivative order (see OrderRecord.contract_key). None for cash equity and for every same-broker flow.
+    contract_key: Optional[str] = None
 
     @property
     def dedupe_scope(self) -> str:

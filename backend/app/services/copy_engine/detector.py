@@ -253,6 +253,7 @@ class MasterTradeDetector:
                     pending_quantity=max(0, event.quantity - event.filled_quantity),
                     status="PENDING",
                     instrument_id=event.instrument_id,
+                    contract_key=event.contract_key,
                 )
                 logger.info(
                     f"[Detector] Detected Master SL Modification: {trade_event.symbol} {trade_event.side} "
@@ -285,6 +286,7 @@ class MasterTradeDetector:
                 pending_quantity=event.quantity - event.filled_quantity,
                 status="PENDING",
                 instrument_id=event.instrument_id,
+                contract_key=event.contract_key,
             )
             logger.info(
                 f"[Detector] Detected Master SL Pending: {trade_event.symbol} {trade_event.side} "
@@ -331,6 +333,7 @@ class MasterTradeDetector:
                     pending_quantity=max(0, event.quantity - event.filled_quantity),
                     status="OPEN",
                     instrument_id=event.instrument_id,
+                    contract_key=event.contract_key,
                 )
                 logger.info(
                     f"[Detector] Detected Master LIMIT Modification: {trade_event.symbol} {trade_event.side} "
@@ -365,6 +368,7 @@ class MasterTradeDetector:
                 pending_quantity=event.quantity - event.filled_quantity,
                 status="OPEN",
                 instrument_id=event.instrument_id,
+                contract_key=event.contract_key,
             )
             logger.info(
                 f"[Detector] Detected Master LIMIT Created: {trade_event.symbol} {trade_event.side} "
@@ -419,6 +423,7 @@ class MasterTradeDetector:
                 pending_quantity=max(0, event.quantity - event.filled_quantity),
                 status="OPEN",
                 instrument_id=event.instrument_id,
+                contract_key=event.contract_key,
             )
             logger.info(
                 f"[Detector] Detected Master order_type change to {order_type} while still OPEN "
@@ -443,6 +448,7 @@ class MasterTradeDetector:
                 event_type="ORDER_CANCELLED",
                 status="CANCELLED",
                 instrument_id=event.instrument_id,
+                contract_key=event.contract_key,
             )
 
         # 3. REJECTION DETECTION
@@ -462,6 +468,7 @@ class MasterTradeDetector:
                 status="REJECTED",
                 rejection_reason=event.rejection_reason,
                 instrument_id=event.instrument_id,
+                contract_key=event.contract_key,
             )
 
         # 4. FILL DETECTION (COMPLETE / PARTIAL)
@@ -556,6 +563,7 @@ class MasterTradeDetector:
                     pending_quantity=max(0, event.quantity - new_filled),
                     status="OPEN",
                     instrument_id=event.instrument_id,
+                    contract_key=event.contract_key,
                 )
                 logger.info(
                     f"[Detector] Detected Master LIMIT Created (already {status} on first "
@@ -602,6 +610,7 @@ class MasterTradeDetector:
                 pending_quantity=max(0, event.quantity - new_filled),
                 status=status,
                 instrument_id=event.instrument_id,
+                contract_key=event.contract_key,
             )
 
             logger.info(

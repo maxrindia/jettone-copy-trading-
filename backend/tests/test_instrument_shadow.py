@@ -391,6 +391,12 @@ def test_nothing_in_the_trading_path_imports_the_instruments_package_except_the_
         "app/services/alice_blue/instruments.py": ("from app.services.instruments.terms import",),
         # The read-only Child preview (never sends or writes) calls the same planner functions the pipeline applies before a send.
         "app/services/copy_engine/child_preview.py": ("from app.services.instruments.planner import",),
+        # Phase A (cross-broker F&O): the ONE route policy the pipeline, the planner skip and the preview all ask. It uses only the pure
+        # canonical-contract types / resolvers (no network, database or broker call - tests/test_groww_fno_master.py) and the planner's skip.
+        "app/services/copy_engine/derivative_routing.py": ("from app.services.instruments.contracts import (",
+                                                           "from app.services.instruments.planner import ("),
+        # The Groww F&O segment policy builds the pure CanonicalContract key for a Master's F&O order; it resolves nothing at another broker.
+        "app/services/groww/segments.py": ("from app.services.instruments.contracts import make_contract",),
     }
     for sub in ("services/copy_engine", "services/reliability", "services/runtime", "services/alice_blue",
                 "services/groww", "services/angel_one", "services/brokers"):

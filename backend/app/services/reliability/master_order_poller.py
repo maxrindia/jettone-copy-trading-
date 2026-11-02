@@ -505,6 +505,7 @@ class MasterOrderPoller:
             exchange=record.exchange or "NSE",
             instrument_id=record.instrument_id,
             instrument_exchange=getattr(record, "instrument_exchange", None),
+            contract_key=getattr(record, "contract_key", None),
         )
 
     @staticmethod
