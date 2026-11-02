@@ -41,7 +41,7 @@ from app.services.copy_engine.child_outcomes import (
     record_fanout_summary,
     record_pre_send_outcome,
 )
-from app.services.copy_engine import derivative_routing
+from app.services.copy_engine import derivative_routing, fno_validation
 from app.services.copy_engine.events import MasterTradeEvent, derive_copy_event_id
 from app.services.alice_blue.instruments import InstrumentResolutionError
 from app.services.brokers.identity import master_scope
@@ -251,6 +251,31 @@ class CopyEnginePipeline:
         if child is None:
             return None
         return derivative_routing.child_lot(getattr(child, "broker", None), exchange, symbol, child_token)
+
+    async def _fno_child_check(
+        self, event: MasterTradeEvent, follower: Account, quantity: int, price: Any = None, *, fill_sequence: int = 1,
+    ) -> Optional[Dict[str, Any]]:
+        """The cross-broker F&O validation chain (copy_engine/fno_validation.py) for ONE Child, after its quantity is sized. None when the
+        order does not cross brokers, is cash equity, or passes every check; otherwise a SKIPPED result with the refusing check's code
+        (also audited). Same-broker orders and cash equity never enter, so Alice -> Alice and every cash path are untouched."""
+        if derivative_routing.is_cash(event.exchange):
+            return None
+        child_broker = normalize_broker_id(getattr(follower, "broker", None))
+        master_broker = await self._master_broker_id(event.account_id)
+        if child_broker is None or master_broker is None or master_broker == child_broker:
+            return None
+        try:
+            limit_price = Decimal(str(price)) if price not in (None, "", 0) else None
+        except (ArithmeticError, ValueError):
+            limit_price = None
+        terms = derivative_routing.child_terms(child_broker, event.exchange, event.symbol, event.instrument_id)
+        code = fno_validation.run_chain(fno_validation.FnoOrderFacts(child_broker, int(quantity), terms, limit_price))
+        if code is None:
+            return None
+        logger.info(f"[Pipeline] {code}: {event.master_order_id} not copied to {follower.display_name} ({follower.broker}); quantity {quantity}.")
+        await self._audit_copy_skip(follower, event, code=code, detail=f"quantity={quantity}", fill_sequence=fill_sequence,
+                                    extra={"child_order_type": str(event.order_type), "product_type": str(event.product_type)})
+        return {"status": "SKIPPED", "reason": code, "detail": f"quantity={quantity}"}
 
     async def _event_for_child(self, event: MasterTradeEvent, child: Optional[Account]) -> MasterTradeEvent:
         """A copy of the event whose instrument id is safe to use for this Child (see _child_instrument_token)."""
@@ -1119,6 +1144,9 @@ class CopyEnginePipeline:
 
         if target_qty <= 0:
             return {"status": "SKIPPED", "reason": "ZERO_LOT_RESULT"}
+        fno_skip = await self._fno_child_check(event, follower, target_qty, event.limit_price if event.limit_price and event.limit_price > 0 else None)
+        if fno_skip is not None:
+            return fno_skip
 
         await self._observe_child_quantity(
             point="PLACE_LIMIT", master_account_id=event.account_id, child_broker=follower.broker, child_account_id=acc_id,
@@ -1745,6 +1773,9 @@ class CopyEnginePipeline:
 
         if target_qty <= 0:
             return {"status": "SKIPPED", "reason": "ZERO_LOT_RESULT"}
+        fno_skip = await self._fno_child_check(event, follower, target_qty, event.limit_price if event.limit_price and event.limit_price > 0 else None)
+        if fno_skip is not None:
+            return fno_skip
 
         await self._observe_child_quantity(
             point="PLACE_SL", master_account_id=event.account_id, child_broker=follower.broker, child_account_id=acc_id,
@@ -3949,6 +3980,10 @@ class CopyEnginePipeline:
                 session.add(audit)
                 await session.commit()
             return {"status": "SKIPPED", "reason": "ZERO_LOT_RESULT"}
+
+        fno_skip = await self._fno_child_check(event, follower, target_qty, None)        # a MARKET copy has no price yet: tick not evaluated
+        if fno_skip is not None:
+            return fno_skip
 
         await self._observe_child_quantity(
             point="PLACE_MARKET", master_account_id=event.account_id, child_broker=follower.broker, child_account_id=acc_id,

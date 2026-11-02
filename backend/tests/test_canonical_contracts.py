@@ -80,10 +80,19 @@ def test_a_future_cannot_be_resolved_as_an_option_or_with_a_wrong_expiry():
 # ── the other three brokers: explicit, never a silent success ──────────────
 
 # Alice Blue is resolved from its own contract master (tests/test_alice_cross_broker_resolution.py).
-@pytest.mark.parametrize("broker", ["groww", "angelone", "dhan"])
+@pytest.mark.parametrize("broker", ["angelone", "dhan"])
 def test_other_brokers_never_resolve_derivatives_here(broker):
     got = resolve_for_broker(broker, opt(), now=NOW)
     assert got.verdict is R.NOT_SUPPORTED and got.broker_token is None and not got.verified
+
+
+def test_groww_resolves_a_derivative_only_from_its_own_loaded_instrument_master_and_never_as_verified():
+    """Phase B: Groww is resolved from ITS OWN F&O catalog (groww/instruments.py). With nothing loaded it is an explicit refusal, never a
+    silent success; with a row it is RESOLVED_UNVERIFIED (no live evidence exists) and carries no token (Groww identifies by symbol)."""
+    from app.services.groww.instruments import GrowwInstrumentStore
+
+    empty = resolve_for_broker("groww", opt(), now=NOW, groww_store=GrowwInstrumentStore())
+    assert empty.verdict is R.CATALOG_NOT_LOADED and empty.broker_token is None and not empty.verified
 
 
 @pytest.mark.parametrize("broker", ["groww", "angelone"])

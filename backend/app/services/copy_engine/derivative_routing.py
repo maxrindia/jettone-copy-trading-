@@ -19,8 +19,10 @@ This policy never opens a role gate or a pair gate and never decides Live Tradin
 """
 import logging
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Callable, Dict, Optional
 
+from app.services.brokers.fno_capabilities import child_gate_open
 from app.services.brokers.registry import listed_fno_pairs, normalize_broker_id
 from app.services.instruments.contracts import (
     CanonicalContract, ContractResolution, ResolutionVerdict, contract_from_key, make_contract, resolve_for_broker,
@@ -42,41 +44,69 @@ def _resolve_zerodha(contract: CanonicalContract) -> ContractResolution:
     return resolve_for_broker("zerodha", contract)
 
 
+def _resolve_groww(contract: CanonicalContract) -> ContractResolution:
+    return resolve_for_broker("groww", contract)
+
+
 # Child broker -> how a canonical contract is resolved in that broker's own catalog. One entry = one more routable Child.
-CHILD_RESOLVERS: Dict[str, Resolver] = {ALICE_ID: _resolve_alice, "zerodha": _resolve_zerodha}
+CHILD_RESOLVERS: Dict[str, Resolver] = {ALICE_ID: _resolve_alice, "zerodha": _resolve_zerodha, "groww": _resolve_groww}
 
 # Child brokers that identify an instrument by its TRADING SYMBOL, not by a numeric token (Zerodha: the exact tradingsymbol). For them a
 # routed order carries the resolved symbol of the Child's own catalog and no token; every other Child (Alice Blue) is sent its own token.
-SYMBOL_IDENTITY_CHILDREN = frozenset({"zerodha"})
+SYMBOL_IDENTITY_CHILDREN = frozenset({"zerodha", "groww"})
 
 
-def _alice_lot(exchange: Any, symbol: Any, token: Any) -> Optional[int]:
-    from app.services.instruments.terms import known_lot_size
-    return known_lot_size(ALICE_ID, exchange, token)
+@dataclass(frozen=True)
+class ChildTerms:
+    """What the Child broker's OWN catalog states about one derivative. Every field is None when the catalog does not state it, and a
+    validation step that needs an unstated field says so instead of assuming (see copy_engine/fno_validation.py)."""
+    lot_size: Optional[int] = None
+    freeze_quantity: Optional[int] = None
+    tick_size: Optional[Decimal] = None
 
 
-def _zerodha_lot(exchange: Any, symbol: Any, token: Any) -> Optional[int]:
+def _alice_terms(exchange: Any, symbol: Any, token: Any) -> Optional[ChildTerms]:
+    from app.services.instruments import terms
+    lot = terms.known_lot_size(ALICE_ID, exchange, token)
+    row = terms.store.get(ALICE_ID, str(exchange), str(token or "").strip()) if token else None
+    freeze = int(row.freeze_quantity) if row is not None and row.freeze_state is terms.Knowledge.KNOWN and row.freeze_quantity else None
+    return ChildTerms(lot, freeze, None) if (lot or freeze) else None
+
+
+def _zerodha_terms(exchange: Any, symbol: Any, token: Any) -> Optional[ChildTerms]:
     from app.services.zerodha import instruments as zi
-    try:
-        inst = zi.store.resolve(str(exchange), str(symbol))
-    except Exception:
+    inst = zi.store.resolve(str(exchange), str(symbol))
+    lot = int(inst.lot_size) if inst.lot_size_stated and inst.lot_size > 1 else None
+    return ChildTerms(lot, None, inst.tick_size)            # the dump carries no freeze quantity: unknown, never zero
+
+
+def _groww_terms(exchange: Any, symbol: Any, token: Any) -> Optional[ChildTerms]:
+    from app.services.groww import instruments as gi
+    inst = gi.store.derivative("NSE", str(symbol))
+    return ChildTerms(inst.lot_size if inst.lot_size > 1 else None, inst.freeze_quantity or None, inst.tick_size)
+
+
+# Child broker -> what ITS OWN catalog states about a derivative. One entry = one more Child that can be sized and validated.
+CHILD_TERMS_PROVIDERS: Dict[str, Callable[[Any, Any, Any], Optional[ChildTerms]]] = {
+    ALICE_ID: _alice_terms, "zerodha": _zerodha_terms, "groww": _groww_terms,
+}
+
+
+def child_terms(child_broker: Optional[str], exchange: Any, symbol: Any, token: Any) -> Optional[ChildTerms]:
+    """The Child's catalog terms for a derivative, or None (cash equity, no provider, an unknown instrument, or an error)."""
+    if is_cash(exchange):
         return None
-    return int(inst.lot_size) if inst.lot_size_stated and inst.lot_size > 1 else None
-
-
-# Child broker -> its own lot size for a derivative, read from ITS OWN catalog (None when unknown: then sizing is exactly what it was).
-CHILD_LOT_PROVIDERS: Dict[str, Callable[[Any, Any, Any], Optional[int]]] = {ALICE_ID: _alice_lot, "zerodha": _zerodha_lot}
+    provider = CHILD_TERMS_PROVIDERS.get(normalize_broker_id(child_broker) or "")
+    try:
+        return provider(exchange, symbol, token) if provider else None
+    except Exception:                                                                    # an error is never a catalog fact
+        return None
 
 
 def child_lot(child_broker: Optional[str], exchange: Any, symbol: Any, token: Any) -> Optional[int]:
     """The Child's own lot size for a derivative order, or None (cash equity, no provider for that broker, or the catalog does not state it)."""
-    if is_cash(exchange):
-        return None
-    provider = CHILD_LOT_PROVIDERS.get(normalize_broker_id(child_broker) or "")
-    try:
-        return provider(exchange, symbol, token) if provider else None
-    except Exception:                                                                    # an error is never a lot size
-        return None
+    terms = child_terms(child_broker, exchange, symbol, token)
+    return terms.lot_size if terms is not None else None
 
 
 def master_contract_key(master_broker: Optional[str], exchange: Any, token: Any) -> Optional[str]:
@@ -125,6 +155,8 @@ def route(master_broker: Optional[str], child_broker: Optional[str], exchange: A
         if master is None or child is None or (master, child) not in listed_fno_pairs():
             original = cross_broker_derivative_skip(master_broker=master, child_broker=child, exchange=exchange)
             return RouteDecision(original is None, original)                            # the original answer, byte for byte
+        if not child_gate_open(child):
+            return _refuse(f"CROSS_BROKER_FNO_CHILD_GATE_CLOSED:{child}")                   # the Child broker's own F&O gate is off
         contract = contract_from_key(contract_key)
         if contract is None:
             return _refuse(f"CROSS_BROKER_FNO_CONTRACT_UNAVAILABLE:{master}->{child}")
@@ -133,7 +165,9 @@ def route(master_broker: Optional[str], child_broker: Optional[str], exchange: A
             return _refuse(f"CROSS_BROKER_FNO_CHILD_NOT_SUPPORTED:{child}")
         resolution = resolver(contract)
         token = str(resolution.broker_token or "")
-        if resolution.verdict is not ResolutionVerdict.RESOLVED_UNVERIFIED or not token.isdigit():
+        # A token-identified Child (Alice Blue) needs a numeric token; a symbol-identified Child (Zerodha, Groww) needs the resolved trading symbol.
+        identity_ok = bool(str(resolution.broker_symbol or "").strip()) if child in SYMBOL_IDENTITY_CHILDREN else token.isdigit()
+        if resolution.verdict is not ResolutionVerdict.RESOLVED_UNVERIFIED or not identity_ok:
             return _refuse(f"CROSS_BROKER_FNO_{resolution.verdict.value}:{resolution.reason}")
         logger.info(f"[F&O route] {master}->{child}: {contract.key} resolved to the Child's own {resolution.broker_symbol} (token {token}, lot "
                     f"{resolution.lot_size}); the mapping is not evidenced against a real account.")

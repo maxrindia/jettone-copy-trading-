@@ -286,7 +286,7 @@ def test_body_fields_match_the_documentation_and_never_carry_a_foreign_token(moc
 
 @pytest.mark.parametrize("over,needle", [
     ({"product_type": ProductType.NRML}, "not supported for Groww equity"),
-    ({"exchange": "NFO", "symbol": "NIFTY26OCT23500CE"}, "equity only"),
+    ({"exchange": "NFO", "symbol": "NIFTY26OCT23500CE"}, "F&O orders are not enabled"),     # F&O has its own gate, closed by default
     ({"symbol": "NOSUCH"}, "not found"),
     ({"symbol": "NIFTY26OCT23500CE"}, "not found"),
     ({"symbol": "NOSELL", "side": OrderSide.SELL}, "does not allow SELL"),

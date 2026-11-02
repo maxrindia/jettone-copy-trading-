@@ -140,6 +140,15 @@ class Settings(BaseSettings):
     # conversion touches the order book the Child fill sync also reads). Anything else (the default) attaches no contract to a Zerodha F&O
     # order, so it cannot be routed to another broker's Child. Zerodha Master itself stays behind ZERODHA_MASTER_ENABLED and master_verified.
     ZERODHA_FNO_QUANTITY_UNIT: str = ""
+    # F&O as a CHILD segment of another broker's Master. Each broker has its OWN gate; enabling one never enables another. A Child that
+    # is not listed here receives no cross-broker derivative order even when the pair is in CROSS_BROKER_FNO_PAIRS. Alice Blue has no gate
+    # of this kind: it is the production-proven F&O Child. Both default off; nothing about F&O order placement at Groww or Zerodha has
+    # been observed live.
+    GROWW_FNO_CHILD_ENABLED: bool = False
+    ZERODHA_FNO_CHILD_ENABLED: bool = False
+    # The most LOTS any one cross-broker F&O Child order may carry (an independent risk control, checked in the validation chain AND
+    # again inside each Child adapter). Raised only by editing this setting; nothing raises it silently. Alice Blue -> Alice Blue is unaffected.
+    FNO_CHILD_MAX_LOTS: int = 1
     # Cross-broker derivative routing allowlist: comma-separated "master>child" pairs (for example "groww>alicebluenew") for which an F&O
     # order whose contract resolves EXACTLY in the Child's own catalog is copied. Anything not listed keeps the existing refusal
     # (CROSS_BROKER_DERIVATIVE_UNMAPPED). Default empty (off). It never opens a role or pair gate; both still apply.

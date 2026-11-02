@@ -43,6 +43,8 @@ def fno_open(zerodha_enabled, monkeypatch):
     store = make_store()
     monkeypatch.setattr(zi, "store", store)
     monkeypatch.setattr(settings, "CROSS_BROKER_FNO_PAIRS", "alicebluenew>zerodha")
+    monkeypatch.setattr(settings, "ZERODHA_FNO_CHILD_ENABLED", True)              # Zerodha's own F&O Child gate
+    monkeypatch.setattr(settings, "FNO_CHILD_MAX_LOTS", 5)                        # the 1-lot default is exercised in tests/test_fno_child_validation.py
     return store
 
 

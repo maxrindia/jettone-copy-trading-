@@ -76,7 +76,8 @@ class DerivativesSegment:
         self._reported: Set[Tuple[str, str]] = set()
 
     def enabled(self) -> bool:
-        return bool(settings.GROWW_FNO_MASTER_ENABLED)
+        # The F&O list is read for a Master's orders AND for a Child's own F&O orders (their fill sync), so either flag opens it.
+        return bool(settings.GROWW_FNO_MASTER_ENABLED or settings.GROWW_FNO_CHILD_ENABLED)
 
     def describe_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
         keys = ("segment", "exchange", "product", "order_type", "order_status", "transaction_type", "quantity", "filled_quantity", "trading_symbol")

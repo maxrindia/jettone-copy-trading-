@@ -81,6 +81,15 @@ class GrowwDerivative:
     freeze_quantity: int          # 0 = not provided
     buy_allowed: Optional[bool]
     sell_allowed: Optional[bool]
+    tick_size: Optional[Decimal] = None
+
+
+def _tick(value: object) -> Optional[Decimal]:
+    try:
+        tick = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        return None
+    return tick if tick.is_finite() and tick > 0 else None
 
 
 def _derivative_kind(instrument_type: str) -> Optional[str]:
@@ -250,11 +259,23 @@ class GrowwInstrumentStore:
         self._derivs.setdefault((exch, sym), []).append(GrowwDerivative(
             exchange=exch, trading_symbol=sym, kind=kind, underlying=underlying, expiry=expiry, strike=strike, lot_size=lot,
             freeze_quantity=max(0, _int(r.get("freeze_quantity"))), buy_allowed=_flag(r.get("buy_allowed")), sell_allowed=_flag(r.get("sell_allowed")),
+            tick_size=_tick(r.get("tick_size")),
         ))
 
     @property
     def derivative_count(self) -> int:
         return sum(len(v) for v in self._derivs.values())
+
+    def find_derivative(self, kind: str, underlying: str, expiry: date, strike: Optional[Decimal]) -> GrowwDerivative:
+        """The ONE F&O row with this canonical identity (kind, underlying, expiry and, for an option, strike), or InstrumentResolutionError
+        (none, several, or not loaded). Nothing is matched by symbol text: the identity is the contract's own terms."""
+        if not self._derivs:
+            raise InstrumentResolutionError("Groww F&O instruments are not loaded.")
+        found = [d for rows in self._derivs.values() for d in rows
+                 if d.kind == kind and d.underlying == underlying and d.expiry == expiry and (kind == "FUT" or d.strike == strike)]
+        if len(found) != 1:
+            raise InstrumentResolutionError("Groww F&O contract is " + ("not found." if not found else f"ambiguous ({len(found)} matches)."))
+        return found[0]
 
     def derivative(self, exchange: str, trading_symbol: str) -> GrowwDerivative:
         """The ONE F&O row for (exchange, trading_symbol), or InstrumentResolutionError (none, several, or not loaded)."""

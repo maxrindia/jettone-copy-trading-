@@ -152,7 +152,7 @@ def _fresh(loaded_at: Optional[datetime], now: datetime, max_age: timedelta) -> 
 
 def resolve_for_broker(broker_id: str, contract: CanonicalContract, *, now: Optional[datetime] = None,
                        max_age: timedelta = MAX_CATALOG_AGE, zerodha_store: Optional[Any] = None,
-                       alice_store: Optional[Any] = None) -> ContractResolution:
+                       alice_store: Optional[Any] = None, groww_store: Optional[Any] = None) -> ContractResolution:
     """Resolve a canonical contract in one broker's own catalog. Pure apart from reading that in-memory catalog. Never raises."""
     now = now or datetime.now(timezone.utc)
     broker = str(broker_id or "").strip().lower()
@@ -162,6 +162,8 @@ def resolve_for_broker(broker_id: str, contract: CanonicalContract, *, now: Opti
             return _no(broker, ResolutionVerdict.INVALID_INPUT, problem)
         if broker == "zerodha":
             return _resolve_zerodha(contract, now, max_age, zerodha_store)
+        if broker == "groww" and contract.kind != "EQ":
+            return _resolve_groww(contract, now, max_age, groww_store)
         if broker in ("groww", "angelone"):
             if contract.kind != "EQ":
                 return _no(broker, ResolutionVerdict.NOT_SUPPORTED, "this adapter trades equity cash only", contract)
@@ -214,6 +216,30 @@ def _resolve_alice(contract: CanonicalContract, now: datetime, max_age: timedelt
         ALICE, ResolutionVerdict.RESOLVED_UNVERIFIED,
         "single exact row in Alice Blue's own contract master; mapping not evidenced against a real account",
         contract.key, row.trading_symbol, row.token, False, row.lot_size if row.lot_state is Knowledge.KNOWN else None,
+    )
+
+
+def _resolve_groww(contract: CanonicalContract, now: datetime, max_age: timedelta, store: Optional[Any]) -> ContractResolution:
+    """A derivative in Groww's OWN instrument master, by the contract's terms (underlying, expiry, strike, CE/PE/FUT). Exactly one row or a
+    refusal; the Master broker's symbol or token is never consulted. Groww's `underlying_symbol` is documented for derivatives; a future's
+    instrument_type is not, so only rows the loader could classify exist to be matched."""
+    if store is None:
+        from app.services.groww import instruments as gi
+        store = gi.store
+    if not getattr(store, "derivative_count", 0):
+        return _no("groww", ResolutionVerdict.CATALOG_NOT_LOADED, "Groww F&O instruments are not loaded", contract)
+    stale = _fresh(store.snapshot_loaded_at, now, max_age)
+    if stale:
+        return _no("groww", ResolutionVerdict.STALE, stale, contract)
+    try:
+        inst = store.find_derivative(contract.kind, contract.underlying, contract.expiry, contract.strike)
+    except InstrumentResolutionError as exc:
+        text = str(exc)
+        return _no("groww", ResolutionVerdict.AMBIGUOUS if "ambiguous" in text else ResolutionVerdict.UNMAPPED, text[:200], contract)
+    return ContractResolution(
+        "groww", ResolutionVerdict.RESOLVED_UNVERIFIED,
+        "single exact row in Groww's own instrument master; mapping not evidenced against a real account",
+        contract.key, inst.trading_symbol, None, False, inst.lot_size,
     )
 
 

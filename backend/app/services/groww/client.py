@@ -31,6 +31,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
+from app.core.config import settings
 from app.core.crypto import EncryptionKeyError, decrypt_secret, encrypt_secret, validate_encryption_key
 from app.services.alice_blue.instruments import InstrumentResolutionError
 from app.services.alice_blue.types import (
@@ -76,6 +77,8 @@ ORDER_TYPE_MAP = {
 }
 # Jettone product -> Groww product. NRML is refused for equity (CASH) orders.
 PRODUCT_MAP = {ProductType.CNC: "CNC", ProductType.MIS: "MIS"}
+# F&O: NRML is the carry product; CNC on a derivative is another broker's name for carry (Alice Blue's LONGTERM) and maps to NRML.
+FNO_PRODUCT_MAP = {ProductType.NRML: "NRML", ProductType.MIS: "MIS", ProductType.CNC: "NRML"}
 
 _OPEN_STATES = frozenset({"NEW", "ACKED", "APPROVED", "OPEN", "MODIFICATION_REQUESTED", "CANCELLATION_REQUESTED"})
 _MODIFIABLE_STATES = frozenset({"NEW", "ACKED", "APPROVED", "OPEN", "TRIGGER_PENDING"})
@@ -575,6 +578,9 @@ class GrowwClient:
         price: Decimal, trigger_price: Decimal = Decimal("0"), reference: str,
     ) -> Dict[str, Any]:
         """Validates and maps an order. Raises (nothing sent) on any problem."""
+        if str(exchange or "").strip().upper() == "NFO":
+            return self._build_fno_body(symbol=symbol, side=side, quantity=quantity, product_type=product_type, order_type=order_type,
+                                        price=price, trigger_price=trigger_price, reference=reference)
         inst = self._instruments.resolve(exchange, symbol)    # NSE/BSE equity only
         side_v = OrderSide(side).value
         allowed = inst.buy_allowed if side_v == "BUY" else inst.sell_allowed
@@ -607,12 +613,57 @@ class GrowwClient:
             body["trigger_price"] = float(trigger_price)
         return body
 
-    async def _lookup_by_reference(self, reference: str) -> Optional[str]:
+    def _build_fno_body(
+        self, *, symbol: str, side: Any, quantity: int, product_type: Any, order_type: Any, price: Decimal, trigger_price: Decimal, reference: str,
+    ) -> Dict[str, Any]:
+        """An F&O order for the Groww Child (CODE_ONLY: never observed live, so it is behind its own gate and an independent lot cap).
+        `symbol` is the Groww trading_symbol the route policy resolved from the canonical contract - never another broker's symbol. The
+        quantity arrives in UNITS; the create-order unit is not documented for FNO (the order LIST shows units), so UNITS and AUTO send units
+        and only an explicit LOTS setting sends a lot count. Raises (nothing sent) on any problem."""
+        if not settings.GROWW_FNO_CHILD_ENABLED:
+            raise GrowwError("Groww F&O orders are not enabled for this Child (GROWW_FNO_CHILD_ENABLED)")
+        unit = str(settings.GROWW_FNO_QUANTITY_UNIT or "").strip().upper()
+        if unit not in ("UNITS", "LOTS", "AUTO"):
+            raise GrowwError("the Groww F&O quantity unit is not configured (GROWW_FNO_QUANTITY_UNIT)")
+        inst = self._instruments.derivative("NSE", symbol)       # exactly one F&O row for the exact trading symbol, or it raises
+        side_v = OrderSide(side).value
+        allowed = inst.buy_allowed if side_v == "BUY" else inst.sell_allowed
+        if allowed is not True:
+            raise GrowwError(f"Groww does not allow {side_v} for {inst.trading_symbol}")
+        if quantity <= 0 or quantity % inst.lot_size:
+            raise GrowwError(f"quantity {quantity} is not a whole number of lots ({inst.lot_size}); not rounded")
+        cap = int(settings.FNO_CHILD_MAX_LOTS or 0)
+        if cap <= 0 or quantity // inst.lot_size > cap:
+            raise GrowwError(f"quantity is above the {cap}-lot cap for cross-broker F&O orders (FNO_CHILD_MAX_LOTS)")
+        if inst.freeze_quantity and quantity > inst.freeze_quantity:
+            raise GrowwError(f"quantity exceeds the exchange freeze quantity ({inst.freeze_quantity}); not split")
+        product = FNO_PRODUCT_MAP.get(ProductType(product_type))
+        if product is None:
+            raise GrowwError(f"product {product_type} is not supported for Groww F&O orders")
+        otype = ORDER_TYPE_MAP.get(OrderType(order_type))
+        if otype is None:
+            raise GrowwError(f"unmapped order type {order_type}")
+        if otype in ("LIMIT", "SL") and price <= 0:
+            raise GrowwError(f"{otype} requires a positive price")
+        if otype in ("SL", "SL_M") and trigger_price <= 0:
+            raise GrowwError(f"{otype} requires a positive trigger price")
+        body: Dict[str, Any] = {
+            "trading_symbol": inst.trading_symbol, "quantity": int(quantity // inst.lot_size if unit == "LOTS" else quantity),
+            "validity": C.VALIDITY_DAY, "exchange": inst.exchange, "segment": C.FNO_SEGMENT, "product": product, "order_type": otype,
+            "transaction_type": side_v, "order_reference_id": reference,
+        }
+        if otype in ("LIMIT", "SL"):
+            body["price"] = float(price)
+        if otype in ("SL", "SL_M"):
+            body["trigger_price"] = float(trigger_price)
+        return body
+
+    async def _lookup_by_reference(self, reference: str, segment: str = C.SUPPORTED_SEGMENT) -> Optional[str]:
         """After an ambiguous create: the groww_order_id if Groww has the order."""
         try:
             status, data = await self._call(
                 "read", "GET", C.ROUTES["order_status_ref"].format(order_reference_id=reference),
-                params={"segment": C.SUPPORTED_SEGMENT},
+                params={"segment": segment},
             )
             payload = self._payload(status, data)
         except Exception:
@@ -709,7 +760,7 @@ class GrowwClient:
 
     async def _resolve_ambiguous(self, req: OrderRequest, reference: str, why: str) -> OrderResult:
         """One read-only lookup by our reference: found -> SUCCESS; otherwise TIMEOUT. Never a resend."""
-        oid = await self._lookup_by_reference(reference)
+        oid = await self._lookup_by_reference(reference, C.segment_for_exchange(req.exchange))
         if oid:
             return self._result(OrderResultCategory.SUCCESS, req.client_order_id, oid,
                                 "SUCCESS (confirmed by reference lookup)", {"order_reference_id": reference})
@@ -720,7 +771,7 @@ class GrowwClient:
             self._require_static_ip()
             status, data = await self._call(
                 "order", "POST", C.ROUTES["order_cancel"],
-                body={"segment": C.SUPPORTED_SEGMENT, "groww_order_id": broker_order_id},
+                body={"segment": C.segment_for_exchange(exchange), "groww_order_id": broker_order_id},
             )
         except (GrowwError, httpx.RequestError) as exc:
             return self._result(OrderResultCategory.REJECTED, None, broker_order_id, str(exc) or type(exc).__name__, {})
@@ -738,6 +789,9 @@ class GrowwClient:
         order is refused rather than risk a wrong size."""
         try:
             self._require_static_ip()
+            segment = C.segment_for_exchange(exchange)
+            if segment == C.FNO_SEGMENT and not settings.GROWW_FNO_CHILD_ENABLED:
+                raise GrowwError("Groww F&O orders are not enabled for this Child (GROWW_FNO_CHILD_ENABLED)")
             if quantity <= 0:
                 raise GrowwError("quantity must be positive")
             otype = ORDER_TYPE_MAP.get(OrderType(order_type))
@@ -749,7 +803,7 @@ class GrowwClient:
                 raise GrowwError(f"{otype} requires a positive trigger price")
             status, data = await self._call(
                 "read", "GET", C.ROUTES["order_detail"].format(groww_order_id=broker_order_id),
-                params={"segment": C.SUPPORTED_SEGMENT},
+                params={"segment": segment},
             )
             detail = self._payload(status, data)
             state = str(detail.get("order_status") or "").upper()
@@ -757,8 +811,16 @@ class GrowwClient:
                 raise GrowwError(f"order is {state or 'in an unknown state'}; not modifiable")
             if _int(detail, "filled_quantity", minimum=0) != 0:
                 raise GrowwError("order is part-filled; modify quantity semantics are not documented")
+            send_quantity = int(quantity)
+            if segment == C.FNO_SEGMENT:
+                inst = self._instruments.derivative("NSE", str(detail.get("trading_symbol") or ""))
+                cap = int(settings.FNO_CHILD_MAX_LOTS or 0)
+                if quantity % inst.lot_size or cap <= 0 or quantity // inst.lot_size > cap:
+                    raise GrowwError("the modified F&O quantity is not a whole number of lots within the lot cap")
+                if str(settings.GROWW_FNO_QUANTITY_UNIT or "").strip().upper() == "LOTS":
+                    send_quantity = quantity // inst.lot_size
             body: Dict[str, Any] = {
-                "quantity": int(quantity), "order_type": otype, "segment": C.SUPPORTED_SEGMENT,
+                "quantity": send_quantity, "order_type": otype, "segment": segment,
                 "groww_order_id": broker_order_id,
             }
             if otype in ("LIMIT", "SL"):
@@ -908,12 +970,17 @@ class GrowwClient:
         oid = str(broker_order_id or "").strip()
         if not oid:
             raise GrowwError("an order id is required")
-        status, data = await self._call(
-            "read", "GET", C.ROUTES["order_detail"].format(groww_order_id=oid), params={"segment": C.SUPPORTED_SEGMENT},
-        )
-        if status == 404:
+        record = None
+        for policy in segments.enabled_policies():                 # CASH first; FNO only when an F&O gate is open
+            status, data = await self._call(
+                "read", "GET", C.ROUTES["order_detail"].format(groww_order_id=oid), params={"segment": policy.name},
+            )
+            if status == 404:
+                continue
+            record = policy.to_record(self, self._payload(status, data))
+            break
+        if record is None:
             return None
-        record = self.parse_order_row(self._payload(status, data))
         if record.broker_order_id != oid:
             raise GrowwCapabilityUnavailable("order detail describes a different order")
         await self._restore_client_order_ids([record])
@@ -926,15 +993,16 @@ class GrowwClient:
         ref = str(reference or "").strip()
         if not ref:
             raise GrowwError("a reference is required")
-        status, data = await self._call(
-            "read", "GET", C.ROUTES["order_status_ref"].format(order_reference_id=ref), params={"segment": C.SUPPORTED_SEGMENT},
-        )
-        if status == 404:
-            return None
-        oid = self._payload(status, data).get("groww_order_id")
-        if not oid:
-            return None
-        return await self.get_order(str(oid))
+        for policy in segments.enabled_policies():
+            status, data = await self._call(
+                "read", "GET", C.ROUTES["order_status_ref"].format(order_reference_id=ref), params={"segment": policy.name},
+            )
+            if status == 404:
+                continue
+            oid = self._payload(status, data).get("groww_order_id")
+            if oid:
+                return await self.get_order(str(oid))
+        return None
 
     async def _restore_client_order_ids(self, records: List[OrderRecord]) -> None:
         """Replace Groww's order_reference_id with the Jettone client_order_id it was derived from

@@ -79,7 +79,13 @@ PRODUCTS: FrozenSet[str] = frozenset({"CNC", "MIS", "NRML"})
 ORDER_TYPES: FrozenSet[str] = frozenset({"LIMIT", "MARKET", "SL", "SL_M"})
 TRANSACTION_TYPES: FrozenSet[str] = frozenset({"BUY", "SELL"})
 VALIDITY_DAY = "DAY"
-SUPPORTED_SEGMENT = "CASH"          # equity only; F&O needs lot-size validation that is not built
+SUPPORTED_SEGMENT = "CASH"          # equity cash: the default segment of every call
+FNO_SEGMENT = "FNO"                 # F&O, reached only through the F&O gates (GROWW_FNO_CHILD_ENABLED / GROWW_FNO_MASTER_ENABLED)
+
+
+def segment_for_exchange(exchange: object) -> str:
+    """The Groww segment an order on `exchange` belongs to. NFO (Jettone's canonical exchange for NSE F&O) is FNO; everything else is CASH."""
+    return FNO_SEGMENT if str(exchange or "").strip().upper() == "NFO" else SUPPORTED_SEGMENT
 
 # Documented rate limits (requests, window seconds).
 LIMIT_ORDERS = ((10, 1), (250, 60))

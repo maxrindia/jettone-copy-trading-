@@ -88,6 +88,7 @@ def fno_gates(groww_roles_open, canary, monkeypatch):
     monkeypatch.setattr(settings, "GROWW_FNO_MASTER_ENABLED", True)
     monkeypatch.setattr(settings, "GROWW_FNO_QUANTITY_UNIT", "UNITS")
     monkeypatch.setattr(settings, "CROSS_BROKER_FNO_PAIRS", "groww>alicebluenew")
+    monkeypatch.setattr(settings, "FNO_CHILD_MAX_LOTS", 5)                       # the 1-lot default is exercised in tests/test_fno_child_validation.py
 
 
 async def fno_chain(db_session, redis):
@@ -315,9 +316,9 @@ def test_a_listed_pair_needs_a_readable_contract_and_a_child_with_a_resolver(mon
     for key in (None, "", "garbage", "CE|NFO|NIFTY|2026-11-26", "EQ|NSE|SYM|SBIN"):
         d = derivative_routing.route("groww", "alicebluenew", "NFO", key)
         assert d.allowed is False and "CROSS_BROKER_FNO_CONTRACT_UNAVAILABLE" in d.skip.detail
-    for child in ("angelone", "groww"):                                   # listed, but no resolver is registered for the Child
+    for child in ("angelone", "groww"):                                   # listed, but angelone has no F&O capability entry (gate) and no resolver
         d = derivative_routing.route("groww", child, "NFO", KEY)
-        assert d.allowed is (child == "groww") and (child == "groww" or "CHILD_NOT_SUPPORTED" in d.skip.detail)
+        assert d.allowed is (child == "groww") and (child == "groww" or "CHILD_GATE_CLOSED" in d.skip.detail)
 
 
 def test_a_resolver_error_or_a_non_numeric_token_is_never_a_route(monkeypatch):
@@ -341,8 +342,13 @@ def test_a_new_child_broker_is_routable_by_registering_one_resolver(monkeypatch)
     """Open/closed: the planner, the pipeline and the preview are not edited to add a Child broker; one resolver is registered."""
     from app.services.instruments.contracts import ContractResolution, ResolutionVerdict
 
+    from app.services.brokers import fno_capabilities
+
     monkeypatch.setattr(settings, "CROSS_BROKER_FNO_PAIRS", "groww>angelone")
     assert derivative_routing.route("groww", "angelone", "NFO", KEY).allowed is False
+    monkeypatch.setitem(fno_capabilities.FNO_CHILD_CAPABILITIES, "angelone",
+                        fno_capabilities.FnoChildCapability("angelone", "CODE_ONLY", "CODE_ONLY", "CODE_ONLY", "CODE_ONLY", frozenset(), frozenset(),
+                                                            gate=lambda: True))
     monkeypatch.setitem(derivative_routing.CHILD_RESOLVERS, "angelone",
                         lambda c: ContractResolution("angelone", ResolutionVerdict.RESOLVED_UNVERIFIED, "x", c.key, "NIFTY26NOV23500CE", "12345"))
     d = derivative_routing.route("groww", "angelone", "NFO", KEY)
