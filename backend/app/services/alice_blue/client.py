@@ -34,6 +34,9 @@ from app.services.alice_blue.order_book import order_book_row_id, parse_order_bo
 
 logger = logging.getLogger("alice_blue_client")
 
+# Exchanges whose instruments are derivatives (no cash-only products such as MTF).
+DERIVATIVE_EXCHANGES = frozenset({"NFO", "BFO", "MCX", "CDS", "BCD"})
+
 
 class AliceBlueClient:
     """
@@ -635,6 +638,13 @@ class AliceBlueClient:
                 "NRML": "MTF",
                 "MTF": "MTF",
             }.get(p_val, "INTRADAY")
+
+        # Alice Blue's "MTF" is margin trade funding: it exists for cash equity only. On a derivative exchange the carry-forward (NRML) product
+        # is Alice's "LONGTERM" - the very product its own Master orders report there and the one an Alice -> Alice copy has always sent.
+        # Another broker's NRML order copied to Alice (a Groww F&O order) used to go out as "MTF" and was rejected by Alice with "Product
+        # MTF not enabled on exchange NFO" (2 Nov 2026). Cash equity is unchanged.
+        if product_str == "MTF" and str(getattr(order.exchange, "value", order.exchange)).upper() in DERIVATIVE_EXCHANGES:
+            product_str = "LONGTERM"
 
         trans_type_full = "BUY" if order.side in (OrderSide.BUY, "BUY") else "SELL"
         trans_type_short = "B" if order.side in (OrderSide.BUY, "BUY") else "S"

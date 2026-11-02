@@ -186,3 +186,23 @@ async def test_a_converted_market_fill_is_unbuffered_at_the_shipped_default(
     event = _market_event(quantity=3, price=Decimal("125.83"), side="BUY", master_order_id="ORD_PIN_DEFAULT")
     sent = await replicate(db_session, mock_redis, sample_accounts, event)
     assert sent.order_type == OrderType.LIMIT and sent.price == Decimal("125.83") and sent.quantity == 3
+
+
+# ── D. NRML on a DERIVATIVE exchange is Alice's LONGTERM, never the cash-only MTF ───────────────────────────────────────────────
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exchange", ["NFO", "BFO", "MCX", "CDS", "BCD"])
+async def test_nrml_on_a_derivative_exchange_is_sent_as_longterm_not_mtf(mock_redis, exchange):
+    """A Groww F&O order (product NRML) copied to an Alice Child went out as MTF and Alice rejected it: 'Product MTF not enabled on exchange NFO'."""
+    row = await sent_payload(mock_redis, symbol="NIFTY26N0323750CE", exchange=exchange, product_type=ProductType.NRML, order_type=OrderType.LIMIT,
+                             price=Decimal("2.35"), quantity=65, instrument_token="50001")
+    assert row["product"] == "LONGTERM"
+
+
+@pytest.mark.asyncio
+async def test_nrml_on_cash_equity_is_still_mtf_and_other_products_are_unchanged_on_derivatives(mock_redis):
+    assert (await sent_payload(mock_redis, product_type=ProductType.NRML, order_type=OrderType.LIMIT, price=Decimal("100")))["product"] == "MTF"
+    for product, expected in ((ProductType.MIS, "INTRADAY"), (ProductType.CNC, "LONGTERM")):
+        row = await sent_payload(mock_redis, symbol="NIFTY26N0323750CE", exchange="NFO", product_type=product, order_type=OrderType.LIMIT,
+                                 price=Decimal("2.35"), quantity=65, instrument_token="50001")
+        assert row["product"] == expected
