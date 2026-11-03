@@ -44,7 +44,6 @@ def fno_open(zerodha_enabled, monkeypatch):
     monkeypatch.setattr(zi, "store", store)
     monkeypatch.setattr(settings, "CROSS_BROKER_FNO_PAIRS", "alicebluenew>zerodha")
     monkeypatch.setattr(settings, "ZERODHA_FNO_CHILD_ENABLED", True)              # Zerodha's own F&O Child gate
-    monkeypatch.setattr(settings, "FNO_CHILD_MAX_LOTS", 5)                        # the 1-lot default is exercised in tests/test_fno_child_validation.py
     return store
 
 
@@ -97,10 +96,10 @@ async def test_the_carry_and_intraday_products_map_to_zerodhas_derivative_produc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode,fixed,master_qty,expected", [
-    (QuantityMode.FIXED, 1, 75, "75"), (QuantityMode.FIXED, 2, 75, "150"), (QuantityMode.FIXED, 1, 750, "75"),
+    (QuantityMode.FIXED, 75, 75, "75"), (QuantityMode.FIXED, 150, 75, "150"), (QuantityMode.FIXED, 75, 750, "75"),
     (QuantityMode.MULTIPLIER, 1, 150, "150"),
 ])
-async def test_the_zerodha_child_is_sized_in_whole_lots(db_session, mock_redis, fno_open, mode, fixed, master_qty, expected):
+async def test_the_zerodha_child_is_sized_in_units_exactly_as_for_cash(db_session, mock_redis, fno_open, mode, fixed, master_qty, expected):
     fake, _, out = await send(db_session, mock_redis, fno_open, mode=mode, fixed=fixed, event_kwargs={"qty": master_qty})
     assert out["status"] == "SUCCESS" and fake.forms("POST")[0]["quantity"] == expected
 

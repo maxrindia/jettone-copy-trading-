@@ -171,14 +171,13 @@ class QuantityCalculator:
         derivative_lot: Optional[int] = None,
     ) -> int:
         """`derivative_lot` is the Child's lot size for a DERIVATIVE order whose lot is known (None for cash equity and whenever it is not
-        known: then nothing here changes). It makes the sizing lot-based, the way an F&O trader thinks of it:
-          FIXED       `fixed_qty` is a number of LOTS (1 = one lot, 2 = two lots), not units; the result is lots x lot size;
-          MULTIPLIER  Master quantity x multiplier, rounded DOWN to whole lots (less than one lot = 0 = ZERO_LOT_RESULT, never rounded up);
-          the other modes use the lot as their rounding unit."""
-        if derivative_lot and derivative_lot > 1:
-            if mode == QuantityMode.FIXED:
-                lots = settings.fixed_qty if settings.fixed_qty is not None else 1
-                return max(0, int(lots)) * derivative_lot
+        known: then nothing here changes). FIXED and MULTIPLIER mean the same thing for F&O as for cash and are NEVER rounded to a lot:
+          FIXED       `fixed_qty` is a quantity in units ("same quantity for every order"), exactly as the UI says;
+          MULTIPLIER  Master quantity x multiplier, exactly as for cash (see `fractional_lot_problem` for the F&O lot check);
+        whether the result is a valid whole number of the Child's lots is VALIDATED (cross-broker: fno_validation.LotMultiple, and
+        `fractional_lot_problem` for a fractional product) and refused with a reason - the quantity is never adjusted. The other modes
+        (not offered in the Copy Quantity UI) keep using the lot as their rounding unit."""
+        if derivative_lot and derivative_lot > 1 and mode not in (QuantityMode.FIXED, QuantityMode.MULTIPLIER):
             lot_size = derivative_lot
         strategy = cls.STRATEGIES.get(mode, FixedQuantityStrategy())
         return strategy.calculate(
@@ -190,3 +189,19 @@ class QuantityCalculator:
             reference_price=reference_price,
             multiplier=multiplier,
         )
+
+    @classmethod
+    def fractional_lot_problem(
+        cls, mode: QuantityMode, master_qty: int, multiplier: Optional[Decimal], derivative_lot: Optional[int],
+    ) -> Optional[str]:
+        """MULTIPLIER only, F&O with a known Child lot: Master quantity x multiplier must be EXACTLY a whole number of the Child's lots
+        (Master 3 lots x 0.5 = 1.5 lots is not). Returns the refusal code, or None. The caller refuses the Child with it; nothing is floored."""
+        if mode != QuantityMode.MULTIPLIER or not derivative_lot or derivative_lot <= 1 or multiplier is None:
+            return None
+        try:
+            exact = Decimal(master_qty) * Decimal(str(multiplier))
+        except (ArithmeticError, ValueError):
+            return None
+        if not exact.is_finite() or exact <= 0:
+            return None                                   # zero / unusable multipliers keep their existing ZERO_LOT_RESULT handling
+        return "FNO_QUANTITY_NOT_LOT_MULTIPLE" if exact % derivative_lot != 0 else None

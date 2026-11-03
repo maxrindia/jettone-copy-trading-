@@ -88,7 +88,6 @@ def fno_gates(groww_roles_open, canary, monkeypatch):
     monkeypatch.setattr(settings, "GROWW_FNO_MASTER_ENABLED", True)
     monkeypatch.setattr(settings, "GROWW_FNO_QUANTITY_UNIT", "UNITS")
     monkeypatch.setattr(settings, "CROSS_BROKER_FNO_PAIRS", "groww>alicebluenew")
-    monkeypatch.setattr(settings, "FNO_CHILD_MAX_LOTS", 5)                       # the 1-lot default is exercised in tests/test_fno_child_validation.py
 
 
 async def fno_chain(db_session, redis):
@@ -431,20 +430,36 @@ def setting(mode, fixed=1):
 
 
 @pytest.mark.parametrize("mode,fixed,master,mult,lot,expected", [
-    (QuantityMode.FIXED, 1, 65, "1", 65, 65),          # one lot, whatever the Master traded
-    (QuantityMode.FIXED, 1, 650, "1", 65, 65),
-    (QuantityMode.FIXED, 2, 65, "1", 65, 130),         # two lots
-    (QuantityMode.FIXED, 0, 65, "1", 65, 0),           # zero lots = skip
-    (QuantityMode.MULTIPLIER, 1, 65, "1", 65, 65),     # the Master's own lots
-    (QuantityMode.MULTIPLIER, 1, 130, "2", 65, 260),   # twice the Master's lots
+    (QuantityMode.FIXED, 65, 65, "1", 65, 65),         # the fixed quantity, whatever the Master traded
+    (QuantityMode.FIXED, 65, 650, "1", 65, 65),
+    (QuantityMode.FIXED, 130, 65, "1", 65, 130),
+    (QuantityMode.FIXED, 1, 65, "1", 65, 1),           # NOT rounded to a lot: it is validated (and refused) later, with its reason
+    (QuantityMode.FIXED, 100, 65, "1", 65, 100),
+    (QuantityMode.MULTIPLIER, 1, 65, "1", 65, 65),     # the Master's own quantity
+    (QuantityMode.MULTIPLIER, 1, 130, "2", 65, 260),   # twice the Master's
     (QuantityMode.MULTIPLIER, 1, 65, "3", 65, 195),
-    (QuantityMode.MULTIPLIER, 1, 65, "0.5", 65, 0),    # less than one lot: never rounded up
+    (QuantityMode.MULTIPLIER, 1, 65, "0.5", 65, 32),   # the plain product, never floored to a lot: see test_fractional_lot_problem...
     (QuantityMode.MULTIPLIER, 1, 130, "1.5", 65, 195),   # exactly 3 lots
 ])
-def test_derivative_sizing_is_in_whole_lots(mode, fixed, master, mult, lot, expected):
+def test_derivative_sizing_is_the_plain_cash_formula_never_rounded_to_a_lot(mode, fixed, master, mult, lot, expected):
     got = QuantityCalculator.calculate_quantity(mode=mode, master_qty=master, master_capital=Decimal("1"), follower_capital=Decimal("1"), lot_size=1,
                                                 settings=setting(mode, fixed), multiplier=Decimal(mult), derivative_lot=lot)
-    assert got == expected and got % lot == 0
+    assert got == expected
+
+
+@pytest.mark.parametrize("master,mult,lot,expected", [
+    (65, "1", 65, None), (130, "1.5", 65, None), (65, "3", 65, None), (260, "0.25", 65, None),
+    (65, "0.5", 65, "FNO_QUANTITY_NOT_LOT_MULTIPLE"), (130, "0.75", 65, "FNO_QUANTITY_NOT_LOT_MULTIPLE"), (65, "1.5", 65, "FNO_QUANTITY_NOT_LOT_MULTIPLE"),
+    (65, "1.01", 65, "FNO_QUANTITY_NOT_LOT_MULTIPLE"), (130, "1.0001", 65, "FNO_QUANTITY_NOT_LOT_MULTIPLE"),
+    (65, "0.5", None, None), (65, "0.5", 1, None),     # no known Child lot (cash, unknown): nothing changes
+])
+def test_a_multiplier_that_gives_a_fractional_lot_is_refused_with_its_reason(master, mult, lot, expected):
+    assert QuantityCalculator.fractional_lot_problem(QuantityMode.MULTIPLIER, master, Decimal(mult), lot) == expected
+
+
+@pytest.mark.parametrize("mode", [QuantityMode.FIXED, QuantityMode.RATIO])
+def test_the_fractional_lot_refusal_belongs_to_multiplier_only(mode):
+    assert QuantityCalculator.fractional_lot_problem(mode, 65, Decimal("0.5"), 65) is None
 
 
 @pytest.mark.parametrize("mode,fixed,master,mult,expected", [
@@ -465,11 +480,11 @@ async def alice_policy(c, mode, fixed=1):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode,fixed,master_units,expected", [
-    (QuantityMode.FIXED, 1, 75, 75),        # "one lot": the Child gets one lot even though FIXED 1 used to mean one UNIT (and was rejected)
-    (QuantityMode.FIXED, 2, 75, 150),
+    (QuantityMode.FIXED, 75, 75, 75),       # FIXED is a quantity in units, as in the UI; 75 is exactly one lot
+    (QuantityMode.FIXED, 150, 75, 150),
     (QuantityMode.MULTIPLIER, 1, 150, 150),
 ])
-async def test_the_alice_child_is_sized_in_lots_for_a_groww_f_and_o_order(db_session, mock_redis, fno_gates, mode, fixed, master_units, expected):
+async def test_the_alice_child_is_sized_in_units_for_a_groww_f_and_o_order(db_session, mock_redis, fno_gates, mode, fixed, master_units, expected):
     c = await fno_chain(db_session, mock_redis)
     await alice_policy(c, mode, fixed)
     c.master_fake.fno_order("F-1", CE, qty=master_units)
@@ -479,7 +494,7 @@ async def test_the_alice_child_is_sized_in_lots_for_a_groww_f_and_o_order(db_ses
 
 
 @pytest.mark.asyncio
-async def test_less_than_one_lot_is_skipped_never_rounded_up_and_cash_is_still_one_unit(db_session, mock_redis, fno_gates):
+async def test_a_fractional_lot_is_refused_never_rounded_and_cash_is_still_one_unit(db_session, mock_redis, fno_gates):
     c = await fno_chain(db_session, mock_redis)
     await alice_policy(c, QuantityMode.FIXED, 1)
     async with TestingSessionLocal() as s:                                   # a fractional multiplier on the strategy member
@@ -490,9 +505,19 @@ async def test_less_than_one_lot_is_skipped_never_rounded_up_and_cash_is_still_o
     await alice_policy(c, QuantityMode.MULTIPLIER)
     c.master_fake.fno_order("F-1", CE, qty=75)
     await c.poll()
-    assert c.placed_on_alice() == []                                         # 0.5 lot is below one lot: ZERO_LOT_RESULT
+    assert c.placed_on_alice() == []                                         # 0.5 lot: FNO_QUANTITY_NOT_LOT_MULTIPLE, never rounded or sent
     await alice_policy(c, QuantityMode.FIXED, 1)
     c.master_fake.app_order("G-1", status="OPEN", price=800)
     await c.poll()
     (req,) = c.placed_on_alice()
     assert req.exchange == "NSE" and req.quantity == 1                       # cash: FIXED 1 is still one share
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fixed", [1, 74])
+async def test_a_fixed_quantity_that_is_not_a_whole_lot_is_refused_for_the_alice_child_of_a_groww_master(db_session, mock_redis, fno_gates, fixed):
+    c = await fno_chain(db_session, mock_redis)
+    await alice_policy(c, QuantityMode.FIXED, fixed)
+    c.master_fake.fno_order("F-1", CE, qty=75)
+    await c.poll()
+    assert c.placed_on_alice() == []                                         # refused with FNO_QUANTITY_NOT_LOT_MULTIPLE, nothing rounded or sent

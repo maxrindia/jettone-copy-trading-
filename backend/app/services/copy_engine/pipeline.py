@@ -252,8 +252,18 @@ class CopyEnginePipeline:
             return None
         return derivative_routing.child_lot(getattr(child, "broker", None), exchange, symbol, child_token)
 
+    @classmethod
+    def _fractional_lot_code(cls, settings_obj: Any, event: MasterTradeEvent, follower: Optional[Account], multiplier: Any) -> Optional[str]:
+        """The refusal code when MULTIPLIER sizing gives a fractional number of the Child's lots (see QuantityCalculator.fractional_lot_problem)."""
+        if settings_obj is None:
+            return None
+        return QuantityCalculator.fractional_lot_problem(
+            settings_obj.quantity_mode, event.quantity, multiplier, cls._child_derivative_lot(event.exchange, follower, event.instrument_id, event.symbol),
+        )
+
     async def _fno_child_check(
         self, event: MasterTradeEvent, follower: Account, quantity: int, price: Any = None, *, fill_sequence: int = 1,
+        sizing_code: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """The cross-broker F&O validation chain (copy_engine/fno_validation.py) for ONE Child, after its quantity is sized. None when the
         order does not cross brokers, is cash equity, or passes every check; otherwise a SKIPPED result with the refusing check's code
@@ -269,7 +279,8 @@ class CopyEnginePipeline:
         except (ArithmeticError, ValueError):
             limit_price = None
         terms = derivative_routing.child_terms(child_broker, event.exchange, event.symbol, event.instrument_id)
-        code = fno_validation.run_chain(fno_validation.FnoOrderFacts(child_broker, int(quantity), terms, limit_price))
+        # `sizing_code`: the Copy Quantity sizing itself produced a fractional lot (MULTIPLIER): refused with that reason, never floored.
+        code = sizing_code or fno_validation.run_chain(fno_validation.FnoOrderFacts(child_broker, int(quantity), terms, limit_price))
         if code is None:
             return None
         logger.info(f"[Pipeline] {code}: {event.master_order_id} not copied to {follower.display_name} ({follower.broker}); quantity {quantity}.")
@@ -1144,7 +1155,8 @@ class CopyEnginePipeline:
 
         if target_qty <= 0:
             return {"status": "SKIPPED", "reason": "ZERO_LOT_RESULT"}
-        fno_skip = await self._fno_child_check(event, follower, target_qty, event.limit_price if event.limit_price and event.limit_price > 0 else None)
+        fno_skip = await self._fno_child_check(event, follower, target_qty, event.limit_price if event.limit_price and event.limit_price > 0 else None,
+                                               sizing_code=self._fractional_lot_code(settings_obj, event, follower, multiplier))
         if fno_skip is not None:
             return fno_skip
 
@@ -1773,7 +1785,8 @@ class CopyEnginePipeline:
 
         if target_qty <= 0:
             return {"status": "SKIPPED", "reason": "ZERO_LOT_RESULT"}
-        fno_skip = await self._fno_child_check(event, follower, target_qty, event.limit_price if event.limit_price and event.limit_price > 0 else None)
+        fno_skip = await self._fno_child_check(event, follower, target_qty, event.limit_price if event.limit_price and event.limit_price > 0 else None,
+                                               sizing_code=self._fractional_lot_code(settings_obj, event, follower, multiplier))
         if fno_skip is not None:
             return fno_skip
 
@@ -3981,7 +3994,8 @@ class CopyEnginePipeline:
                 await session.commit()
             return {"status": "SKIPPED", "reason": "ZERO_LOT_RESULT"}
 
-        fno_skip = await self._fno_child_check(event, follower, target_qty, None)        # a MARKET copy has no price yet: tick not evaluated
+        fno_skip = await self._fno_child_check(event, follower, target_qty, None,        # a MARKET copy has no price yet: tick not evaluated
+                                               sizing_code=self._fractional_lot_code(settings_obj, event, follower, multiplier))
         if fno_skip is not None:
             return fno_skip
 

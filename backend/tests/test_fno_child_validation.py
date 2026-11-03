@@ -3,7 +3,7 @@ Phase B: cross-broker F&O CHILD execution for Groww and Zerodha, on one architec
 
   * capability matrix  - what each broker may do with an F&O order and how far it is evidenced; nothing but Alice Blue is VERIFIED_LIVE;
   * gates              - each broker's F&O Child gate is closed by default and opening one never opens another;
-  * validation chain   - lot multiple, the lot cap (default 1, independent of the sizing settings), freeze quantity, tick size;
+  * validation chain   - whole lots, freeze quantity, tick size: invalid orders are refused, there is NO lot cap (Alice Blue has none);
   * Groww Child        - an Alice Master's F&O order is placed at Groww with Groww's own symbol on segment FNO, then modified and cancelled;
   * Zerodha Child      - the same, through the same route policy and the same chain.
 
@@ -56,7 +56,8 @@ def test_only_alice_blue_is_verified_live_and_every_other_broker_is_gated_and_ho
 
 def test_every_f_and_o_child_gate_is_closed_by_default_except_the_production_proven_one():
     s = Settings(_env_file=None)
-    assert (s.GROWW_FNO_CHILD_ENABLED, s.ZERODHA_FNO_CHILD_ENABLED, s.FNO_CHILD_MAX_LOTS) == (False, False, 1)
+    assert (s.GROWW_FNO_CHILD_ENABLED, s.ZERODHA_FNO_CHILD_ENABLED) == (False, False)
+    assert not hasattr(s, "FNO_CHILD_MAX_LOTS")                                          # no new lot cap exists anywhere
     assert child_gate_open("alicebluenew") and not child_gate_open("groww") and not child_gate_open("zerodha")
     assert not child_gate_open("angelone") and not child_gate_open("dhan")
     assert child_gate_open(None)                                                        # a NULL stored broker is Alice Blue
@@ -97,9 +98,9 @@ def facts(qty, *, lot=65, freeze=None, tick=None, price=None, terms_=True):
     return fno_validation.FnoOrderFacts("groww", qty, ChildTerms(lot, freeze, tick) if terms_ else None, price)
 
 
-def test_the_default_chain_allows_exactly_one_lot_and_nothing_is_rounded():
-    assert fno_validation.run_chain(facts(65)) is None
-    assert fno_validation.run_chain(facts(130)) == "FNO_MAX_LOTS_EXCEEDED"             # 2 lots: above the default 1-lot cap
+def test_the_default_chain_allows_any_whole_number_of_lots_and_nothing_is_rounded():
+    for lots in (1, 2, 5, 20):
+        assert fno_validation.run_chain(facts(65 * lots)) is None                          # no cap: the Copy Quantity settings decide how many lots
     assert fno_validation.run_chain(facts(64)) == "FNO_QUANTITY_NOT_LOT_MULTIPLE"
     assert fno_validation.run_chain(facts(66)) == "FNO_QUANTITY_NOT_LOT_MULTIPLE"
     assert fno_validation.run_chain(facts(0)) == "FNO_QUANTITY_NOT_LOT_MULTIPLE"
@@ -107,17 +108,12 @@ def test_the_default_chain_allows_exactly_one_lot_and_nothing_is_rounded():
     assert fno_validation.run_chain(facts(65, terms_=False)) == "FNO_LOT_SIZE_UNKNOWN"
 
 
-def test_the_lot_cap_is_an_independent_setting_that_is_never_raised_silently(monkeypatch):
-    assert fno_validation.run_chain(facts(195)) == "FNO_MAX_LOTS_EXCEEDED"
-    monkeypatch.setattr(settings, "FNO_CHILD_MAX_LOTS", 3)
-    assert fno_validation.run_chain(facts(195)) is None and fno_validation.run_chain(facts(260)) == "FNO_MAX_LOTS_EXCEEDED"
-    for closed in (0, -1):
-        monkeypatch.setattr(settings, "FNO_CHILD_MAX_LOTS", closed)
-        assert fno_validation.run_chain(facts(65)) == "FNO_MAX_LOTS_CAP_UNSET"            # a cap of zero closes the door; it is never read as "no cap"
+def test_there_is_no_lot_cap_in_the_chain_or_in_the_settings():
+    assert [c.name for c in fno_validation.DEFAULT_CHAIN] == ["lot_multiple", "freeze_quantity", "tick_size"]
+    assert not hasattr(settings, "FNO_CHILD_MAX_LOTS")
 
 
 def test_the_freeze_quantity_is_enforced_only_when_the_catalog_states_it_and_never_by_splitting(monkeypatch):
-    monkeypatch.setattr(settings, "FNO_CHILD_MAX_LOTS", 100)
     assert fno_validation.run_chain(facts(65 * 28, freeze=1801)) == "FNO_FREEZE_QUANTITY_EXCEEDED"
     assert fno_validation.run_chain(facts(65 * 27, freeze=1801)) is None
     assert fno_validation.run_chain(facts(65 * 28, freeze=None)) is None                # unstated freeze quantity is not assumed (the cap bounds it)
@@ -140,7 +136,6 @@ def test_the_chain_stops_at_the_first_refusal_and_an_error_in_a_check_is_a_refus
 
     assert fno_validation.run_chain(facts(65), (Boom(),)) == "FNO_CHECK_ERROR"
     assert fno_validation.run_chain(facts(64, freeze=10), fno_validation.DEFAULT_CHAIN) == "FNO_QUANTITY_NOT_LOT_MULTIPLE"      # lot check runs first
-    assert [c.name for c in fno_validation.DEFAULT_CHAIN] == ["lot_multiple", "max_lots", "freeze_quantity", "tick_size"]
 
 
 # ── shared helpers for the two Children ─────────────────────────────────────────────────────────────────────────────────────
@@ -231,34 +226,33 @@ async def test_the_groww_products_follow_the_masters_carry_or_intraday(db_sessio
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode,fixed,master_qty,sent", [(QuantityMode.FIXED, 1, 75, 75), (QuantityMode.FIXED, 1, 750, 75), (QuantityMode.MULTIPLIER, 1, 75, 75)])
-async def test_the_existing_copy_quantity_settings_size_the_groww_order_in_whole_lots(db_session, mock_redis, groww_open, mode, fixed, master_qty, sent):
+@pytest.mark.parametrize("mode,fixed,master_qty,sent", [(QuantityMode.FIXED, 75, 75, 75), (QuantityMode.FIXED, 75, 750, 75), (QuantityMode.MULTIPLIER, 1, 75, 75)])
+async def test_the_existing_copy_quantity_settings_size_the_groww_order_in_units_exactly_as_for_cash(db_session, mock_redis, groww_open, mode, fixed, master_qty, sent):
     master, child, fake, client, pipeline = await groww_send(db_session, mock_redis, groww_open, None, mode=mode, fixed=fixed)
     await pipeline.execute_replication(event=alice_event(master, "G-3", qty=master_qty), clients={str(child.id): client})
     assert [b["quantity"] for b in fake.bodies("/v1/order/create")] == [sent]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode,fixed,master_qty", [(QuantityMode.FIXED, 2, 75), (QuantityMode.MULTIPLIER, 1, 150)])
-async def test_the_one_lot_cap_stops_a_larger_groww_order_whatever_the_sizing_setting_says(db_session, mock_redis, groww_open, monkeypatch, mode, fixed, master_qty):
-    monkeypatch.setattr(settings, "FNO_CHILD_MAX_LOTS", 1)
+@pytest.mark.parametrize("mode,fixed,master_qty", [(QuantityMode.FIXED, 150, 75), (QuantityMode.MULTIPLIER, 1, 150)])
+async def test_a_larger_order_is_sized_by_the_copy_quantity_settings_and_sent_to_groww_like_it_is_to_alice(db_session, mock_redis, groww_open, mode, fixed, master_qty):
     master, child, fake, client, pipeline = await groww_send(db_session, mock_redis, groww_open, None, mode=mode, fixed=fixed)
     await pipeline.execute_replication(event=alice_event(master, "G-4", qty=master_qty), clients={str(child.id): client})
-    assert fake.bodies("/v1/order/create") == [] and any("FNO_MAX_LOTS_EXCEEDED" in r for r in await skipped(child))
-    async with TestingSessionLocal() as s:
-        copies = (await s.execute(select(CopyTrade).where(CopyTrade.follower_account_id == child.id))).scalars().all()
-    assert [c.status.value for c in copies] == ["SKIPPED"]
+    assert [b["quantity"] for b in fake.bodies("/v1/order/create")] == [150]                # 2 lots: FIXED 150 (units) or MULTIPLIER on a 2-lot Master order
 
 
 @pytest.mark.asyncio
-async def test_the_groww_adapter_enforces_the_cap_itself_even_if_the_chain_were_bypassed(db_session, mock_redis, groww_open, monkeypatch):
-    monkeypatch.setattr(settings, "FNO_CHILD_MAX_LOTS", 1)
+async def test_the_groww_adapter_still_refuses_what_is_invalid_not_what_is_large(db_session, mock_redis, groww_open):
     client = make_groww_client(mock_redis, GrowwFnoChild(), account_id="acc-g", static_ip=CHILD_IP, store=groww_open)
     await client.login()
-    req = OrderRequest(symbol=GROWW_SYMBOL, exchange="NFO", side=OrderSide.BUY, quantity=150, product_type=ProductType.NRML, order_type=OrderType.LIMIT,
-                       price=Decimal("2.35"), client_order_id="JT_X_1")
-    res = await client.place_order(req)
-    assert res.category == OrderResultCategory.REJECTED and "lot cap" in res.message
+
+    def request(qty):
+        return OrderRequest(symbol=GROWW_SYMBOL, exchange="NFO", side=OrderSide.BUY, quantity=qty, product_type=ProductType.NRML, order_type=OrderType.LIMIT,
+                            price=Decimal("2.35"), client_order_id=f"JT_X_{qty}")
+
+    assert (await client.place_order(request(150))).category == OrderResultCategory.SUCCESS             # 2 lots: no cap
+    assert "whole number of lots" in (await client.place_order(request(74))).message                     # not a lot multiple: refused, never rounded
+    assert "freeze quantity" in (await client.place_order(request(75 * 25))).message                      # above the exchange freeze quantity (1800): refused, never split
 
 
 @pytest.mark.asyncio
@@ -393,13 +387,13 @@ async def zerodha_setup(db_session, mock_redis, store, mode=QuantityMode.MULTIPL
 
 
 @pytest.mark.asyncio
-async def test_the_zerodha_child_obeys_the_same_one_lot_cap(db_session, mock_redis, zerodha_open):
+async def test_the_zerodha_child_is_sized_by_the_copy_quantity_settings_with_no_extra_cap(db_session, mock_redis, zerodha_open):
     master, child, fake, client, pipeline = await zerodha_setup(db_session, mock_redis, zerodha_open)
     await pipeline.execute_replication(event=alice_event(master, "Z-1", qty=75), clients={str(child.id): client})
     assert [f["quantity"] for f in fake.forms("POST")] == ["75"]
-    master2, child2, fake2, client2, pipeline2 = await zerodha_setup(db_session, mock_redis, zerodha_open, QuantityMode.FIXED, 2)
+    master2, child2, fake2, client2, pipeline2 = await zerodha_setup(db_session, mock_redis, zerodha_open, QuantityMode.FIXED, 150)
     await pipeline2.execute_replication(event=alice_event(master2, "Z-2", qty=75), clients={str(child2.id): client2})
-    assert fake2.forms("POST") == []
+    assert [f["quantity"] for f in fake2.forms("POST")] == ["150"]
 
 
 @pytest.mark.asyncio
@@ -455,11 +449,11 @@ ORDER_TYPES = [("LIMIT", "0"), ("MARKET", "0"), ("SL", "2.30"), ("SLM", "2.30")]
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("order_type,trigger", ORDER_TYPES)
-async def test_the_one_lot_cap_applies_to_every_order_type_for_the_groww_child(db_session, mock_redis, groww_open, monkeypatch, order_type, trigger):
-    monkeypatch.setattr(settings, "FNO_CHILD_MAX_LOTS", 1)
+async def test_two_lots_of_every_order_type_reach_the_groww_child(db_session, mock_redis, groww_open, order_type, trigger):
     master, child, fake, client, pipeline = await groww_send(db_session, mock_redis, groww_open, None)
-    await pipeline.execute_replication(event=alice_event(master, f"GT-{order_type}-2", qty=150, order_type=order_type, trigger=trigger), clients={str(child.id): client})
-    assert fake.bodies("/v1/order/create") == [] and any("FNO_MAX_LOTS_EXCEEDED" in r for r in await skipped(child))
+    res = await pipeline.execute_replication(event=alice_event(master, f"GT-{order_type}-2", qty=150, order_type=order_type, trigger=trigger),
+                                             clients={str(child.id): client})
+    assert res["results"][str(child.id)]["status"] == "SUCCESS" and [b["quantity"] for b in fake.bodies("/v1/order/create")] == [150]
 
 
 @pytest.mark.asyncio
@@ -475,10 +469,58 @@ async def test_one_lot_of_every_order_type_reaches_groww_and_zerodha(db_session,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("order_type,trigger", ORDER_TYPES)
-async def test_the_one_lot_cap_applies_to_every_order_type_for_the_zerodha_child(db_session, mock_redis, zerodha_open, order_type, trigger):
+async def test_two_lots_of_every_order_type_reach_the_zerodha_child(db_session, mock_redis, zerodha_open, order_type, trigger):
     master, child, fake, client, pipeline = await zerodha_setup(db_session, mock_redis, zerodha_open)
-    await pipeline.execute_replication(event=alice_event(master, f"ZT-{order_type}-2", qty=150, order_type=order_type, trigger=trigger), clients={str(child.id): client})
-    assert fake.forms("POST") == [] and any("FNO_MAX_LOTS_EXCEEDED" in r for r in await skipped(child))
-    master2, child2, fake2, client2, pipeline2 = await zerodha_setup(db_session, mock_redis, zerodha_open)
-    res = await pipeline2.execute_replication(event=alice_event(master2, f"ZT-{order_type}-1", qty=75, order_type=order_type, trigger=trigger), clients={str(child2.id): client2})
-    assert res["results"][str(child2.id)]["status"] == "SUCCESS" and fake2.forms("POST")[0]["quantity"] == "75"
+    res = await pipeline.execute_replication(event=alice_event(master, f"ZT-{order_type}-2", qty=150, order_type=order_type, trigger=trigger),
+                                             clients={str(child.id): client})
+    assert res["results"][str(child.id)]["status"] == "SUCCESS" and [f["quantity"] for f in fake.forms("POST")] == ["150"]
+
+# ── Copy Quantity is never adjusted: an invalid F&O quantity is refused with its reason ─────────────────────────────────────────
+
+async def set_member_multiplier(child, value):
+    from app.models.strategies import StrategyMember
+    async with TestingSessionLocal() as s:
+        m = (await s.execute(select(StrategyMember).where(StrategyMember.account_id == child.id))).scalar_one()
+        m.multiplier = Decimal(value)
+        await s.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fixed", [1, 74, 76, 100])
+async def test_a_fixed_quantity_that_is_not_a_whole_number_of_lots_is_refused_never_rounded_for_groww(db_session, mock_redis, groww_open, fixed):
+    master, child, fake, client, pipeline = await groww_send(db_session, mock_redis, groww_open, None, mode=QuantityMode.FIXED, fixed=fixed)
+    await pipeline.execute_replication(event=alice_event(master, f"FX-{fixed}", qty=75), clients={str(child.id): client})
+    assert fake.bodies("/v1/order/create") == [] and any("FNO_QUANTITY_NOT_LOT_MULTIPLE" in r for r in await skipped(child))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mult,master_qty", [("0.5", 75), ("0.75", 150), ("1.5", 75), ("1.01", 150)])
+async def test_a_multiplier_that_gives_a_fractional_lot_is_refused_never_floored_for_groww(db_session, mock_redis, groww_open, mult, master_qty):
+    master, child, fake, client, pipeline = await groww_send(db_session, mock_redis, groww_open, None, mode=QuantityMode.MULTIPLIER)
+    await set_member_multiplier(child, mult)
+    await pipeline.execute_replication(event=alice_event(master, f"MX-{mult}", qty=master_qty), clients={str(child.id): client})
+    assert fake.bodies("/v1/order/create") == [] and any("FNO_QUANTITY_NOT_LOT_MULTIPLE" in r for r in await skipped(child))
+
+
+@pytest.mark.asyncio
+async def test_a_multiplier_that_gives_whole_lots_is_sent_exactly(db_session, mock_redis, groww_open):
+    master, child, fake, client, pipeline = await groww_send(db_session, mock_redis, groww_open, None, mode=QuantityMode.MULTIPLIER)
+    await set_member_multiplier(child, "1.5")
+    await pipeline.execute_replication(event=alice_event(master, "MX-ok", qty=150), clients={str(child.id): client})
+    assert [b["quantity"] for b in fake.bodies("/v1/order/create")] == [225]                  # 2 lots x 1.5 = 3 lots
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fixed", [1, 74])
+async def test_a_fixed_quantity_that_is_not_a_whole_number_of_lots_is_refused_for_zerodha(db_session, mock_redis, zerodha_open, fixed):
+    master, child, fake, client, pipeline = await zerodha_setup(db_session, mock_redis, zerodha_open, QuantityMode.FIXED, fixed)
+    await pipeline.execute_replication(event=alice_event(master, f"ZFX-{fixed}", qty=75), clients={str(child.id): client})
+    assert fake.forms("POST") == [] and any("FNO_QUANTITY_NOT_LOT_MULTIPLE" in r for r in await skipped(child))
+
+
+@pytest.mark.asyncio
+async def test_a_fractional_lot_multiplier_is_refused_for_zerodha(db_session, mock_redis, zerodha_open):
+    master, child, fake, client, pipeline = await zerodha_setup(db_session, mock_redis, zerodha_open)
+    await set_member_multiplier(child, "0.75")
+    await pipeline.execute_replication(event=alice_event(master, "ZMX-1", qty=150), clients={str(child.id): client})
+    assert fake.forms("POST") == [] and any("FNO_QUANTITY_NOT_LOT_MULTIPLE" in r for r in await skipped(child))

@@ -7,7 +7,6 @@ passes or refuses with a code; the first refusal stops the chain and the Child i
 raised to make an order pass.
 
   LotMultiple     the Child's own lot size must be stated, and the quantity must be a whole number of lots
-  MaxLots         at most FNO_CHILD_MAX_LOTS lots (default 1): an independent risk control, repeated inside each Child adapter
   FreezeQuantity  not above the exchange freeze quantity the Child's catalog states (an unstated freeze quantity is not assumed)
   TickSize        a stated limit price must sit on the Child's tick size (a MARKET order has no price yet: not evaluated)
 
@@ -21,7 +20,6 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Optional, Protocol, Sequence, Tuple
 
-from app.core.config import settings
 from app.services.copy_engine.derivative_routing import ChildTerms
 
 
@@ -51,17 +49,6 @@ class LotMultiple:
         return None
 
 
-class MaxLots:
-    name = "max_lots"
-
-    def check(self, facts: FnoOrderFacts) -> Optional[str]:
-        lot = facts.terms.lot_size if facts.terms is not None else None
-        cap = int(settings.FNO_CHILD_MAX_LOTS or 0)
-        if not lot or cap <= 0:
-            return "FNO_MAX_LOTS_CAP_UNSET" if cap <= 0 else None   # a cap of zero or less closes the door; an unknown lot is LotMultiple's refusal
-        return "FNO_MAX_LOTS_EXCEEDED" if facts.quantity // lot > cap else None
-
-
 class FreezeQuantity:
     name = "freeze_quantity"
 
@@ -83,7 +70,7 @@ class TickSize:
             return "FNO_PRICE_NOT_ON_TICK"
 
 
-DEFAULT_CHAIN: Tuple[FnoCheck, ...] = (LotMultiple(), MaxLots(), FreezeQuantity(), TickSize())
+DEFAULT_CHAIN: Tuple[FnoCheck, ...] = (LotMultiple(), FreezeQuantity(), TickSize())
 
 
 def run_chain(facts: FnoOrderFacts, chain: Sequence[FnoCheck] = DEFAULT_CHAIN) -> Optional[str]:

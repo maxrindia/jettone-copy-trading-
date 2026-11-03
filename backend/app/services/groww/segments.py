@@ -31,7 +31,7 @@ from typing import Any, Dict, Optional, Protocol, Set, Tuple
 
 from app.core.config import settings
 from app.services.alice_blue.instruments import InstrumentResolutionError
-from app.services.alice_blue.types import OrderRecord
+from app.services.alice_blue.types import OrderRecord, Position
 from app.services.brokers.fno_units import infer_quantity_unit  # noqa: F401  (re-exported: the rule is shared by every Master adapter)
 from app.services.instruments.contracts import make_contract
 
@@ -43,15 +43,24 @@ CANONICAL_FNO_EXCHANGE = "NFO"
 UNSUPPORTED_PREFIX = "UNSUPPORTED_FNO_"
 
 
+class SegmentRowError(Exception):
+    """A position row of an enabled segment that cannot be read with confidence. The caller turns it into "the position book is UNKNOWN"
+    (fail closed): an unreadable F&O position is never read as flat."""
+
+
 class SegmentPolicy(Protocol):
     name: str
     isolate_row_errors: bool
 
     def enabled(self) -> bool: ...
 
+    def reads_positions(self) -> bool: ...
+
     def to_record(self, client: Any, row: Dict[str, Any]) -> OrderRecord: ...
 
     def describe_row(self, row: Dict[str, Any]) -> Dict[str, Any]: ...
+
+    def to_position(self, client: Any, row: Dict[str, Any]) -> Optional[Position]: ...
 
 
 class CashSegment:
@@ -61,11 +70,20 @@ class CashSegment:
     def enabled(self) -> bool:
         return True
 
+    def reads_positions(self) -> bool:
+        return True
+
     def to_record(self, client: Any, row: Dict[str, Any]) -> OrderRecord:
         return client.parse_order_row(row)
 
     def describe_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
         return {}
+
+    def to_position(self, client: Any, row: Dict[str, Any]) -> Optional[Position]:
+        # Exactly what the cash position book has always done: only CASH rows, through the strict parser.
+        if str(row.get("segment") or "CASH").upper() != self.name:
+            return None
+        return client.parse_position_row(row)
 
 
 class DerivativesSegment:
@@ -79,9 +97,46 @@ class DerivativesSegment:
         # The F&O list is read for a Master's orders AND for a Child's own F&O orders (their fill sync), so either flag opens it.
         return bool(settings.GROWW_FNO_MASTER_ENABLED or settings.GROWW_FNO_CHILD_ENABLED)
 
+    def reads_positions(self) -> bool:
+        """The F&O position list joins the position book only when this Child can RECEIVE F&O orders. The book feeds the SELL guard, the
+        exposure check and the reconciliation of every order of the account, cash included, so an unreadable F&O list makes the whole book
+        unknown (fail closed): that coupling is accepted only for a Child that trades F&O, never for a Master-only F&O flag."""
+        return bool(settings.GROWW_FNO_CHILD_ENABLED)
+
     def describe_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
         keys = ("segment", "exchange", "product", "order_type", "order_status", "transaction_type", "quantity", "filled_quantity", "trading_symbol")
         return {k: row.get(k) for k in keys if k in row}
+
+    def to_position(self, client: Any, row: Dict[str, Any]) -> Optional[Position]:
+        """An F&O position as the broker-neutral Position the SELL guard, the exposure check and the reconciliation read - the same book shape
+        Alice Blue gives for derivatives: exchange NFO, the exact trading symbol, the carry or intraday product, the signed quantity in UNITS.
+        Strict like the cash parser: a non-zero position that cannot be resolved or read raises SegmentRowError (the whole book is then
+        unknown and the guard fails closed). A closed (zero) row carries nothing to resolve."""
+        segment = str(row.get("segment") or "").strip().upper()
+        if segment == CashSegment.name:
+            return None                                      # explicitly a cash row: the CASH list reads it
+        if segment != self.name:
+            # A row that does not say which segment it is in is not ours to drop: dropping it could read a real position as flat.
+            raise SegmentRowError("a row of the F&O position list does not carry segment FNO")
+        position = client.parse_position_row(row)
+        if position.quantity == 0:
+            return dataclasses.replace(position, exchange=CANONICAL_FNO_EXCHANGE, instrument_id=None)
+        if str(row.get("exchange") or "").strip().upper() not in FNO_EXCHANGES:
+            raise SegmentRowError("F&O position on an unexpected exchange")
+        product = str(position.product_type or "").strip().upper()
+        if product not in FNO_PRODUCTS:
+            raise SegmentRowError("F&O position in an unexpected product")
+        unit = str(settings.GROWW_FNO_QUANTITY_UNIT or "").strip().upper()
+        if unit not in ("UNITS", "LOTS", "AUTO"):
+            raise SegmentRowError("the F&O quantity unit is not configured, so a position quantity cannot be trusted")
+        try:
+            inst = client._instruments.derivative("NSE", position.symbol)
+        except InstrumentResolutionError:
+            raise SegmentRowError("an open F&O position is not in the loaded instrument master") from None
+        quantity = position.quantity * inst.lot_size if unit == "LOTS" else position.quantity
+        if quantity % inst.lot_size:
+            raise SegmentRowError("an F&O position quantity is not a whole number of lots")
+        return dataclasses.replace(position, exchange=CANONICAL_FNO_EXCHANGE, product_type=product, quantity=quantity, instrument_id=None)
 
     def to_record(self, client: Any, row: Dict[str, Any]) -> OrderRecord:
         record = client.parse_order_row(row)                    # strict base fields; a malformed row is isolated by the caller, with its fields logged

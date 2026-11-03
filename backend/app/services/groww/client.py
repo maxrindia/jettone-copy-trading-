@@ -562,8 +562,12 @@ class GrowwClient:
 
     # ── instruments ──────────────────────────────────────────────────────
     async def resolve_instrument(self, exchange: str, symbol: str) -> Tuple[str, str]:
-        """(ISIN or '', Groww trading_symbol). Another broker's token is never accepted."""
+        """(ISIN or '', Groww trading_symbol). Another broker's token is never accepted. An NFO symbol is looked up in the F&O catalog by its
+        exact trading symbol (no ISIN exists for a derivative: the SELL guard then matches by symbol, exchange and product, as it does for
+        an Alice Blue derivative without a token)."""
         await self._instruments.ensure_loaded()
+        if str(exchange or "").strip().upper() == "NFO":
+            return "", self._instruments.derivative("NSE", symbol).trading_symbol
         inst = self._instruments.resolve(exchange, symbol)
         return inst.isin, inst.trading_symbol
 
@@ -616,7 +620,7 @@ class GrowwClient:
     def _build_fno_body(
         self, *, symbol: str, side: Any, quantity: int, product_type: Any, order_type: Any, price: Decimal, trigger_price: Decimal, reference: str,
     ) -> Dict[str, Any]:
-        """An F&O order for the Groww Child (CODE_ONLY: never observed live, so it is behind its own gate and an independent lot cap).
+        """An F&O order for the Groww Child (CODE_ONLY: never observed live, so it is behind its own gate).
         `symbol` is the Groww trading_symbol the route policy resolved from the canonical contract - never another broker's symbol. The
         quantity arrives in UNITS; the create-order unit is not documented for FNO (the order LIST shows units), so UNITS and AUTO send units
         and only an explicit LOTS setting sends a lot count. Raises (nothing sent) on any problem."""
@@ -632,9 +636,6 @@ class GrowwClient:
             raise GrowwError(f"Groww does not allow {side_v} for {inst.trading_symbol}")
         if quantity <= 0 or quantity % inst.lot_size:
             raise GrowwError(f"quantity {quantity} is not a whole number of lots ({inst.lot_size}); not rounded")
-        cap = int(settings.FNO_CHILD_MAX_LOTS or 0)
-        if cap <= 0 or quantity // inst.lot_size > cap:
-            raise GrowwError(f"quantity is above the {cap}-lot cap for cross-broker F&O orders (FNO_CHILD_MAX_LOTS)")
         if inst.freeze_quantity and quantity > inst.freeze_quantity:
             raise GrowwError(f"quantity exceeds the exchange freeze quantity ({inst.freeze_quantity}); not split")
         product = FNO_PRODUCT_MAP.get(ProductType(product_type))
@@ -814,9 +815,8 @@ class GrowwClient:
             send_quantity = int(quantity)
             if segment == C.FNO_SEGMENT:
                 inst = self._instruments.derivative("NSE", str(detail.get("trading_symbol") or ""))
-                cap = int(settings.FNO_CHILD_MAX_LOTS or 0)
-                if quantity % inst.lot_size or cap <= 0 or quantity // inst.lot_size > cap:
-                    raise GrowwError("the modified F&O quantity is not a whole number of lots within the lot cap")
+                if quantity % inst.lot_size:
+                    raise GrowwError("the modified F&O quantity is not a whole number of lots")
                 if str(settings.GROWW_FNO_QUANTITY_UNIT or "").strip().upper() == "LOTS":
                     send_quantity = quantity // inst.lot_size
             body: Dict[str, Any] = {
@@ -1042,19 +1042,27 @@ class GrowwClient:
 
     async def get_positions(self) -> List[Position]:
         self._require_contract()
-        status, data = await self._call("read", "GET", C.ROUTES["positions"], params={"segment": C.SUPPORTED_SEGMENT})
-        payload = self._payload(status, data)
-        rows = payload.get("positions")
-        if not isinstance(rows, list):
-            # A flat account answers payload.positions = [] (live capture 2026-10-29, contract.LIVE_VERIFIED_SHAPES); any
-            # other shape is "unknown", never "flat".
-            raise GrowwCapabilityUnavailable("positions response has no positions array")
         positions: List[Position] = []
-        for r in rows:
-            if not isinstance(r, dict):                                       # validate before any field access
-                raise GrowwCapabilityUnavailable("position row is not an object")
-            if str(r.get("segment") or C.SUPPORTED_SEGMENT).upper() == C.SUPPORTED_SEGMENT:
-                positions.append(self.parse_position_row(r))
+        # ONE book, as Alice Blue's is: cash always, plus the F&O positions when an F&O gate is open (groww/segments.py). The SELL guard, the
+        # exposure check and the reconciliation therefore see a Child's F&O position exactly where they see an Alice Blue one. An F&O book that
+        # cannot be read makes the WHOLE book unknown (fail closed).
+        for policy in (p for p in segments.enabled_policies() if p.reads_positions()):
+            status, data = await self._call("read", "GET", C.ROUTES["positions"], params={"segment": policy.name})
+            payload = self._payload(status, data)
+            rows = payload.get("positions")
+            if not isinstance(rows, list):
+                # A flat account answers payload.positions = [] (live capture 2026-10-29, contract.LIVE_VERIFIED_SHAPES); any
+                # other shape is "unknown", never "flat".
+                raise GrowwCapabilityUnavailable("positions response has no positions array")
+            for r in rows:
+                if not isinstance(r, dict):                                   # validate before any field access
+                    raise GrowwCapabilityUnavailable("position row is not an object")
+                try:
+                    parsed = policy.to_position(self, r)
+                except segments.SegmentRowError as exc:
+                    raise GrowwCapabilityUnavailable(str(exc)) from None
+                if parsed is not None:
+                    positions.append(parsed)
         if duplicate_position_key(positions) is not None:
             # One row per instrument and product is expected; two cannot be told apart, so the book is unknown.
             raise GrowwCapabilityUnavailable("position book lists an instrument and product more than once")

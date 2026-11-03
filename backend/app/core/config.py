@@ -146,9 +146,6 @@ class Settings(BaseSettings):
     # been observed live.
     GROWW_FNO_CHILD_ENABLED: bool = False
     ZERODHA_FNO_CHILD_ENABLED: bool = False
-    # The most LOTS any one cross-broker F&O Child order may carry (an independent risk control, checked in the validation chain AND
-    # again inside each Child adapter). Raised only by editing this setting; nothing raises it silently. Alice Blue -> Alice Blue is unaffected.
-    FNO_CHILD_MAX_LOTS: int = 1
     # Cross-broker derivative routing allowlist: comma-separated "master>child" pairs (for example "groww>alicebluenew") for which an F&O
     # order whose contract resolves EXACTLY in the Child's own catalog is copied. Anything not listed keeps the existing refusal
     # (CROSS_BROKER_DERIVATIVE_UNMAPPED). Default empty (off). It never opens a role or pair gate; both still apply.
