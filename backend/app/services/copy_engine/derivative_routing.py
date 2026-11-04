@@ -48,12 +48,16 @@ def _resolve_groww(contract: CanonicalContract) -> ContractResolution:
     return resolve_for_broker("groww", contract)
 
 
+def _resolve_angel(contract: CanonicalContract) -> ContractResolution:
+    return resolve_for_broker("angelone", contract)
+
+
 # Child broker -> how a canonical contract is resolved in that broker's own catalog. One entry = one more routable Child.
-CHILD_RESOLVERS: Dict[str, Resolver] = {ALICE_ID: _resolve_alice, "zerodha": _resolve_zerodha, "groww": _resolve_groww}
+CHILD_RESOLVERS: Dict[str, Resolver] = {ALICE_ID: _resolve_alice, "zerodha": _resolve_zerodha, "groww": _resolve_groww, "angelone": _resolve_angel}
 
 # Child brokers that identify an instrument by its TRADING SYMBOL, not by a numeric token (Zerodha: the exact tradingsymbol). For them a
 # routed order carries the resolved symbol of the Child's own catalog and no token; every other Child (Alice Blue) is sent its own token.
-SYMBOL_IDENTITY_CHILDREN = frozenset({"zerodha", "groww"})
+SYMBOL_IDENTITY_CHILDREN = frozenset({"zerodha", "groww", "angelone"})
 
 
 @dataclass(frozen=True)
@@ -86,9 +90,15 @@ def _groww_terms(exchange: Any, symbol: Any, token: Any) -> Optional[ChildTerms]
     return ChildTerms(inst.lot_size if inst.lot_size > 1 else None, inst.freeze_quantity or None, inst.tick_size)
 
 
+def _angel_terms(exchange: Any, symbol: Any, token: Any) -> Optional[ChildTerms]:
+    from app.services.angel_one import instruments as ai
+    d = ai.store.derivative(str(symbol))
+    return ChildTerms(d.lot_size if d.lot_size > 1 else None, d.freeze_quantity or None, d.tick_size)   # the file has no freeze quantity: unknown
+
+
 # Child broker -> what ITS OWN catalog states about a derivative. One entry = one more Child that can be sized and validated.
 CHILD_TERMS_PROVIDERS: Dict[str, Callable[[Any, Any, Any], Optional[ChildTerms]]] = {
-    ALICE_ID: _alice_terms, "zerodha": _zerodha_terms, "groww": _groww_terms,
+    ALICE_ID: _alice_terms, "zerodha": _zerodha_terms, "groww": _groww_terms, "angelone": _angel_terms,
 }
 
 

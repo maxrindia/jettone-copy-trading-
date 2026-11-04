@@ -60,6 +60,7 @@ from app.services.brokers.position_checks import duplicate_position_key
 from app.services.brokers.rate_limit import RateLimitConfigError, RateLimitExceeded, SlidingWindowLimiter, parse_rate_limits
 from app.services.brokers.strict_numbers import StrictNumberError, need, optional_decimal, strict_decimal, strict_int
 from app.services.brokers.transport import SendState, is_provably_not_sent
+from app.services.angel_one import derivatives as fno
 from app.services.angel_one.instruments import AngelInstrumentStore, store as default_store
 
 logger = logging.getLogger("angel_one_client")
@@ -86,6 +87,14 @@ PRODUCT_MAP = {
     ProductType.CNC: "DELIVERY",
     ProductType.MIS: "INTRADAY",
     ProductType.NRML: "CARRYFORWARD",
+}
+
+# F&O (NFO): a carry-forward order is CARRYFORWARD, an intraday one INTRADAY (the same SmartAPI values as above). CNC maps to CARRYFORWARD because
+# there is no delivery on a derivative exchange; DELIVERY / MARGIN are never sent for an F&O order.
+FNO_PRODUCT_MAP = {
+    ProductType.NRML: "CARRYFORWARD",
+    ProductType.CNC: "CARRYFORWARD",
+    ProductType.MIS: "INTRADAY",
 }
 
 # Jettone order type -> (variety, ordertype).
@@ -386,7 +395,13 @@ class AngelOneClient:
     # ── instruments ──────────────────────────────────────────────────────
     async def resolve_instrument(self, exchange: str, symbol: str) -> Tuple[str, str]:
         """(Angel symboltoken, Angel tradingsymbol). Another broker's token is
-        never accepted; raises InstrumentResolutionError when not exactly one."""
+        never accepted; raises InstrumentResolutionError when not exactly one. An NFO symbol is looked up by its exact trading symbol in the
+        F&O part of the scrip master (only while the Child F&O gate is open)."""
+        if str(exchange or "").strip().upper() == fno.FNO_EXCHANGE:
+            if not settings.ANGEL_ONE_FNO_CHILD_ENABLED:
+                raise InstrumentResolutionError("Angel One F&O is not enabled for Child orders.")
+            d = self._instruments.derivative(symbol)
+            return d.token, d.tradingsymbol
         return self._instruments.resolve(exchange, symbol)
 
     # ── orders ───────────────────────────────────────────────────────────
@@ -404,6 +419,9 @@ class AngelOneClient:
     ) -> Dict[str, Any]:
         """Validates and maps an order; raises (nothing is sent) on any problem."""
         exch = str(exchange).upper()
+        if exch == fno.FNO_EXCHANGE and settings.ANGEL_ONE_FNO_CHILD_ENABLED:      # gate closed: the equity-only refusal below, unchanged
+            return self._build_fno_body(symbol=symbol, side=side, quantity=quantity, product_type=product_type, order_type=order_type,
+                                        price=price, trigger_price=trigger_price)
         token, tradingsymbol = self._instruments.resolve(exch, symbol)  # NSE/BSE equity only
         if quantity <= 0:
             raise AngelOneError("quantity must be positive")
@@ -453,6 +471,49 @@ class AngelOneClient:
             OrderResultCategory.TIMEOUT, req.client_order_id, None,
             f"Angel One placeOrder outcome unknown ({why}); not resent - verify at the broker", {},
         )
+
+    def _build_fno_body(
+        self, *, symbol: str, side: OrderSide, quantity: int, product_type: Any, order_type: Any, price: Decimal, trigger_price: Decimal,
+    ) -> Dict[str, Any]:
+        """An NFO order (CODE_ONLY: never observed live, so it is behind its own gate and an explicit quantity unit). `symbol` is Angel One's own
+        trading symbol, resolved from its own scrip master by the route policy; `quantity` arrives in UNITS. Nothing is rounded, split or
+        capped: an invalid order raises (nothing sent) and says why."""
+        if not settings.ANGEL_ONE_FNO_CHILD_ENABLED:
+            raise AngelOneError("Angel One F&O orders are not enabled (ANGEL_ONE_FNO_CHILD_ENABLED)")
+        unit = fno.quantity_unit()
+        if unit is None:
+            raise AngelOneError("the Angel One F&O quantity unit is not configured (ANGEL_ONE_FNO_QUANTITY_UNIT); not sent")
+        d = self._instruments.derivative(symbol)
+        if quantity <= 0 or quantity % d.lot_size:
+            raise AngelOneError(f"quantity {quantity} is not a whole number of lots ({d.lot_size}); not rounded")
+        if d.freeze_quantity and quantity > d.freeze_quantity:
+            raise AngelOneError(f"quantity exceeds the exchange freeze quantity ({d.freeze_quantity}); not split")
+        product = FNO_PRODUCT_MAP.get(ProductType(product_type))
+        variety_type = ORDER_TYPE_MAP.get(OrderType(order_type))
+        if product is None or variety_type is None:
+            raise AngelOneError(f"unmapped F&O product/order type {product_type}/{order_type}")
+        variety, ordertype = variety_type
+        if ordertype in ("LIMIT", "STOPLOSS_LIMIT") and price <= 0:
+            raise AngelOneError(f"{ordertype} requires a positive price")
+        if variety == "STOPLOSS" and trigger_price <= 0:
+            raise AngelOneError("stop-loss orders require a positive trigger price")
+        body = {
+            "variety": variety,
+            "tradingsymbol": d.tradingsymbol,
+            "symboltoken": d.token,
+            "transactiontype": OrderSide(side).value,
+            "exchange": fno.FNO_EXCHANGE,
+            "ordertype": ordertype,
+            "producttype": product,
+            "duration": "DAY",
+            "price": str(price if ordertype in ("LIMIT", "STOPLOSS_LIMIT") else 0),
+            "squareoff": "0",
+            "stoploss": "0",
+            "quantity": str(quantity // d.lot_size if unit == "LOTS" else quantity),
+        }
+        if variety == "STOPLOSS":
+            body["triggerprice"] = str(trigger_price)
+        return body
 
     async def place_order(self, req: OrderRequest) -> OrderResult:
         """Total: never raises (see GrowwClient.place_order).
@@ -599,7 +660,7 @@ class AngelOneClient:
         rows = data.get("data")
         if data.get("status") is not True or not isinstance(rows, list):
             raise AngelOneError(f"order book fetch failed: {data.get('message')}")
-        return [self.parse_order_row(r, contract.status_map) for r in rows]
+        return [fno.fno_record(self.parse_order_row(r, contract.status_map), self._instruments) for r in rows]
 
     def parse_position_row(self, row: Dict[str, Any], keys) -> Position:
         if not isinstance(row, dict):
@@ -634,6 +695,10 @@ class AngelOneClient:
         if not isinstance(rows, list):
             raise AngelCapabilityUnavailable("positions response is not a list")
         positions = [self.parse_position_row(r, contract.positions) for r in rows]
+        try:
+            positions = [fno.fno_position(p, self._instruments) for p in positions]     # open F&O positions in UNITS, only with the Child F&O gate
+        except InstrumentResolutionError as exc:
+            raise AngelCapabilityUnavailable(str(exc)) from None                           # an unreadable F&O position = the whole book is unknown
         if duplicate_position_key(positions) is not None:
             raise AngelCapabilityUnavailable("position book lists an instrument and product more than once")
         return positions

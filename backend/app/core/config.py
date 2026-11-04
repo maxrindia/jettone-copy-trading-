@@ -103,6 +103,14 @@ class Settings(BaseSettings):
     # Official Angel One instrument master (scrip master) download URL. Empty =
     # no download is ever attempted; set it only to the URL Angel One documents.
     ANGEL_ONE_SCRIP_MASTER_URL: str = ""
+    # Angel One F&O (NFO) roles. Both default false: no F&O order is read as a Master's or sent to a Child, and the position book stays the
+    # cash book. They never open a role or pair gate (ANGEL_ONE_CHILD_TRADING_ENABLED / ANGEL_ONE_MASTER_ENABLED / CANARY_PAIRS still apply).
+    ANGEL_ONE_FNO_CHILD_ENABLED: bool = False
+    ANGEL_ONE_FNO_MASTER_ENABLED: bool = False
+    # How Angel One's `quantity` on an NFO order / position row is read and sent: UNITS (a multiple of the lot size) or LOTS (a count of lots).
+    # Angel One's documentation does not state it, so there is NO default: empty keeps every F&O order UNSUPPORTED and an open F&O position
+    # makes the position book unknown (fail closed). Set it only after a supervised capture shows which one the API uses.
+    ANGEL_ONE_FNO_QUANTITY_UNIT: str = ""
 
     # Groww Trading API Child support. Default false = Groww accounts cannot be
     # added, logged in or traded and no request is ever sent to api.groww.in.

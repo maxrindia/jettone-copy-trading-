@@ -400,6 +400,8 @@ def test_nothing_in_the_trading_path_imports_the_instruments_package_except_the_
                                                            "from app.services.instruments import terms"),
         # The Groww F&O segment policy builds the pure CanonicalContract key for a Master's F&O order; it resolves nothing at another broker.
         "app/services/groww/segments.py": ("from app.services.instruments.contracts import make_contract",),
+        # The same for Angel One's F&O rows: the pure canonical contract key of a Master's F&O order; nothing is resolved at another broker.
+        "app/services/angel_one/derivatives.py": ("from app.services.instruments.contracts import make_contract",),
     }
     for sub in ("services/copy_engine", "services/reliability", "services/runtime", "services/alice_blue",
                 "services/groww", "services/angel_one", "services/brokers"):

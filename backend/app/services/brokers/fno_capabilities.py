@@ -48,6 +48,12 @@ FNO_CHILD_CAPABILITIES: Dict[str, FnoChildCapability] = {
         gate=lambda: bool(settings.ZERODHA_FNO_CHILD_ENABLED),
         notes="Built from the documentation; the dump has no freeze quantity and `name` is undocumented for derivatives.",
     ),
+    "angelone": FnoChildCapability(
+        "angelone", "CODE_ONLY", "CODE_ONLY", "CODE_ONLY", "CODE_ONLY", _ALL_TYPES, frozenset({"MIS", "NRML"}),
+        gate=lambda: bool(settings.ANGEL_ONE_FNO_CHILD_ENABLED),
+        notes="Angel One's NFO quantity unit, status vocabulary and position keys are not documented (ANGEL_ONE_FNO_QUANTITY_UNIT has no default); "
+              "the scrip master has no freeze quantity; the response contract must be filled from a supervised capture before any role opens.",
+    ),
 }
 
 

@@ -80,7 +80,7 @@ def test_a_future_cannot_be_resolved_as_an_option_or_with_a_wrong_expiry():
 # ── the other three brokers: explicit, never a silent success ──────────────
 
 # Alice Blue is resolved from its own contract master (tests/test_alice_cross_broker_resolution.py).
-@pytest.mark.parametrize("broker", ["angelone", "dhan"])
+@pytest.mark.parametrize("broker", ["dhan"])
 def test_other_brokers_never_resolve_derivatives_here(broker):
     got = resolve_for_broker(broker, opt(), now=NOW)
     assert got.verdict is R.NOT_SUPPORTED and got.broker_token is None and not got.verified

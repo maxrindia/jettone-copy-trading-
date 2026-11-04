@@ -152,7 +152,7 @@ def _fresh(loaded_at: Optional[datetime], now: datetime, max_age: timedelta) -> 
 
 def resolve_for_broker(broker_id: str, contract: CanonicalContract, *, now: Optional[datetime] = None,
                        max_age: timedelta = MAX_CATALOG_AGE, zerodha_store: Optional[Any] = None,
-                       alice_store: Optional[Any] = None, groww_store: Optional[Any] = None) -> ContractResolution:
+                       alice_store: Optional[Any] = None, groww_store: Optional[Any] = None, angel_store: Optional[Any] = None) -> ContractResolution:
     """Resolve a canonical contract in one broker's own catalog. Pure apart from reading that in-memory catalog. Never raises."""
     now = now or datetime.now(timezone.utc)
     broker = str(broker_id or "").strip().lower()
@@ -164,6 +164,8 @@ def resolve_for_broker(broker_id: str, contract: CanonicalContract, *, now: Opti
             return _resolve_zerodha(contract, now, max_age, zerodha_store)
         if broker == "groww" and contract.kind != "EQ":
             return _resolve_groww(contract, now, max_age, groww_store)
+        if broker == "angelone" and contract.kind != "EQ":
+            return _resolve_angel(contract, now, max_age, angel_store)
         if broker in ("groww", "angelone"):
             if contract.kind != "EQ":
                 return _no(broker, ResolutionVerdict.NOT_SUPPORTED, "this adapter trades equity cash only", contract)
@@ -240,6 +242,29 @@ def _resolve_groww(contract: CanonicalContract, now: datetime, max_age: timedelt
         "groww", ResolutionVerdict.RESOLVED_UNVERIFIED,
         "single exact row in Groww's own instrument master; mapping not evidenced against a real account",
         contract.key, inst.trading_symbol, None, False, inst.lot_size,
+    )
+
+
+def _resolve_angel(contract: CanonicalContract, now: datetime, max_age: timedelta, store: Optional[Any]) -> ContractResolution:
+    """A derivative in Angel One's OWN scrip master, by the contract's terms. Exactly one row (whose symbol agrees with its own fields: see
+    angel_one/instruments.py) or a refusal; the Master broker's symbol or token is never consulted."""
+    if store is None:
+        from app.services.angel_one import instruments as ai
+        store = ai.store
+    if not getattr(store, "derivative_count", 0):
+        return _no("angelone", ResolutionVerdict.CATALOG_NOT_LOADED, "Angel One F&O instruments are not loaded", contract)
+    stale = _fresh(store.snapshot_loaded_at, now, max_age)
+    if stale:
+        return _no("angelone", ResolutionVerdict.STALE, stale, contract)
+    try:
+        inst = store.find_derivative(contract.kind, contract.underlying, contract.expiry, contract.strike)
+    except InstrumentResolutionError as exc:
+        text = str(exc)
+        return _no("angelone", ResolutionVerdict.AMBIGUOUS if "ambiguous" in text else ResolutionVerdict.UNMAPPED, text[:200], contract)
+    return ContractResolution(
+        "angelone", ResolutionVerdict.RESOLVED_UNVERIFIED,
+        "single exact row in Angel One's own scrip master; mapping not evidenced against a real account",
+        contract.key, inst.tradingsymbol, inst.token, False, inst.lot_size,
     )
 
 
